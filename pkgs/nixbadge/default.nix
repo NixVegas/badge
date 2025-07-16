@@ -5,7 +5,7 @@
   writeShellApplication,
   esp-idf,
   target,
-  mkShell
+  mkShell,
 }:
 
 let
@@ -73,7 +73,10 @@ stdenv.mkDerivation (finalAttrs: {
   pname = "nixbadge-${finalAttrs.target}";
   version = "0.1";
 
-  outputs = [ "out" "flash" ];
+  outputs = [
+    "out"
+    "flash"
+  ];
 
   # See $IDF_PATH/examples for many examples.
   src = ../../src;
