@@ -1,0 +1,6 @@
+result*
+.cache
+build
+sdkconfig
+sdkconfig.old
+esp-idf
