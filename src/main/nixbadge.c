@@ -66,32 +66,17 @@ static void gpio_task(void *arg) {
     }
 }
 
+extern void setup_gpios_config();
+
 /**
  * Sets up GPIOs. Starts gpio_task to handle GPIO interrupts.
  */
 static void setup_gpios(void) {
     ESP_LOGI(TAG, "Setting up gpios...");
-    gpio_config_t io_conf_input = {
-        .intr_type = GPIO_INTR_POSEDGE,
-        .pin_bit_mask = GPIO_INPUT_PIN_SEL,
-        .mode = GPIO_MODE_INPUT,
-        .pull_down_en = 1,
-        .pull_up_en = 0,
-    };
-    gpio_config(&io_conf_input);
-
-    gpio_config_t io_conf_output = {
-        .intr_type = GPIO_INTR_DISABLE,
-        .pin_bit_mask = GPIO_OUTPUT_PIN_SEL,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_down_en = 0,
-    .pull_up_en = 0,
-    };
-    gpio_config(&io_conf_output);
+    setup_gpios_config();
 
     gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
     xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 10, NULL);
-    gpio_install_isr_service(0);
     gpio_isr_handler_add(GPIO_INPUT_PIN, gpio_isr_handler, (void*) GPIO_INPUT_PIN);
 }
 
@@ -127,6 +112,8 @@ static void setup_rmt(rmt_channel_handle_t *led_chan, rmt_encoder_handle_t *led_
  */
 static uint8_t led_strip_pixels[EXAMPLE_LED_NUMBERS * 3];
 
+extern void zig_main();
+
 /**
  * Application main function.
  */
@@ -141,6 +128,8 @@ void app_main(void) {
     rmt_transmit_config_t tx_config = {
         .loop_count = 0, // no transfer loop
     };
+
+    zig_main();
 
     float offset = 0;
     while (true) {

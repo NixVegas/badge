@@ -5,6 +5,7 @@
   writeShellApplication,
   esp-idf,
   target,
+  zig,
   mkShell,
 }:
 
@@ -13,6 +14,7 @@ let
     name = "nixbadge-${target}-dev-shell";
     packages = [
       esp-idf
+      zig
     ];
     inherit target;
     shellHook = ''
@@ -80,6 +82,10 @@ stdenv.mkDerivation (finalAttrs: {
 
   # See $IDF_PATH/examples for many examples.
   src = ../../src;
+
+  nativeBuildInputs = [
+    zig
+  ];
 
   buildInputs = [
     esp-idf

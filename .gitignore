@@ -4,3 +4,5 @@ build
 sdkconfig
 sdkconfig.old
 esp-idf
+!src/lib/esp-idf
+.zig-cache
