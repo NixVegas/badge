@@ -26,12 +26,16 @@ add_custom_target(zig_build
     -Doptimize=${ZIG_BUILD_TYPE}
     -Dtarget=${ZIG_TARGET}
     -Dcpu=${TARGET_CPU_MODEL}
+    -Desp-idf-source=$ENV{IDF_PATH}
     -Desp-idf-build=${CMAKE_BINARY_DIR}/esp-idf
     -freference-trace
     --prominent-compile-errors
     --cache-dir ${CMAKE_BINARY_DIR}/zig-cache
     --prefix ${CMAKE_BINARY_DIR}
-    DEPENDS ${CMAKE_BINARY_DIR}/esp-idf/esp_driver_uart/libesp_driver_uart.a ${CMAKE_BINARY_DIR}/esp-idf/esp_system/libesp_system.a
+    DEPENDS
+      ${CMAKE_BINARY_DIR}/esp-idf/esp_driver_uart/libesp_driver_uart.a
+      ${CMAKE_BINARY_DIR}/esp-idf/esp_system/libesp_system.a
+      ${CMAKE_BINARY_DIR}/esp-idf/esp_wifi/libesp_wifi.a
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     BYPRODUCTS ${CMAKE_BINARY_DIR}/lib/libapp_zig.a
     VERBATIM)

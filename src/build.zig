@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) !void {
 
     const optimize = b.standardOptimizeOption(.{});
 
+    const esp_idf_source_path = b.option(std.Build.LazyPath, "esp-idf-source", "Path to the esp-idf source directory") orelse @panic("Missing esp-idf source directory");
     const esp_idf_build_path = b.option(std.Build.LazyPath, "esp-idf-build", "Path to the esp-idf build directory") orelse @panic("Missing esp-idf build directory");
 
     const lib = b.addStaticLibrary(.{
@@ -29,6 +30,7 @@ pub fn build(b: *std.Build) !void {
     lib.root_module.addImport("esp-idf", importIdf(b, .{
         .target = target,
         .optimize = optimize,
+        .source_path = esp_idf_source_path,
         .build_path = esp_idf_build_path,
     }));
 
@@ -38,6 +40,7 @@ pub fn build(b: *std.Build) !void {
 pub fn importIdf(b: *std.Build, options: struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    source_path: std.Build.LazyPath,
     build_path: std.Build.LazyPath,
 }) *std.Build.Module {
     const module = b.createModule(.{
@@ -47,7 +50,14 @@ pub fn importIdf(b: *std.Build, options: struct {
         .link_libc = true,
     });
 
+    var iter = std.mem.splitSequence(u8, b.graph.env_map.get("INCLUDE_DIRS") orelse @panic("Missing INCLUDE_DIRS env"), ";");
+    while (iter.next()) |dir| {
+        module.addIncludePath(.{ .cwd_relative = dir });
+    }
+
     module.addObjectFile(options.build_path.path(b, "esp_driver_uart/libesp_driver_uart.a"));
     module.addObjectFile(options.build_path.path(b, "esp_system/libesp_system.a"));
+    module.addObjectFile(options.build_path.path(b, "esp_wifi/libesp_wifi.a"));
+    module.addObjectFile(options.build_path.path(b, "wpa_supplicant/libwpa_supplicant.a"));
     return module;
 }

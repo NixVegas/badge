@@ -1,7 +1,13 @@
 const std = @import("std");
 
+pub const c = @cImport({
+    @cInclude("esp_mesh.h");
+    @cInclude("esp_wifi.h");
+});
+
 pub const drivers = @import("esp-idf/drivers.zig");
 pub const sys = @import("esp-idf/sys.zig");
+pub const wifi = @import("esp-idf/wifi.zig");
 
 pub const std_options: std.Options = .{
     .logFn = logFn,

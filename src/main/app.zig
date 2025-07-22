@@ -27,5 +27,8 @@ pub export fn setup_gpios_config() callconv(.C) void {
 }
 
 pub export fn zig_main() callconv(.C) void {
+    //esp_idf.wifi.InitConfig.config(&.{
+    //    .wpa_crypto_funcs = esp_idf.wifi.g_wifi_default_wpa_crypto_funcs,
+    //}) catch |err| @panic(@errorName(err));
     log.info("Hello world\n", .{});
 }
