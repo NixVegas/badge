@@ -1,3 +1,4 @@
+const std = @import("std");
 const c = @import("../esp-idf.zig").c;
 const sys = @import("sys.zig");
 
@@ -6,6 +7,37 @@ pub const CryptoFuncs = c.wpa_crypto_funcs_t;
 
 extern const g_wifi_osi_funcs: OsiFuncs;
 pub extern const g_wifi_default_wpa_crypto_funcs: CryptoFuncs;
+
+pub const Addr = extern union {
+    addr: [6]u8,
+    mip: Mip,
+
+    pub const Mip = extern struct {
+        addr: [4]u8,
+        port: u16,
+    };
+
+    pub fn formatAddr(self: *const Addr, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        return try writer.print("{x:02}:{x:02}:{x:02}:{x:02}:{x:02}:{x:02}", .{
+            self.addr[0],
+            self.addr[1],
+            self.addr[2],
+            self.addr[3],
+            self.addr[4],
+            self.addr[5],
+        });
+    }
+
+    pub fn formatMip(self: *const Addr, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        return try writer.print("{d}.{d}.{d}.{d}:{d}", .{
+            self.mip.addr[0],
+            self.mip.addr[1],
+            self.mip.addr[2],
+            self.mip.addr[3],
+            self.mip.port,
+        });
+    }
+};
 
 pub const InitConfig = extern struct {
     osi_funcs: *const OsiFuncs = &g_wifi_osi_funcs,

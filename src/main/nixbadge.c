@@ -156,8 +156,6 @@ void app_main(void) {
 
     nixbadge_mesh_init();
 
-    zig_main();
-
     float offset = 0;
     while (true) {
         for (int led = 0; led < EXAMPLE_LED_NUMBERS; led++) {
