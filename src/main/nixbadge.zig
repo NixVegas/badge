@@ -1,6 +1,6 @@
 const std = @import("std");
 const esp_idf = @import("esp-idf");
-const log = std.log.scoped(.@"nixbadge");
+const log = std.log.scoped(.nixbadge);
 
 pub const std_options = esp_idf.std_options;
 pub const panic = esp_idf.panic;

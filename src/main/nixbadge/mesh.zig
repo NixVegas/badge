@@ -2,7 +2,7 @@ const std = @import("std");
 const esp_idf = @import("esp-idf");
 const proto = @import("../proto.zig");
 const utils = @import("../utils.zig");
-const log = std.log.scoped(.@"nixbadge_mesh");
+const log = std.log.scoped(.nixbadge_mesh);
 
 pub const Client = struct {
     rssi: i8,

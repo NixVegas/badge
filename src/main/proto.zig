@@ -60,7 +60,7 @@ pub const Packet = union(Tag) {
     }
 
     pub fn encode(self: Packet) ![packet_size]u8 {
-        var tmpbuff = [_]u8{0}**(packet_size * 2);
+        var tmpbuff = [_]u8{0} ** (packet_size * 2);
         var fba = std.heap.FixedBufferAllocator.init(&tmpbuff);
 
         var encoder = der.Encoder.init(fba.allocator());
@@ -68,7 +68,7 @@ pub const Packet = union(Tag) {
 
         try encoder.any(self);
 
-        var buff = [_]u8{0}**packet_size;
+        var buff = [_]u8{0} ** packet_size;
         const i: usize = @min(buff.len, encoder.buffer.data.len);
         @memcpy(buff[0..i], encoder.buffer.data[0..i]);
 
