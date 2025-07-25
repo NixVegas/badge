@@ -19,11 +19,13 @@ fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    var buf: [1024]u8 = undefined;
-    sys.logWrite(.fromStd(level), @tagName(scope), std.fmt.bufPrintZ(&buf, format, args) catch unreachable);
+    const buff = std.fmt.allocPrintZ(std.heap.c_allocator, format, args) catch return;
+    defer std.heap.c_allocator.free(buff);
+    sys.logWrite(.fromStd(level), @tagName(scope), buff);
 }
 
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
-    var buf: [1024]u8 = undefined;
-    sys.systemAbort(std.fmt.bufPrintZ(&buf, "PANIC: {s}", .{msg}) catch unreachable);
+    const buff = std.fmt.allocPrintZ(std.heap.c_allocator, "PANIC: {s}", .{msg}) catch unreachable;
+    defer std.heap.c_allocator.free(buff);
+    sys.systemAbort(buff);
 }

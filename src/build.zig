@@ -27,6 +27,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    lib.no_builtin = true;
     lib.root_module.addImport("esp-idf", importIdf(b, .{
         .target = target,
         .optimize = optimize,
