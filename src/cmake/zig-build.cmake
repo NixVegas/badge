@@ -37,9 +37,9 @@ add_custom_target(zig_build
       ${CMAKE_BINARY_DIR}/esp-idf/esp_system/libesp_system.a
       ${CMAKE_BINARY_DIR}/esp-idf/esp_wifi/libesp_wifi.a
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    BYPRODUCTS ${CMAKE_BINARY_DIR}/lib/libapp_zig.a
+    BYPRODUCTS ${CMAKE_BINARY_DIR}/lib/libnixbadge_zig.a
     VERBATIM)
 
-add_prebuilt_library(zig ${CMAKE_BINARY_DIR}/lib/libapp_zig.a)
+add_prebuilt_library(zig ${CMAKE_BINARY_DIR}/lib/libnixbadge_zig.a)
 add_dependencies(${COMPONENT_LIB} zig_build)
-target_link_libraries(${COMPONENT_LIB} PRIVATE ${CMAKE_BINARY_DIR}/lib/libapp_zig.a)
+target_link_libraries(${COMPONENT_LIB} PRIVATE ${CMAKE_BINARY_DIR}/lib/libnixbadge_zig.a)

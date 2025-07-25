@@ -1,1 +1,2 @@
-pub extern fn getTimestamp() i64;
+extern fn nixbadge_ts() i64;
+pub const getTimestamp = nixbadge_ts;

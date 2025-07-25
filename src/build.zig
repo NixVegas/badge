@@ -22,8 +22,8 @@ pub fn build(b: *std.Build) !void {
     const esp_idf_build_path = b.option(std.Build.LazyPath, "esp-idf-build", "Path to the esp-idf build directory") orelse @panic("Missing esp-idf build directory");
 
     const lib = b.addStaticLibrary(.{
-        .name = "app_zig",
-        .root_source_file = b.path("main/app.zig"),
+        .name = "nixbadge_zig",
+        .root_source_file = b.path("main/nixbadge.zig"),
         .target = target,
         .optimize = optimize,
     });

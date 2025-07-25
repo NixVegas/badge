@@ -67,9 +67,9 @@ var packet_queue_rx = std.RingBuffer{
 
 var peer_map = std.AutoHashMap([6]u8, Client).init(std.heap.c_allocator);
 
-extern fn owo_send_packet(addr: ?*const Addr, kind: u8) esp_idf.sys.Error;
+extern fn nixbadge_mesh_send_packet(addr: ?*const Addr, kind: u8) esp_idf.sys.Error;
 
-pub export fn write_mesh_packet(size_ptr: *u16, kind: u8) [*]const u8 {
+pub export fn nixbadge_mesh_create_packet(kind: u8, size_ptr: *u16) [*]const u8 {
     size_ptr.* = 0;
 
     const packet = proto.Packet.init(@enumFromInt(kind));
@@ -87,7 +87,7 @@ pub export fn write_mesh_packet(size_ptr: *u16, kind: u8) [*]const u8 {
     return packet_queue_tx.data[data_start..data_end].ptr;
 }
 
-pub export fn prepare_read_mesh_packet(size_ptr: *u16) [*]const u8 {
+pub export fn nixbadge_mesh_alloc_read(size_ptr: *u16) [*]const u8 {
     size_ptr.* = proto.packet_size;
 
     if (packet_queue_rx.len() + proto.packet_size >= packet_queue_rx_buff.len) {
@@ -101,7 +101,7 @@ pub export fn prepare_read_mesh_packet(size_ptr: *u16) [*]const u8 {
     return packet_queue_rx.data[data_start..data_end].ptr;
 }
 
-pub export fn read_mesh_packet(buff: [*]const u8, size: u16, from: Addr) void {
+pub export fn nixbadge_mesh_read_packet(buff: [*]const u8, size: u16, from: Addr) void {
     const packet = proto.Packet.decode(buff[0..size]) catch |err| return log.err("Failed to decode {any} from {}: {}\n", .{
         buff[0..size],
         std.fmt.Formatter(Addr.formatAddr){ .data = &from },
@@ -119,7 +119,7 @@ pub export fn read_mesh_packet(buff: [*]const u8, size: u16, from: Addr) void {
 
     switch (packet) {
         .req_ping => {
-            owo_send_packet(&from, @intFromEnum(proto.Tag.ping)).throw() catch |err| log.err("Failed to send ping to {}: {}", .{
+            nixbadge_mesh_send_packet(&from, @intFromEnum(proto.Tag.ping)).throw() catch |err| log.err("Failed to send ping to {}: {}", .{
                 std.fmt.Formatter(Addr.formatAddr){ .data = &from },
                 err,
             });
@@ -165,11 +165,11 @@ pub export fn zig_main() callconv(.C) void {
     log.info("Hello world\n", .{});
 }
 
-pub export fn clear_peers() void {
+pub export fn nixbadge_mesh_clear_peers() void {
     peer_map.clearAndFree();
 }
 
-pub export fn push_peer(addr: Addr, rssi: i8) void {
+pub export fn nixbadge_mesh_push_peer(addr: Addr, rssi: i8) void {
     peer_map.put(addr.addr, .{
         .rssi = rssi,
     }) catch |err| @panic(@errorName(err));
