@@ -35,7 +35,7 @@
 #define EXAMPLE_ANGLE_INC_FRAME     0.02
 #define EXAMPLE_ANGLE_INC_LED       0.3
 
-static const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
+static const uint8_t MESH_ID[6] = { 0x74, 0x6F, 0x6D, 0x62, 0x6F, 0x79};
 
 #define CONFIG_MESH_AP_CONNECTIONS 10
 #define CONFIG_MESH_ROUTE_TABLE_SIZE 12
@@ -45,11 +45,7 @@ static bool is_mesh_connected = false;
 static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
-static mesh_addr_t peer_addrs[CONFIG_MESH_ROUTE_TABLE_SIZE];
-static int8_t peer_rssi[CONFIG_MESH_ROUTE_TABLE_SIZE];
-static int64_t peer_delay[CONFIG_MESH_ROUTE_TABLE_SIZE];
 static int64_t last_ping_timestamp = 0;
-static int peer_count = 0;
 
 static char* router_ssid = NULL;
 static char* router_passwd = NULL;
@@ -96,7 +92,7 @@ static void gpio_task(void *arg) {
 extern void setup_gpios_config();
 extern uint8_t* write_mesh_packet(uint16_t*, uint8_t);
 extern uint8_t* prepare_read_mesh_packet(uint16_t*);
-extern void read_mesh_packet(uint8_t*, uint16_t, uint8_t*, int8_t, int64_t*);
+extern void read_mesh_packet(uint8_t*, uint16_t, mesh_addr_t);
 
 int64_t getTimestamp() {
     struct timeval tv;
@@ -129,17 +125,7 @@ esp_err_t owo_recv_packet(int timeout_ms) {
         return err;
     }
 
-    int64_t* delay_ptr = NULL;
-    int8_t rssi = 0;
-    for (int i = 0; i < peer_count; i++) {
-        if (memcmp(&peer_addrs[i], &from, sizeof (uint8_t[6])) == 0) {
-            rssi = peer_rssi[i];
-            delay_ptr = &peer_delay[i];
-            break;
-        }
-    }
-
-    read_mesh_packet(data.data, data.size, (uint8_t*)&from.addr, rssi, delay_ptr);
+    read_mesh_packet(data.data, data.size, from);
     return ESP_OK;
 }
 
@@ -280,7 +266,49 @@ esp_err_t esp_mesh_comm_p2p_start(void) {
 }
 
 void mesh_connected_indicator(int i) {
-  ESP_LOGI(TAG, "Mesh connected %d", i);
+    ESP_LOGI(TAG, "Mesh connected %d", i);
+}
+
+extern void clear_peers();
+extern void push_peer(mesh_addr_t addr, int8_t rssi);
+
+void mesh_scan_done_handler(int num) {
+    mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
+    int route_table_size = 0;
+
+    int ie_len = 0;
+    mesh_assoc_t assoc;
+    wifi_ap_record_t record;
+
+    clear_peers();
+
+    ESP_ERROR_CHECK(esp_mesh_get_routing_table((mesh_addr_t *) &route_table,
+                    CONFIG_MESH_ROUTE_TABLE_SIZE * 6, &route_table_size));
+
+    for (int i = 0; i < num; i++) {
+        esp_mesh_scan_get_ap_ie_len(&ie_len);
+        esp_mesh_scan_get_ap_record(&record, &assoc);
+
+        if (i == sizeof(assoc)) {
+            for (int x = 0; x < route_table_size; x++) {
+                const mesh_addr_t* addr = &route_table[x];
+                if (memcmp(&addr->addr, record.bssid, sizeof (uint8_t[6])) == 0) {
+                    push_peer(*addr, record.rssi);
+                    break;
+                }
+            }
+        }
+    }
+
+    esp_mesh_flush_scan_result();
+}
+
+void rescan() {
+    wifi_scan_config_t scan_config = { 0 };
+    esp_wifi_scan_stop();
+    scan_config.show_hidden = 1;
+    scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
+    esp_wifi_scan_start(&scan_config, 0);
 }
 
 void mesh_event_handler(void *arg, esp_event_base_t event_base,
@@ -295,6 +323,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_STARTED>ID:"MACSTR"", MAC2STR(id.addr));
         is_mesh_connected = false;
         mesh_layer = esp_mesh_get_layer();
+        rescan();
     }
     break;
     case MESH_EVENT_STOPPED: {
@@ -308,6 +337,8 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_CHILD_CONNECTED>aid:%d, "MACSTR"",
                  child_connected->aid,
                  MAC2STR(child_connected->mac));
+
+        rescan();
     }
     break;
     case MESH_EVENT_CHILD_DISCONNECTED: {
@@ -315,6 +346,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_CHILD_DISCONNECTED>aid:%d, "MACSTR"",
                  child_disconnected->aid,
                  MAC2STR(child_disconnected->mac));
+        rescan();
     }
     break;
     case MESH_EVENT_ROUTING_TABLE_ADD: {
@@ -322,6 +354,8 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGW(MESH_TAG, "<MESH_EVENT_ROUTING_TABLE_ADD>add %d, new:%d",
                  routing_table->rt_size_change,
                  routing_table->rt_size_new);
+
+        rescan();
     }
     break;
     case MESH_EVENT_ROUTING_TABLE_REMOVE: {
@@ -400,7 +434,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         mesh_event_scan_done_t *scan_done = (mesh_event_scan_done_t *)event_data;
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_SCAN_DONE>number:%d",
                  scan_done->number);
-        //mesh_scan_done_handler(scan_done->number);
+        mesh_scan_done_handler(scan_done->number);
     }
     break;
     default:

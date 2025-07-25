@@ -38,6 +38,17 @@ pub const Addr = extern union {
     }
 };
 
+pub const Client = struct {
+    rssi: i8,
+    last_ping: i64 = 0,
+    ping_delay: i64 = 0,
+
+    pub fn qos(self: *const Client) f32 {
+        if (self.ping_delay == 0.0) return 0.0;
+        return @as(f32, @floatFromInt(self.rssi)) / @as(f32, @floatFromInt(self.ping_delay));
+    }
+};
+
 const max_packets = 50;
 
 var packet_queue_tx_buff = [_]u8{0} ** (max_packets * proto.packet_size);
@@ -53,6 +64,8 @@ var packet_queue_rx = std.RingBuffer{
     .write_index = 0,
     .read_index = 0,
 };
+
+var peer_map = std.AutoHashMap([6]u8, Client).init(std.heap.c_allocator);
 
 extern fn owo_send_packet(addr: ?*const Addr, kind: u8) esp_idf.sys.Error;
 
@@ -88,18 +101,20 @@ pub export fn prepare_read_mesh_packet(size_ptr: *u16) [*]const u8 {
     return packet_queue_rx.data[data_start..data_end].ptr;
 }
 
-pub export fn read_mesh_packet(buff: [*]const u8, size: u16, addr: *const [6]u8, rssi: i8, delay_ptr: ?*i64) void {
-    const from = Addr{ .addr = addr.* };
+pub export fn read_mesh_packet(buff: [*]const u8, size: u16, from: Addr) void {
     const packet = proto.Packet.decode(buff[0..size]) catch |err| return log.err("Failed to decode {any} from {}: {}\n", .{
         buff[0..size],
         std.fmt.Formatter(Addr.formatAddr){ .data = &from },
         err,
     });
 
-    log.info("Received {} {any} {}\n", .{
+    const peer_client = peer_map.getPtr(from.addr);
+
+    log.info("Received {} {any} {?} {?}\n", .{
         packet,
         std.fmt.Formatter(Addr.formatAddr){ .data = &from },
-        rssi,
+        peer_client,
+        if (peer_client) |c| c.qos() else null,
     });
 
     switch (packet) {
@@ -113,7 +128,11 @@ pub export fn read_mesh_packet(buff: [*]const u8, size: u16, addr: *const [6]u8,
             const start = p.timestamp;
             const end = utils.getTimestamp();
             const delta = end - start;
-            if (delay_ptr) |d| d.* = delta;
+
+            if (peer_client) |c| {
+                c.last_ping = end;
+                c.ping_delay = delta;
+            }
         },
     }
 }
@@ -144,4 +163,14 @@ pub export fn zig_main() callconv(.C) void {
     //    .wpa_crypto_funcs = esp_idf.wifi.g_wifi_default_wpa_crypto_funcs,
     //}) catch |err| @panic(@errorName(err));
     log.info("Hello world\n", .{});
+}
+
+pub export fn clear_peers() void {
+    peer_map.clearAndFree();
+}
+
+pub export fn push_peer(addr: Addr, rssi: i8) void {
+    peer_map.put(addr.addr, .{
+        .rssi = rssi,
+    }) catch |err| @panic(@errorName(err));
 }
