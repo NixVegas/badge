@@ -8,6 +8,14 @@ pub const CryptoFuncs = c.wpa_crypto_funcs_t;
 extern const g_wifi_osi_funcs: OsiFuncs;
 pub extern const g_wifi_default_wpa_crypto_funcs: CryptoFuncs;
 
+extern fn esp_wifi_sta_get_rssi(*c_int) sys.Error;
+
+pub fn getStaRssi() !c_int {
+    var rssi: c_int = 0;
+    try esp_wifi_sta_get_rssi(&rssi).throw();
+    return rssi;
+}
+
 pub const Addr = extern union {
     addr: [6]u8,
     mip: Mip,

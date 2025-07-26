@@ -1,9 +1,10 @@
 const std = @import("std");
+const esp_idf = @import("esp-idf");
 const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
 const der = std.crypto.asn1.der;
 
-pub const packet_size = 12;
+pub const packet_size = 18;
 
 pub const Tag = enum(u8) {
     ping,
@@ -11,16 +12,8 @@ pub const Tag = enum(u8) {
 };
 
 pub const Packet = union(Tag) {
-    ping: Ping,
+    ping: void,
     req_ping: void,
-
-    pub const Ping = struct {
-        timestamp: i64,
-
-        pub fn init() Ping {
-            return .{ .timestamp = utils.getTimestamp() };
-        }
-    };
 
     pub fn init(tag: std.meta.Tag(Packet)) Packet {
         inline for (std.meta.fields(Packet)) |f| {
@@ -52,8 +45,7 @@ pub const Packet = union(Tag) {
 
     pub fn encodeDer(self: Packet, encoder: *der.Encoder) !void {
         switch (self) {
-            .req_ping => {},
-            inline else => |p| try encoder.any(p),
+            .req_ping, .ping => {},
         }
 
         try encoder.any(std.meta.activeTag(self));

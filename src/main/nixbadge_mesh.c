@@ -20,7 +20,7 @@ static bool is_mesh_connected = false;
 static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
-static int64_t last_ping_timestamp = 0;
+int64_t last_ping_timestamp = 0;
 
 static char *router_ssid = NULL;
 static char *router_passwd = NULL;
@@ -90,7 +90,7 @@ static void esp_mesh_p2p_tx_main(void *arg) {
 
     ESP_LOGI(TAG, "Time since last ping: %" PRIi64, time_delta);
 
-    if ((time_delta / 1000 % 30) == 0) {
+    if ((time_delta / 1000 % 15) == 0) {
       send_count++;
       for (int i = 0; i < route_table_size; i++) {
         ESP_LOGW(TAG, "" MACSTR ", %d", MAC2STR(route_table[i].addr), 1);

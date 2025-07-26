@@ -54,17 +54,17 @@ void app_main(void) {
   nixbadge_leds_init();
 
   float offset = 0;
+  float old_ping = 0;
   while (true) {
     nixbadge_leds_pulse(offset);
     vTaskDelay(pdMS_TO_TICKS(EXAMPLE_FRAME_DURATION_MS));
 
     float avg_ping = nixbadge_mesh_avg_ping();
-    ESP_LOGI(TAG, "Average ping: %f", avg_ping);
+    if (old_ping != avg_ping) ESP_LOGI(TAG, "Average ping: %f", avg_ping);
+
+    old_ping = avg_ping;
 
     // Increase offset to shift pattern
-    offset += avg_ping / EXAMPLE_FRAME_DURATION_MS;
-    if (offset > 2 * M_PI) {
-      offset -= 2 * M_PI;
-    }
+    offset += avg_ping;
   }
 }

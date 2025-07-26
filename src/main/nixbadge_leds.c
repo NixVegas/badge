@@ -110,9 +110,9 @@ void nixbadge_leds_pulse(float offset) {
     // hue-like effect.
     float angle = offset + (led * EXAMPLE_ANGLE_INC_LED);
     const float color_off = (M_PI * 2) / 3;
-    led_strip_pixels[led * 3 + 0] = sin(angle + color_off * 0) * 127 + 128;
-    led_strip_pixels[led * 3 + 1] = sin(angle + color_off * 1) * 127 + 128;
-    led_strip_pixels[led * 3 + 2] = sin(angle + color_off * 2) * 117 + 128;
+    led_strip_pixels[led * 3 + 0] = sinf(angle + color_off * 0) * 127 + 128;
+    led_strip_pixels[led * 3 + 1] = sinf(angle + color_off * 1) * 127 + 128;
+    led_strip_pixels[led * 3 + 2] = sinf(angle + color_off * 2) * 117 + 128;
   }
 
   // Flush RGB values to LEDs

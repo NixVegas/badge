@@ -4,8 +4,10 @@ const proto = @import("../proto.zig");
 const utils = @import("../utils.zig");
 const log = std.log.scoped(.nixbadge_mesh);
 
+extern var last_ping_timestamp: i64;
+
 pub const Client = struct {
-    last_ping: i64 = 0,
+    last_ping_timestamp: i64 = 0,
     ping_delay: i64 = 0,
 };
 
@@ -36,6 +38,8 @@ pub fn sendPacket(addr: ?*const esp_idf.wifi.Addr, tag: proto.Tag) !void {
 pub fn createPacket(tag: proto.Tag) ![]const u8 {
     const packet = proto.Packet.init(tag);
     const buff = try packet.encode();
+
+    log.info("Sending {} {any}\n", .{packet, buff});
 
     if (packet_queue_tx.len() + buff.len >= packet_queue_tx_buff.len) {
         packet_queue_tx.write_index = 0;
@@ -76,13 +80,13 @@ pub fn readPacket(buff: []const u8, from: esp_idf.wifi.Addr) !void {
 
     switch (packet) {
         .req_ping => try sendPacket(&from, .ping),
-        .ping => |p| {
-            const start = p.timestamp;
-            const end = utils.getTimestamp();
-            const delta = end - start;
-
-            peer_client.last_ping = end;
-            peer_client.ping_delay = delta;
+        .ping => {
+            const now = utils.getTimestamp();
+            const delta = now - peer_client.last_ping_timestamp;
+            if (delta > 0) {
+                peer_client.last_ping_timestamp = now;
+                peer_client.ping_delay = delta;
+            }
         },
     }
 }
@@ -92,13 +96,15 @@ pub fn removePeer(addr: esp_idf.wifi.Addr) void {
 }
 
 pub fn avgPing() f32 {
+    const ping_delta = utils.getTimestamp() - last_ping_timestamp;
     var value: f32 = 0;
-    var count: usize = 0;
+    var count: f32 = 0;
     var iter = peer_map.valueIterator();
     while (iter.next()) |client| {
-        value += @floatFromInt(@abs(client.ping_delay));
-        count += 1;
+        if (client.last_ping_timestamp - ping_delta <= last_ping_timestamp) {
+            value += @floatFromInt(client.ping_delay);
+            count += 1;
+        }
     }
-    if (count == 0) return 0;
-    return value / @as(f32, @floatFromInt(count));
+    return if (value != 0) count / @log10(value) else 0;
 }
