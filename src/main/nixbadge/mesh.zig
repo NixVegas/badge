@@ -5,14 +5,8 @@ const utils = @import("../utils.zig");
 const log = std.log.scoped(.nixbadge_mesh);
 
 pub const Client = struct {
-    rssi: i8,
     last_ping: i64 = 0,
     ping_delay: i64 = 0,
-
-    pub fn qos(self: *const Client) f32 {
-        if (self.ping_delay == 0.0) return 0.0;
-        return @as(f32, @floatFromInt(self.rssi)) / @as(f32, @floatFromInt(self.ping_delay));
-    }
 };
 
 const max_packets = 50;
@@ -68,13 +62,16 @@ pub fn allocRead() []const u8 {
 pub fn readPacket(buff: []const u8, from: esp_idf.wifi.Addr) !void {
     const packet = try proto.Packet.decode(buff);
 
-    const peer_client = peer_map.getPtr(from.addr);
+    const peer_client = blk: {
+        const r = try peer_map.getOrPut(from.addr);
+        if (!r.found_existing) r.value_ptr.* = .{};
+        break :blk r.value_ptr;
+    };
 
-    log.info("Received {} {any} {?} {?}\n", .{
+    log.info("Received {} {any} {}\n", .{
         packet,
         std.fmt.Formatter(esp_idf.wifi.Addr.formatAddr){ .data = &from },
         peer_client,
-        if (peer_client) |c| c.qos() else null,
     });
 
     switch (packet) {
@@ -84,18 +81,24 @@ pub fn readPacket(buff: []const u8, from: esp_idf.wifi.Addr) !void {
             const end = utils.getTimestamp();
             const delta = end - start;
 
-            if (peer_client) |c| {
-                c.last_ping = end;
-                c.ping_delay = delta;
-            }
+            peer_client.last_ping = end;
+            peer_client.ping_delay = delta;
         },
     }
 }
 
-pub fn clearPeers() void {
-    peer_map.clearAndFree();
+pub fn removePeer(addr: esp_idf.wifi.Addr) void {
+    _ = peer_map.remove(addr.addr);
 }
 
-pub fn pushPeer(addr: esp_idf.wifi.Addr, rssi: i8) !void {
-    try peer_map.put(addr.addr, .{ .rssi = rssi });
+pub fn avgPing() f32 {
+    var value: f32 = 0;
+    var count: usize = 0;
+    var iter = peer_map.valueIterator();
+    while (iter.next()) |client| {
+        value += @floatFromInt(client.ping_delay);
+        count += 1;
+    }
+    if (count == 0) return 0;
+    return value / @as(f32, @floatFromInt(count));
 }

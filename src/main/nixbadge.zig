@@ -28,14 +28,14 @@ export fn nixbadge_mesh_read_packet(buff: [*]const u8, size: u16, from: esp_idf.
     });
 }
 
-export fn nixbadge_mesh_clear_peers() void {
-    mesh.clearPeers();
-}
-
-export fn nixbadge_mesh_push_peer(addr: esp_idf.wifi.Addr, rssi: i8) void {
-    mesh.pushPeer(addr, rssi) catch |err| @panic(@errorName(err));
-}
-
-export fn nixbadge_leds_config_gpios() callconv(.C) void {
+export fn nixbadge_leds_config_gpios() void {
     leds.configGpios() catch |err| @panic(@errorName(err));
+}
+
+export fn nixbadge_mesh_remove_peer(addr: esp_idf.wifi.Addr) void {
+    mesh.removePeer(addr);
+}
+
+export fn nixbadge_mesh_avg_ping() f32 {
+    return mesh.avgPing();
 }

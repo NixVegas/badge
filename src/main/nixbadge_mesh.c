@@ -31,9 +31,7 @@ extern uint8_t *nixbadge_mesh_create_packet(uint8_t, uint16_t *);
 
 extern void nixbadge_mesh_read_packet(uint8_t *, uint16_t, mesh_addr_t);
 extern uint8_t *nixbadge_mesh_alloc_read(uint16_t *);
-
-extern void nixbadge_mesh_clear_peers();
-extern void nixbadge_mesh_push_peer(mesh_addr_t, int8_t);
+extern void nixbadge_mesh_remove_peer(mesh_addr_t);
 
 /* C functions */
 
@@ -165,46 +163,6 @@ static void mesh_connected_indicator(int i) {
   ESP_LOGI(TAG, "Mesh connected %d", i);
 }
 
-static void mesh_scan_done_handler(int num) {
-  mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
-  int route_table_size = 0;
-
-  int ie_len = 0;
-  mesh_assoc_t assoc;
-  wifi_ap_record_t record;
-
-  nixbadge_mesh_clear_peers();
-
-  ESP_ERROR_CHECK(esp_mesh_get_routing_table((mesh_addr_t *)&route_table,
-                                             CONFIG_MESH_ROUTE_TABLE_SIZE * 6,
-                                             &route_table_size));
-
-  for (int i = 0; i < num; i++) {
-    esp_mesh_scan_get_ap_ie_len(&ie_len);
-    esp_mesh_scan_get_ap_record(&record, &assoc);
-
-    if (i == sizeof(assoc)) {
-      for (int x = 0; x < route_table_size; x++) {
-        const mesh_addr_t *addr = &route_table[x];
-        if (memcmp(&addr->addr, record.bssid, sizeof(uint8_t[6])) == 0) {
-          nixbadge_mesh_push_peer(*addr, record.rssi);
-          break;
-        }
-      }
-    }
-  }
-
-  esp_mesh_flush_scan_result();
-}
-
-static void mesh_peer_rescan() {
-  wifi_scan_config_t scan_config = {0};
-  esp_wifi_scan_stop();
-  scan_config.show_hidden = 1;
-  scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
-  esp_wifi_scan_start(&scan_config, 0);
-}
-
 static void mesh_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
   mesh_addr_t id = {
@@ -218,7 +176,6 @@ static void mesh_event_handler(void *arg, esp_event_base_t event_base,
       ESP_LOGI(TAG, "<MESH_EVENT_STARTED>ID:" MACSTR "", MAC2STR(id.addr));
       is_mesh_connected = false;
       mesh_layer = esp_mesh_get_layer();
-      mesh_peer_rescan();
     } break;
     case MESH_EVENT_STOPPED: {
       ESP_LOGI(TAG, "<MESH_EVENT_STOPPED>");
@@ -230,15 +187,15 @@ static void mesh_event_handler(void *arg, esp_event_base_t event_base,
           (mesh_event_child_connected_t *)event_data;
       ESP_LOGI(TAG, "<MESH_EVENT_CHILD_CONNECTED>aid:%d, " MACSTR "",
                child_connected->aid, MAC2STR(child_connected->mac));
-
-      mesh_peer_rescan();
     } break;
     case MESH_EVENT_CHILD_DISCONNECTED: {
       mesh_event_child_disconnected_t *child_disconnected =
           (mesh_event_child_disconnected_t *)event_data;
       ESP_LOGI(TAG, "<MESH_EVENT_CHILD_DISCONNECTED>aid:%d, " MACSTR "",
                child_disconnected->aid, MAC2STR(child_disconnected->mac));
-      mesh_peer_rescan();
+      mesh_addr_t addr;
+      memcpy(&addr.addr, &child_disconnected->mac, sizeof (uint8_t[6]));
+      nixbadge_mesh_remove_peer(addr);
     } break;
     case MESH_EVENT_ROUTING_TABLE_ADD: {
       mesh_event_routing_table_change_t *routing_table =
@@ -246,7 +203,6 @@ static void mesh_event_handler(void *arg, esp_event_base_t event_base,
       ESP_LOGW(TAG, "<MESH_EVENT_ROUTING_TABLE_ADD>add %d, new:%d",
                routing_table->rt_size_change, routing_table->rt_size_new);
 
-      mesh_peer_rescan();
     } break;
     case MESH_EVENT_ROUTING_TABLE_REMOVE: {
       mesh_event_routing_table_change_t *routing_table =
@@ -325,7 +281,6 @@ static void mesh_event_handler(void *arg, esp_event_base_t event_base,
     case MESH_EVENT_SCAN_DONE: {
       mesh_event_scan_done_t *scan_done = (mesh_event_scan_done_t *)event_data;
       ESP_LOGI(TAG, "<MESH_EVENT_SCAN_DONE>number:%d", scan_done->number);
-      mesh_scan_done_handler(scan_done->number);
     } break;
     default:
       ESP_LOGD(TAG, "event id:%" PRId32 "", event_id);

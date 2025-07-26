@@ -77,7 +77,6 @@ pub const Packet = union(Tag) {
 
     pub fn decode(buff: []const u8) !Packet {
         var decoder = der.Decoder{ .bytes = buff };
-        std.log.info("{!}\n", .{std.crypto.asn1.Element.decode(buff, 0)});
         return try decoder.any(Packet);
     }
 };
