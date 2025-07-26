@@ -96,7 +96,7 @@ pub fn avgPing() f32 {
     var count: usize = 0;
     var iter = peer_map.valueIterator();
     while (iter.next()) |client| {
-        value += @floatFromInt(client.ping_delay);
+        value += @floatFromInt(@abs(client.ping_delay));
         count += 1;
     }
     if (count == 0) return 0;
