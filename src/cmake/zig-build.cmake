@@ -17,6 +17,14 @@ else()
     set(ZIG_BUILD_TYPE "ReleaseSafe")
 endif()
 
+if(CONFIG_BADGE_HW_REV_0_5 STREQUAL "y")
+    set(BOARD_REV "0.5")
+elseif(CONFIG_BADGE_HW_REV_1_0 STREQUAL "y")
+    set(BOARD_REV "1.0")
+else()
+    message(FATAL_ERROR "Unrecognized hardware revision configured")
+endif()
+
 set(include_dirs $<TARGET_PROPERTY:${COMPONENT_LIB},INCLUDE_DIRECTORIES> ${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES})
 add_custom_target(zig_build
     COMMAND ${CMAKE_COMMAND} -E env
@@ -28,6 +36,7 @@ add_custom_target(zig_build
     -Dcpu=${TARGET_CPU_MODEL}
     -Desp-idf-source=$ENV{IDF_PATH}
     -Desp-idf-build=${CMAKE_BINARY_DIR}/esp-idf
+    -Dboard-rev=${BOARD_REV}
     -freference-trace
     --prominent-compile-errors
     --cache-dir ${CMAKE_BINARY_DIR}/zig-cache

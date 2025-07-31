@@ -1,0 +1,25 @@
+menu "NixBadge Configuration"
+  choice BADGE_HW_REV
+    prompt "Hardware revision"
+    default BADGE_HW_REV_0_5
+    help
+      Select the hardware revision to target
+
+    config BADGE_HW_REV_0_5
+      bool "0_5"
+      prompt "Revision 0.5"
+
+    config BADGE_HW_REV_1_0
+      bool "1_0"
+      prompt "Revision 1.0"
+      select BADGE_ENABLE_SDCARD
+  endchoice
+
+  config BADGE_ENABLE_SDCARD
+    prompt "Enable sdcard"
+    bool "ENABLE_SDCARD"
+    default n
+    depends on !BADGE_HW_REV_0_5
+    help
+      Enables the sdcard to be available for local cache.
+endmenu

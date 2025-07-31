@@ -10,6 +10,11 @@ const targets = &[_]std.Target.Query{
     },
 };
 
+const Revision = enum {
+    @"0.5",
+    @"1.0",
+};
+
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{
         .whitelist = targets,
@@ -18,22 +23,38 @@ pub fn build(b: *std.Build) !void {
 
     const optimize = b.standardOptimizeOption(.{});
 
+    const board_rev = b.option(Revision, "board-rev", "Hardware board revision") orelse .@"0.5";
+
     const esp_idf_source_path = b.option(std.Build.LazyPath, "esp-idf-source", "Path to the esp-idf source directory") orelse @panic("Missing esp-idf source directory");
     const esp_idf_build_path = b.option(std.Build.LazyPath, "esp-idf-build", "Path to the esp-idf build directory") orelse @panic("Missing esp-idf build directory");
 
+    const options = b.addOptions();
+    options.addOption(Revision, "board_rev", board_rev);
+
     const lib = b.addStaticLibrary(.{
         .name = "nixbadge_zig",
-        .root_source_file = b.path("main/nixbadge.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    lib.no_builtin = true;
-    lib.root_module.addImport("esp-idf", importIdf(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("main/nixbadge.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{
+                    .name = "esp-idf",
+                    .module = importIdf(b, .{
         .target = target,
         .optimize = optimize,
         .source_path = esp_idf_source_path,
         .build_path = esp_idf_build_path,
-    }));
+    }),
+                },
+                .{
+                    .name = "options",
+                    .module = options.createModule(),
+                },
+            },
+        }),
+    });
+    lib.no_builtin = true;
 
     b.installArtifact(lib);
 }
