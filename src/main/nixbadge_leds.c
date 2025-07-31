@@ -4,10 +4,10 @@
 
 #include "driver/gpio.h"
 #include "driver/rmt_tx.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "esp_log.h"
 #include "led_strip_encoder.h"
 
 #define GPIO_INPUT_PIN 15

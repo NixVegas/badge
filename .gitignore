@@ -8,3 +8,6 @@ esp-idf
 .zig-cache
 nvs.csv
 nvs.bin
+src/idf
+managed_components
+cache.pem

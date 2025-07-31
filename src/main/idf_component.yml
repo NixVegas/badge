@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.0"
+  espressif/mesh_lite: =*
+  espressif/iot_bridge: '*'

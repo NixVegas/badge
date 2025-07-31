@@ -18,8 +18,14 @@ let
     ];
     inherit target;
     shellHook = ''
-      export IDF_COMPONENT_MANAGER=0
       cd src
+
+      rm -rf idf
+      cp -a --no-preserve=ownership $IDF_PATH idf
+      chmod -R u+w idf
+
+      export IDF_PATH=$(readlink -e idf)
+
       if [ ! -f sdkconfig ]; then
         idf.py set-target $target
       fi

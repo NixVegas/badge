@@ -13,8 +13,10 @@
 #include "esp_mesh.h"
 #include "esp_mesh_internal.h"
 #include "esp_wifi.h"
+#include "nixbadge_http.h"
 #include "nixbadge_leds.h"
 #include "nixbadge_mesh.h"
+#include "nixbadge_utils.h"
 #include "nvs_flash.h"
 
 #define EXAMPLE_ANGLE_INC_FRAME 0.02
@@ -35,6 +37,8 @@ void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
  * Application main function.
  */
 void app_main(void) {
+  ESP_LOGI(TAG, "Hello world %llu", nixbadge_timestamp_now());
+
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
       ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -48,7 +52,13 @@ void app_main(void) {
   ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                              &ip_event_handler, NULL));
 
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+  ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
+
   nixbadge_mesh_init();
+  nixbadge_http_init();
 
   ESP_LOGI(TAG, "Start LED rainbow chase");
   nixbadge_leds_init();

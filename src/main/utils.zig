@@ -1,2 +1,2 @@
-extern fn nixbadge_ts() i64;
-pub const getTimestamp = nixbadge_ts;
+extern fn nixbadge_timestamp_now() callconv(.C) i64;
+pub const getTimestamp = nixbadge_timestamp_now;
