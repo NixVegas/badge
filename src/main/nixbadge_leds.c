@@ -9,6 +9,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "led_strip_encoder.h"
+#include "nixbadge_mesh.h"
 
 #ifdef CONFIG_BADGE_HW_REV_0_5
 #define GPIO_INPUT_PIN 15
@@ -71,6 +72,10 @@ static void gpio_task(void *arg) {
       ESP_LOGI(TAG, "GPIO[%" PRIu32 "] intr, val: %d", io_num,
                gpio_get_level(io_num));
       gpio_set_level(GPIO_OUTPUT_PIN, cnt++ % 2);
+
+      if (nixbadge_has_mesh()) {
+        ESP_LOGI(TAG, "Requesting mesh ping: %d", nixbadge_mesh_broadcast(0));
+      }
     }
   }
 }

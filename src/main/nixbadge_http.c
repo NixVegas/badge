@@ -1,13 +1,14 @@
 #include "nixbadge_http.h"
-#include "nixbadge_mesh.h"
 
-#include <esp_mesh_lite.h>
 #include <esp_http_client.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
+#include <esp_mesh_lite.h>
 #include <esp_tls.h>
 #include <nvs_flash.h>
 #include <string.h>
+
+#include "nixbadge_mesh.h"
 
 static const char TAG[] = "nixbadge_http";
 
@@ -55,14 +56,13 @@ static char* get_cache_host() {
   uint8_t cache_p2p = 1;
   ESP_ERROR_CHECK(nvs_get_u8(flashcfg_handle, "cache_p2p", &cache_p2p));
   if (esp_mesh_lite_get_level() == ROOT || cache_p2p) {
-
     size_t cache_store_len;
     ESP_ERROR_CHECK(
-      nvs_get_str(flashcfg_handle, "cache_upstream", NULL, &cache_store_len));
+        nvs_get_str(flashcfg_handle, "cache_upstream", NULL, &cache_store_len));
 
     char* cache_store = malloc(cache_store_len);
     ESP_ERROR_CHECK(nvs_get_str(flashcfg_handle, "cache_upstream", cache_store,
-                              &cache_store_len));
+                                &cache_store_len));
 
     nvs_close(flashcfg_handle);
     return cache_store;

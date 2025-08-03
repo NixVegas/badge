@@ -57,7 +57,16 @@ void app_main(void) {
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
   ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
 
-  int wireless_enable = gpio_get_level(15);
+  uint8_t boot_mesh = 0;
+
+  nvs_handle flashcfg_handle;
+  ESP_ERROR_CHECK(nvs_open("config", NVS_READONLY, &flashcfg_handle));
+
+  nvs_close(flashcfg_handle);
+
+  ESP_ERROR_CHECK(nvs_get_u8(flashcfg_handle, "boot_mesh", &boot_mesh));
+
+  int wireless_enable = boot_mesh || gpio_get_level(15);
 
   if (wireless_enable) {
     nixbadge_mesh_init();
@@ -69,11 +78,13 @@ void app_main(void) {
 
   float offset = 0;
   float old_ping = 0;
+  ESP_LOGI(TAG, "Mesh is %s", nixbadge_has_mesh() ? "enabled" : "disabled");
+
   while (true) {
     nixbadge_leds_pulse(offset);
     vTaskDelay(pdMS_TO_TICKS(EXAMPLE_FRAME_DURATION_MS));
 
-    if (wireless_enable) {
+    if (nixbadge_has_mesh()) {
       float avg_ping = nixbadge_mesh_avg_ping();
       if (old_ping != avg_ping) ESP_LOGI(TAG, "Average ping: %f", avg_ping);
 

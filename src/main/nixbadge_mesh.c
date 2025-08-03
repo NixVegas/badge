@@ -16,46 +16,35 @@
 static const char TAG[] = "nixbadge_mesh";
 
 static esp_netif_t *netif_sta = NULL;
+static bool is_meshing = false;
 int64_t last_ping_timestamp = 0;
 
 /* Zig functions */
-extern uint8_t *nixbadge_mesh_create_packet(uint8_t, uint16_t *);
+extern uint8_t *nixbadge_mesh_create_packet(uint8_t, uint32_t *);
 
-extern void nixbadge_mesh_read_packet(uint8_t *, uint16_t, mesh_addr_t);
-extern uint8_t *nixbadge_mesh_alloc_read(uint16_t *);
-extern void nixbadge_mesh_remove_peer(mesh_addr_t);
+extern esp_err_t nixbadge_mesh_action_cb(uint8_t *data, uint32_t len,
+                                         uint8_t **out_data, uint32_t *out_len,
+                                         uint32_t seq);
 
 /* C functions */
 
-esp_err_t nixbadge_mesh_send_packet(const mesh_addr_t *to, uint8_t kind) {
-  if (to != NULL)
-    ESP_LOGI(TAG, "Sending to " MACSTR " with %d", MAC2STR(to->addr), kind);
+esp_err_t nixbadge_mesh_broadcast(uint8_t kind) {
+  uint32_t size = 0;
+  uint8_t *data = nixbadge_mesh_create_packet(kind, &size);
 
-  mesh_data_t data;
-  data.data = nixbadge_mesh_create_packet(kind, &data.size);
-  data.proto = MESH_PROTO_BIN;
-  data.tos = MESH_TOS_P2P;
+  esp_err_t err = esp_mesh_lite_send_broadcast_raw_msg_to_child(data, size);
+  if (err != ESP_OK) return err;
 
-  return esp_mesh_send(to, &data, to == NULL ? 0 : MESH_DATA_P2P, NULL, 0);
-}
-
-esp_err_t nixbadge_mesh_recv_packet(int timeout_ms) {
-  mesh_data_t data;
-  data.data = nixbadge_mesh_alloc_read(&data.size);
-  data.proto = MESH_PROTO_BIN;
-  data.tos = MESH_TOS_P2P;
-
-  int flag = 0;
-  mesh_addr_t from;
-  esp_err_t err = esp_mesh_recv(&from, &data, timeout_ms, &flag, NULL, 0);
-  if (err != ESP_OK || !data.size) {
-    ESP_LOGE(TAG, "err:0x%x, size:%d", err, data.size);
-    return err;
-  }
-
-  nixbadge_mesh_read_packet(data.data, data.size, from);
+  if (esp_mesh_lite_get_level() != ROOT)
+    return esp_mesh_lite_send_broadcast_raw_msg_to_parent(data, size);
   return ESP_OK;
 }
+
+static const esp_mesh_lite_raw_msg_action_t nixbadge_mesh_action = {
+    .msg_id = 0,
+    .resp_msg_id = 0,
+    .raw_process = nixbadge_mesh_action_cb,
+};
 
 void nixbadge_mesh_set_softap_info() {
   char softap_ssid[33];
@@ -70,9 +59,12 @@ void nixbadge_mesh_set_softap_info() {
     esp_wifi_get_mac(WIFI_IF_AP, softap_mac);
 
 #ifdef CONFIG_BRIDGE_SOFTAP_SSID_END_WITH_THE_MAC
-    snprintf(softap_ssid, sizeof(softap_ssid), "%.25s_%02X%02X%02X", CONFIG_BRIDGE_SOFTAP_SSID, softap_mac[3], softap_mac[4], softap_mac[5]);
+    snprintf(softap_ssid, sizeof(softap_ssid), "%.25s_%02X%02X%02X",
+             CONFIG_BRIDGE_SOFTAP_SSID, softap_mac[3], softap_mac[4],
+             softap_mac[5]);
 #else
-    snprintf(softap_ssid, sizeof(softap_ssid), "%.25s", CONFIG_BRIDGE_SOFTAP_SSID);
+    snprintf(softap_ssid, sizeof(softap_ssid), "%.25s",
+             CONFIG_BRIDGE_SOFTAP_SSID);
 #endif
   }
 
@@ -102,7 +94,11 @@ esp_ip4_addr_t nixbadge_mesh_get_gateway() {
   return ip_info.gw;
 }
 
+bool nixbadge_has_mesh() { return is_meshing; }
+
 void nixbadge_mesh_init() {
+  is_meshing = true;
+
   // Load configuration
   esp_bridge_create_softap_netif(NULL, NULL, true, true);
   netif_sta = esp_bridge_create_station_netif(NULL, NULL, false, false);
@@ -116,11 +112,13 @@ void nixbadge_mesh_init() {
       nixbadge_mesh_read_nvs("router_passwd", &router_passwd_len);
 
   wifi_config_t wifi_config = {
-      .sta = {
-          .pmf_cfg = {
-              .required = true,
+      .sta =
+          {
+              .pmf_cfg =
+                  {
+                      .required = true,
+                  },
           },
-      },
   };
   memcpy(&wifi_config.sta.ssid, router_ssid, router_ssid_len);
   memcpy(&wifi_config.sta.password, router_passwd, router_passwd_len);
@@ -139,6 +137,9 @@ void nixbadge_mesh_init() {
   esp_mesh_lite_init(&mesh_lite_config);
 
   nixbadge_mesh_set_softap_info();
+
+  ESP_ERROR_CHECK(
+      esp_mesh_lite_raw_msg_action_list_register(&nixbadge_mesh_action));
 
   esp_mesh_lite_start();
 }

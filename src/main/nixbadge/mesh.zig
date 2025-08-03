@@ -20,13 +20,6 @@ var packet_queue_tx = std.RingBuffer{
     .read_index = 0,
 };
 
-var packet_queue_rx_buff = [_]u8{0} ** (max_packets * proto.packet_size);
-var packet_queue_rx = std.RingBuffer{
-    .data = &packet_queue_rx_buff,
-    .write_index = 0,
-    .read_index = 0,
-};
-
 var peer_map = std.AutoHashMap([6]u8, Client).init(std.heap.c_allocator);
 
 extern fn nixbadge_mesh_send_packet(addr: ?*const esp_idf.wifi.Addr, kind: u8) esp_idf.sys.Error;
@@ -51,16 +44,24 @@ pub fn createPacket(tag: proto.Tag) ![]const u8 {
     return packet_queue_tx.data[data_start..data_end];
 }
 
-pub fn allocRead() []const u8 {
-    if (packet_queue_rx.len() + proto.packet_size >= packet_queue_rx_buff.len) {
-        packet_queue_rx.write_index = 0;
+pub fn actionCallback(data: []const u8, out_data: *[*]const u8, out_len: *u32, seq: u32) !void {
+    _ = seq;
+
+    const packet = try proto.Packet.decode(data);
+
+    log.info("Received {}\n", .{
+        packet,
+    });
+
+    switch (packet) {
+        .req_ping => {
+            const resp = try createPacket(.ping);
+            out_data.* = resp.ptr;
+            out_len.* = resp.len;
+        },
+        .ping => {
+        },
     }
-
-    const data_start = packet_queue_rx.mask(packet_queue_rx.write_index);
-    const data_end = data_start + proto.packet_size;
-
-    packet_queue_rx.write_index = data_end;
-    return packet_queue_rx.data[data_start..data_end];
 }
 
 pub fn readPacket(buff: []const u8, from: esp_idf.wifi.Addr) !void {
