@@ -49,9 +49,12 @@ static esp_err_t http_client_get_serve(esp_http_client_event_t* evt) {
 }
 
 static char* get_cache_host() {
-  if (esp_mesh_lite_get_level() == ROOT) {
-    nvs_handle flashcfg_handle;
-    ESP_ERROR_CHECK(nvs_open("config", NVS_READONLY, &flashcfg_handle));
+  nvs_handle flashcfg_handle;
+  ESP_ERROR_CHECK(nvs_open("config", NVS_READONLY, &flashcfg_handle));
+
+  uint8_t cache_p2p = 1;
+  ESP_ERROR_CHECK(nvs_get_u8(flashcfg_handle, "cache_p2p", &cache_p2p));
+  if (esp_mesh_lite_get_level() == ROOT || cache_p2p) {
 
     size_t cache_store_len;
     ESP_ERROR_CHECK(
@@ -60,11 +63,14 @@ static char* get_cache_host() {
     char* cache_store = malloc(cache_store_len);
     ESP_ERROR_CHECK(nvs_get_str(flashcfg_handle, "cache_upstream", cache_store,
                               &cache_store_len));
+
+    nvs_close(flashcfg_handle);
     return cache_store;
   } else {
     esp_ip4_addr_t addr = nixbadge_mesh_get_gateway();
     char* str = NULL;
     asprintf(&str, IPSTR, IP2STR(&addr));
+    nvs_close(flashcfg_handle);
     return str;
   }
 }
