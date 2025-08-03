@@ -15,10 +15,6 @@
 
 static const char TAG[] = "nixbadge_mesh";
 
-static bool is_running = true;
-static bool is_mesh_connected = false;
-static mesh_addr_t mesh_parent_addr;
-static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
 int64_t last_ping_timestamp = 0;
 
@@ -73,14 +69,18 @@ void nixbadge_mesh_set_softap_info() {
     uint8_t softap_mac[6];
     esp_wifi_get_mac(WIFI_IF_AP, softap_mac);
 
-    snprintf(softap_ssid, sizeof(softap_ssid), "%.25s_%02x%02x%02x",
-             CONFIG_BRIDGE_SOFTAP_SSID, softap_mac[3], softap_mac[4],
-             softap_mac[5]);
+#ifdef CONFIG_BRIDGE_SOFTAP_SSID_END_WITH_THE_MAC
+    snprintf(softap_ssid, sizeof(softap_ssid), "%.25s_%02X%02X%02X", CONFIG_BRIDGE_SOFTAP_SSID, softap_mac[3], softap_mac[4], softap_mac[5]);
+#else
+    snprintf(softap_ssid, sizeof(softap_ssid), "%.25s", CONFIG_BRIDGE_SOFTAP_SSID);
+#endif
   }
 
   if (esp_mesh_lite_get_softap_psw_from_nvs(softap_psw, &psw_size) != ESP_OK) {
     strlcpy(softap_psw, CONFIG_BRIDGE_SOFTAP_PASSWORD, sizeof(softap_psw));
   }
+
+  ESP_LOGI(TAG, "Serving SoftAP as %s", softap_ssid);
 
   esp_mesh_lite_set_softap_info(softap_ssid, softap_psw);
 }
@@ -96,9 +96,16 @@ static uint8_t *nixbadge_mesh_read_nvs(const char *key, size_t *len) {
   return value;
 }
 
+esp_ip4_addr_t nixbadge_mesh_get_gateway() {
+  esp_netif_ip_info_t ip_info;
+  esp_netif_get_ip_info(netif_sta, &ip_info);
+  return ip_info.gw;
+}
+
 void nixbadge_mesh_init() {
   // Load configuration
-  esp_bridge_create_all_netif();
+  esp_bridge_create_softap_netif(NULL, NULL, true, true);
+  netif_sta = esp_bridge_create_station_netif(NULL, NULL, false, false);
 
   size_t router_ssid_len = 32;
   uint8_t *router_ssid =
@@ -108,10 +115,12 @@ void nixbadge_mesh_init() {
   uint8_t *router_passwd =
       nixbadge_mesh_read_nvs("router_passwd", &router_passwd_len);
 
-  ESP_LOGI(TAG, "%p", router_passwd);
-
   wifi_config_t wifi_config = {
-      .sta = {},
+      .sta = {
+          .pmf_cfg = {
+              .required = true,
+          },
+      },
   };
   memcpy(&wifi_config.sta.ssid, router_ssid, router_ssid_len);
   memcpy(&wifi_config.sta.password, router_passwd, router_passwd_len);

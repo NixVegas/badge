@@ -57,8 +57,12 @@ void app_main(void) {
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
   ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
 
-  nixbadge_mesh_init();
-  nixbadge_http_init();
+  int wireless_enable = gpio_get_level(15);
+
+  if (wireless_enable) {
+    nixbadge_mesh_init();
+    nixbadge_http_init();
+  }
 
   ESP_LOGI(TAG, "Start LED rainbow chase");
   nixbadge_leds_init();
@@ -69,12 +73,19 @@ void app_main(void) {
     nixbadge_leds_pulse(offset);
     vTaskDelay(pdMS_TO_TICKS(EXAMPLE_FRAME_DURATION_MS));
 
-    float avg_ping = nixbadge_mesh_avg_ping();
-    if (old_ping != avg_ping) ESP_LOGI(TAG, "Average ping: %f", avg_ping);
+    if (wireless_enable) {
+      float avg_ping = nixbadge_mesh_avg_ping();
+      if (old_ping != avg_ping) ESP_LOGI(TAG, "Average ping: %f", avg_ping);
 
-    old_ping = avg_ping;
+      old_ping = avg_ping;
 
-    // Increase offset to shift pattern
-    offset += avg_ping;
+      // Increase offset to shift pattern
+      offset += avg_ping;
+    } else {
+      offset += EXAMPLE_ANGLE_INC_FRAME;
+      if (offset > 2 * M_PI) {
+        offset -= 2 * M_PI;
+      }
+    }
   }
 }

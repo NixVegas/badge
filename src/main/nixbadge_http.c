@@ -1,5 +1,7 @@
 #include "nixbadge_http.h"
+#include "nixbadge_mesh.h"
 
+#include <esp_mesh_lite.h>
 #include <esp_http_client.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
@@ -46,6 +48,27 @@ static esp_err_t http_client_get_serve(esp_http_client_event_t* evt) {
   return ESP_OK;
 }
 
+static char* get_cache_host() {
+  if (esp_mesh_lite_get_level() == ROOT) {
+    nvs_handle flashcfg_handle;
+    ESP_ERROR_CHECK(nvs_open("config", NVS_READONLY, &flashcfg_handle));
+
+    size_t cache_store_len;
+    ESP_ERROR_CHECK(
+      nvs_get_str(flashcfg_handle, "cache_upstream", NULL, &cache_store_len));
+
+    char* cache_store = malloc(cache_store_len);
+    ESP_ERROR_CHECK(nvs_get_str(flashcfg_handle, "cache_upstream", cache_store,
+                              &cache_store_len));
+    return cache_store;
+  } else {
+    esp_ip4_addr_t addr = nixbadge_mesh_get_gateway();
+    char* str = NULL;
+    asprintf(&str, IPSTR, IP2STR(&addr));
+    return str;
+  }
+}
+
 static esp_err_t nix_cache_info_get_handler(httpd_req_t* req) {
   nvs_handle flashcfg_handle;
   ESP_ERROR_CHECK(nvs_open("config", NVS_READONLY, &flashcfg_handle));
@@ -75,31 +98,28 @@ static esp_err_t nix_cache_info_get_handler(httpd_req_t* req) {
 }
 
 static esp_err_t narinfo_get_handler(httpd_req_t* req) {
+  char* cache_host = get_cache_host();
+
   nvs_handle flashcfg_handle;
   ESP_ERROR_CHECK(nvs_open("config", NVS_READONLY, &flashcfg_handle));
 
-  size_t cache_upstream_len;
-  ESP_ERROR_CHECK(nvs_get_str(flashcfg_handle, "cache_upstream", NULL,
-                              &cache_upstream_len));
-
-  char* cache_upstream = malloc(cache_upstream_len);
-  ESP_ERROR_CHECK(nvs_get_str(flashcfg_handle, "cache_upstream", cache_upstream,
-                              &cache_upstream_len));
+  ESP_LOGI(TAG, "Querying %s on level %d", req->uri, esp_mesh_lite_get_level());
 
   esp_http_client_config_t config = {
-      .host = cache_upstream,
+      .host = cache_host,
       .path = req->uri,
       .event_handler = http_client_get_serve,
       .user_data = req,
       .buffer_size = 16 * 1024,
       .is_async = false,
+      .timeout_ms = 3000000,
   };
 
   uint8_t cache_use_https = 0;
   ESP_ERROR_CHECK(
       nvs_get_u8(flashcfg_handle, "cache_use_https", &cache_use_https));
 
-  if (cache_use_https) {
+  if (cache_use_https && esp_mesh_lite_get_level() == ROOT) {
     config.transport_type = HTTP_TRANSPORT_OVER_SSL;
 
     size_t cache_cert_len;
@@ -119,51 +139,46 @@ static esp_err_t narinfo_get_handler(httpd_req_t* req) {
     } else {
       config.use_global_ca_store = true;
     }
+  } else if (esp_mesh_lite_get_level() != ROOT) {
+    config.port = 1008;
   }
 
   httpd_resp_set_hdr(req, "Content-Type", "text/x-nix-narinfo");
 
   esp_http_client_handle_t client = esp_http_client_init(&config);
   esp_err_t err = esp_http_client_perform(client);
-  if (err != ESP_OK) {
-    if (config.cert_pem) free((void*)config.cert_pem);
-    esp_http_client_cleanup(client);
-    nvs_close(flashcfg_handle);
-    return err;
-  }
+
+  free(cache_host);
+  nvs_close(flashcfg_handle);
 
   if (config.cert_pem) free((void*)config.cert_pem);
   esp_http_client_cleanup(client);
-  nvs_close(flashcfg_handle);
   return err;
 }
 
 static esp_err_t nar_get_handler(httpd_req_t* req) {
+  char* cache_host = get_cache_host();
+
   nvs_handle flashcfg_handle;
   ESP_ERROR_CHECK(nvs_open("config", NVS_READONLY, &flashcfg_handle));
 
-  size_t cache_upstream_len;
-  ESP_ERROR_CHECK(nvs_get_str(flashcfg_handle, "cache_upstream", NULL,
-                              &cache_upstream_len));
-
-  char* cache_upstream = malloc(cache_upstream_len);
-  ESP_ERROR_CHECK(nvs_get_str(flashcfg_handle, "cache_upstream", cache_upstream,
-                              &cache_upstream_len));
+  ESP_LOGI(TAG, "Querying %s on level %d", req->uri, esp_mesh_lite_get_level());
 
   esp_http_client_config_t config = {
-      .host = cache_upstream,
+      .host = cache_host,
       .path = req->uri,
-      .buffer_size = 16 * 1024,
+      .buffer_size = 64 * 1024,
       .event_handler = http_client_get_serve,
       .user_data = req,
       .is_async = false,
+      .timeout_ms = 3000000,
   };
 
   uint8_t cache_use_https = 0;
   ESP_ERROR_CHECK(
       nvs_get_u8(flashcfg_handle, "cache_use_https", &cache_use_https));
 
-  if (cache_use_https) {
+  if (cache_use_https && esp_mesh_lite_get_level() == ROOT) {
     config.transport_type = HTTP_TRANSPORT_OVER_SSL;
 
     size_t cache_cert_len;
@@ -183,22 +198,20 @@ static esp_err_t nar_get_handler(httpd_req_t* req) {
     } else {
       config.use_global_ca_store = true;
     }
+  } else if (esp_mesh_lite_get_level() != ROOT) {
+    config.port = 1008;
   }
 
   httpd_resp_set_hdr(req, "Content-Type", "application/x-nix-nar");
 
   esp_http_client_handle_t client = esp_http_client_init(&config);
   esp_err_t err = esp_http_client_perform(client);
-  if (err != ESP_OK) {
-    if (config.cert_pem) free((void*)config.cert_pem);
-    esp_http_client_cleanup(client);
-    nvs_close(flashcfg_handle);
-    return err;
-  }
+
+  free(cache_host);
+  nvs_close(flashcfg_handle);
 
   if (config.cert_pem) free((void*)config.cert_pem);
   esp_http_client_cleanup(client);
-  nvs_close(flashcfg_handle);
   return err;
 }
 
