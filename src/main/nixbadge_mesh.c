@@ -13,6 +13,9 @@
 #define CONFIG_MESH_AP_CONNECTIONS 10
 #define CONFIG_MESH_ROUTE_TABLE_SIZE 12
 
+#define MESSAGE_ID 10
+#define RESP_MESSAGE_ID 11
+
 static const char TAG[] = "nixbadge_mesh";
 
 static esp_netif_t *netif_sta = NULL;
@@ -29,20 +32,46 @@ extern esp_err_t nixbadge_mesh_action_cb(uint8_t *data, uint32_t len,
 /* C functions */
 
 esp_err_t nixbadge_mesh_broadcast(uint8_t kind) {
+  if (kind == 0) {
+    last_ping_timestamp = nixbadge_timestamp_now();
+  }
+
   uint32_t size = 0;
   uint8_t *data = nixbadge_mesh_create_packet(kind, &size);
 
-  esp_err_t err = esp_mesh_lite_send_broadcast_raw_msg_to_child(data, size);
-  if (err != ESP_OK) return err;
+  esp_mesh_lite_msg_config_t child_config = {
+    .raw_msg = {
+      .msg_id = MESSAGE_ID,
+      .expect_resp_msg_id = RESP_MESSAGE_ID,
+      .max_retry = 3,
+      .data = data,
+      .size = size,
+      .raw_resend = esp_mesh_lite_send_broadcast_raw_msg_to_child,
+    },
+  };
 
-  if (esp_mesh_lite_get_level() != ROOT)
-    return esp_mesh_lite_send_broadcast_raw_msg_to_parent(data, size);
+  esp_mesh_lite_send_msg(ESP_MESH_LITE_RAW_MSG, &child_config);
+
+  if (esp_mesh_lite_get_level() != ROOT) {
+    esp_mesh_lite_msg_config_t parent_config = {
+      .raw_msg = {
+        .msg_id = MESSAGE_ID,
+        .expect_resp_msg_id = RESP_MESSAGE_ID,
+        .max_retry = 3,
+        .data = data,
+        .size = size,
+        .raw_resend = esp_mesh_lite_send_broadcast_raw_msg_to_parent,
+      },
+    };
+
+    esp_mesh_lite_send_msg(ESP_MESH_LITE_RAW_MSG, &parent_config);
+  }
   return ESP_OK;
 }
 
 static const esp_mesh_lite_raw_msg_action_t nixbadge_mesh_action = {
-    .msg_id = 0,
-    .resp_msg_id = 0,
+    .msg_id = MESSAGE_ID,
+    .resp_msg_id = RESP_MESSAGE_ID,
     .raw_process = nixbadge_mesh_action_cb,
 };
 

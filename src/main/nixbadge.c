@@ -62,9 +62,9 @@ void app_main(void) {
   nvs_handle flashcfg_handle;
   ESP_ERROR_CHECK(nvs_open("config", NVS_READONLY, &flashcfg_handle));
 
-  nvs_close(flashcfg_handle);
-
   ESP_ERROR_CHECK(nvs_get_u8(flashcfg_handle, "boot_mesh", &boot_mesh));
+
+  nvs_close(flashcfg_handle);
 
   int wireless_enable = boot_mesh || gpio_get_level(15);
 
@@ -91,7 +91,10 @@ void app_main(void) {
       old_ping = avg_ping;
 
       // Increase offset to shift pattern
+      if (offset > 10.0) offset = 0;
       offset += avg_ping;
+
+      nixbadge_mesh_broadcast(0);
     } else {
       offset += EXAMPLE_ANGLE_INC_FRAME;
       if (offset > 2 * M_PI) {

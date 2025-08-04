@@ -29,10 +29,6 @@ export fn nixbadge_leds_config_gpios() void {
     leds.configGpios() catch |err| @panic(@errorName(err));
 }
 
-export fn nixbadge_mesh_remove_peer(addr: esp_idf.wifi.Addr) void {
-    mesh.removePeer(addr);
-}
-
 export fn nixbadge_mesh_avg_ping() f32 {
     return mesh.avgPing();
 }
