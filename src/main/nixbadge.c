@@ -77,29 +77,27 @@ void app_main(void) {
   nixbadge_leds_init();
 
   float offset = 0;
-  float old_ping = 0;
+  int64_t last_ping = nixbadge_timestamp_now();
   ESP_LOGI(TAG, "Mesh is %s", nixbadge_has_mesh() ? "enabled" : "disabled");
 
   while (true) {
-    nixbadge_leds_pulse(offset);
-    vTaskDelay(pdMS_TO_TICKS(EXAMPLE_FRAME_DURATION_MS));
-
     if (nixbadge_has_mesh()) {
-      float avg_ping = nixbadge_mesh_avg_ping();
-      if (old_ping != avg_ping) ESP_LOGI(TAG, "Average ping: %f", avg_ping);
-
-      old_ping = avg_ping;
-
-      // Increase offset to shift pattern
-      if (offset > 10.0) offset = 0;
-      offset += avg_ping;
-
-      nixbadge_mesh_broadcast(0);
+      nixbadge_leds_pull();
+      int64_t now = nixbadge_timestamp_now();
+      int64_t time_delta = now - last_ping;
+      if (((time_delta / 1000) % 5) == 0) {
+        nixbadge_mesh_broadcast(0);
+        last_ping = nixbadge_timestamp_now();
+      }
     } else {
+      nixbadge_leds_pulse(offset);
       offset += EXAMPLE_ANGLE_INC_FRAME;
       if (offset > 2 * M_PI) {
         offset -= 2 * M_PI;
       }
     }
+
+    nixbadge_leds_sync();
+    vTaskDelay(pdMS_TO_TICKS(EXAMPLE_FRAME_DURATION_MS));
   }
 }

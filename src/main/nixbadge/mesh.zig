@@ -73,19 +73,9 @@ pub fn actionCallback(data: []const u8, out_data: *[*]const u8, out_len: *u32, s
     }
 }
 
-pub fn avgPing() f32 {
-    var value: f32 = 0;
-    var count: f32 = 0;
+pub fn pingMeasure(i: u8) f32 {
+    if (i > ping_map.len) return 0.0;
 
-    for (&ping_map) |entry| {
-        if (!entry.isEmpty()) {
-            value += @as(f32, @floatFromInt(@abs(entry.timestamp - last_ping_timestamp))) / ((@as(f32, @floatFromInt(entry.seq)) + 1) * 1000);
-            count += 1;
-        }
-    }
-
-    return if (value != 0) blk: {
-        const tmp = count / @log(value);
-        break :blk if (std.math.isNan(tmp)) 0 else @abs(tmp);
-    } else 0;
+    const entry = &ping_map[i];
+    return @as(f32, @floatFromInt(entry.seq)) / (@as(f32, @floatFromInt(@abs(entry.timestamp - last_ping_timestamp))) * 1000);
 }

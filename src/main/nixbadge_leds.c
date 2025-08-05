@@ -125,7 +125,20 @@ void nixbadge_leds_pulse(float offset) {
     led_strip_pixels[led * 3 + 1] = sinf(angle + color_off * 1) * 64;
     led_strip_pixels[led * 3 + 2] = sinf(angle + color_off * 2) * 64;
   }
+}
 
+void nixbadge_leds_pull() {
+  for (int led = 0; led < EXAMPLE_LED_NUMBERS; led++) {
+    float offset = nixbadge_mesh_ping_measure(led);
+    float angle = offset + (led * EXAMPLE_ANGLE_INC_LED);
+    const float color_off = (M_PI * 2) / 3;
+    led_strip_pixels[led * 3 + 0] = sinf(angle + color_off * 0) * 64;
+    led_strip_pixels[led * 3 + 1] = sinf(angle + color_off * 1) * 64;
+    led_strip_pixels[led * 3 + 2] = sinf(angle + color_off * 2) * 64;
+  }
+}
+
+void nixbadge_leds_sync() {
   // Flush RGB values to LEDs
   ESP_ERROR_CHECK(rmt_transmit(led_chan, led_encoder, led_strip_pixels,
                                sizeof(led_strip_pixels), &tx_config));

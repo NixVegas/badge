@@ -29,6 +29,6 @@ export fn nixbadge_leds_config_gpios() void {
     leds.configGpios() catch |err| @panic(@errorName(err));
 }
 
-export fn nixbadge_mesh_avg_ping() f32 {
-    return mesh.avgPing();
+export fn nixbadge_mesh_ping_measure(i: u8) f32 {
+    return mesh.pingMeasure(i);
 }
