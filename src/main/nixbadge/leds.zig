@@ -7,7 +7,6 @@ pub fn configGpios() !void {
         .pin_bit_mask = 1 << @as(comptime_int, switch (options.board_rev) {
             .@"0.5" => 15,
             .@"1.0" => 3,
-            else => @panic("Not supported"),
         }),
         .mode = .input,
         .pull_down_en = .enable,
@@ -19,7 +18,6 @@ pub fn configGpios() !void {
         .pin_bit_mask = 1 << @as(comptime_int, switch (options.board_rev) {
             .@"0.5" => 23,
             .@"1.0" => 15,
-            else => @panic("Not supported"),
         }),
         .mode = .output,
         .pull_down_en = .disable,
