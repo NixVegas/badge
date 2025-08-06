@@ -13,6 +13,7 @@
 #include "esp_mesh.h"
 #include "esp_mesh_internal.h"
 #include "esp_wifi.h"
+#include "nixbadge_gpio.h"
 #include "nixbadge_http.h"
 #include "nixbadge_leds.h"
 #include "nixbadge_mesh.h"
@@ -21,6 +22,7 @@
 
 #define EXAMPLE_ANGLE_INC_FRAME 0.02
 #define EXAMPLE_FRAME_DURATION_MS 20
+
 
 /**
  * Log tag.
@@ -66,7 +68,7 @@ void app_main(void) {
 
   nvs_close(flashcfg_handle);
 
-  int wireless_enable = boot_mesh || gpio_get_level(15);
+  int wireless_enable = boot_mesh || gpio_get_level(GPIO_INPUT_PIN);
 
   if (wireless_enable) {
     nixbadge_mesh_init();

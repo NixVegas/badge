@@ -10,27 +10,15 @@
 #include "freertos/task.h"
 #include "led_strip_encoder.h"
 #include "nixbadge_mesh.h"
-
-#ifdef CONFIG_BADGE_HW_REV_0_5
-#define GPIO_INPUT_PIN 15
-#else
-#error "HW rev not supported"
-#endif
+#include "nixbadge_gpio.h"
 
 #define GPIO_INPUT_PIN_SEL (1ULL << GPIO_INPUT_PIN)
-
-#ifdef CONFIG_BADGE_HW_REV_0_5
-#define GPIO_OUTPUT_PIN 23
-#else
-#error "HW rev not supported"
-#endif
 
 #define GPIO_OUTPUT_PIN_SEL (1ULL << GPIO_OUTPUT_PIN)
 
 #define RMT_LED_STRIP_RESOLUTION_HZ \
   10000000  // 10MHz resolution, 1 tick = 0.1us (led strip needs a high
             // resolution)
-#define RMT_LED_STRIP_GPIO_NUM 14
 
 #define EXAMPLE_LED_NUMBERS 12
 #define EXAMPLE_ANGLE_INC_LED 0.3

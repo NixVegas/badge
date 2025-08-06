@@ -6,6 +6,7 @@ pub fn configGpios() !void {
         .intr_type = .posedge,
         .pin_bit_mask = 1 << @as(comptime_int, switch (options.board_rev) {
             .@"0.5" => 15,
+            .@"1.0" => 3,
             else => @panic("Not supported"),
         }),
         .mode = .input,
@@ -17,6 +18,7 @@ pub fn configGpios() !void {
         .intr_type = .disable,
         .pin_bit_mask = 1 << @as(comptime_int, switch (options.board_rev) {
             .@"0.5" => 23,
+            .@"1.0" => 15,
             else => @panic("Not supported"),
         }),
         .mode = .output,
