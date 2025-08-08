@@ -41,7 +41,11 @@ let
     ];
   } ''
     runPhase unpackPhase
-    sh scripts/gen_nvs.sh --cache-cert=${./cache.nixos.org.pem} --output=$out
+    sh scripts/gen_nvs.sh \
+      --cache-cert=${./cache.nixos.org.pem} \
+      --router-ssid=NixVegas \
+      --router-passwd=RebuildTheWorld \
+      --output=$out
   '';
 
   flash = writeShellApplication {
