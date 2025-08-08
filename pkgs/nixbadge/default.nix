@@ -7,6 +7,7 @@
   target,
   zig,
   mkShell,
+  runCommand,
 }:
 
 let
@@ -76,6 +77,27 @@ let
       esp-idf
     ];
   };
+
+  managed_components = runCommand "nixbadge-components" {
+    src = ../../src;
+    inherit target;
+
+    nativeBuildInputs = [
+      esp-idf
+    ];
+
+    outputHash = "sha256-SlOwixJ9nipYZOad4BIhXjX9l2i3QeRrTXNr7gRgaQY=";
+    outputHashAlgo = "sha256";
+    outputHashMode = "recursive";
+  } ''
+    runPhase unpackPhase
+
+    mkdir .temp
+    export HOME="$(realpath .temp)"
+
+    idf.py set-target $target
+    cp -r managed_components $out
+  '';
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "nixbadge-${finalAttrs.target}";
@@ -105,8 +127,13 @@ stdenv.mkDerivation (finalAttrs: {
     mkdir .temp
     export HOME="$(realpath .temp)"
 
-    # idf-component-manager wants to access the network, so we disable it.
-    export IDF_COMPONENT_MANAGER=0
+    cp -a --no-preserve=ownership $IDF_PATH idf
+    chmod -R u+w idf
+    export IDF_PATH=$(readlink -e idf)
+
+    cp -r ${managed_components} managed_components
+
+    (cd idf/components/lwip/lwip; patch -Np1 -i ${managed_components}/espressif__iot_bridge/patch/ip4_napt.patch)
   '';
 
   configurePhase = ''
