@@ -109,9 +109,18 @@ void nixbadge_leds_pulse(float offset) {
     // hue-like effect.
     float angle = offset + (led * EXAMPLE_ANGLE_INC_LED);
     const float color_off = (M_PI * 2) / 3;
-    led_strip_pixels[led * 3 + 0] = sinf(angle + color_off * 0) * 64;
-    led_strip_pixels[led * 3 + 1] = sinf(angle + color_off * 1) * 64;
-    led_strip_pixels[led * 3 + 2] = sinf(angle + color_off * 2) * 64;
+
+    float mul = 64;
+    float offset = 0;
+
+    if (led == 4) {
+      mul = 127;
+      offset = 128;
+    }
+
+    led_strip_pixels[led * 3 + 0] = sinf(angle + color_off * 0) * mul + offset;
+    led_strip_pixels[led * 3 + 1] = sinf(angle + color_off * 1) * mul + offset;
+    led_strip_pixels[led * 3 + 2] = sinf(angle + color_off * 2) * mul + offset;
   }
 }
 
@@ -120,9 +129,18 @@ void nixbadge_leds_pull() {
     float offset = nixbadge_mesh_ping_measure(led);
     float angle = offset + (led * EXAMPLE_ANGLE_INC_LED);
     const float color_off = (M_PI * 2) / 3;
-    led_strip_pixels[led * 3 + 0] = sinf(angle + color_off * 0) * 64;
-    led_strip_pixels[led * 3 + 1] = sinf(angle + color_off * 1) * 64;
-    led_strip_pixels[led * 3 + 2] = sinf(angle + color_off * 2) * 64;
+
+    float mul = 64;
+    float offset = 0;
+
+    if (led == 4) {
+      mul = 127;
+      offset = 128;
+    }
+
+    led_strip_pixels[led * 3 + 0] = sinf(angle + color_off * 0) * mul + offset;
+    led_strip_pixels[led * 3 + 1] = sinf(angle + color_off * 1) * mul + offset;
+    led_strip_pixels[led * 3 + 2] = sinf(angle + color_off * 2) * mul + offset;
   }
 }
 
