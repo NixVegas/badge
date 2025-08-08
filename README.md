@@ -1,13 +1,13 @@
 # Nix Badge
 
-**HARDWARE SAMPLES ONLY**
-
-This currently tests all the hardware features on the PCB:
+Hardware features:
 
 - 12x WS2812 LEDs connected to IO14 (with a pleasant RGB fade pattern from the RMT)
     - Most of this was taken from Espressif's examples: [here](https://github.com/espressif/esp-idf/tree/master/examples/peripherals/rmt/led_strip_simple_encoder) and [here](https://github.com/espressif/esp-idf/tree/master/examples/peripherals/rmt/led_strip).
-- Button connected to IO15 using an interrupt (_this will move to IO3 so the low-power core can also read it_)
-- Status LED connected to IO23 toggled by button interrupt (_this will move to IO9, same as the boot button_)
+- Button connected to IO3
+- Status LED connected to IO15
+- SDET (SD Detect) pin to IO8
+- VSEL2 pin (VSEL / 2) to IO2 (used for reading battery level over ADC)
 - Serial obviously works over USB
 
 ## Build
