@@ -33,6 +33,17 @@ let
     '';
   };
 
+  nvs = runCommand "nvs.bin" {
+    src = ../../src;
+
+    nativeBuildInputs = [
+      esp-idf
+    ];
+  } ''
+    runPhase unpackPhase
+    sh scripts/gen_nvs.sh --cache-cert=${./cache.nixos.org.pem} --output=$out
+  '';
+
   flash = writeShellApplication {
     name = "flash";
     text = ''
@@ -58,7 +69,7 @@ let
       exec ${esp-idf}/python-env/bin/python3 -m esptool "$@" \
         --chip "$chip" \
         --before "$before" --after "$after" \
-        $stubarg write_flash "@flash_args"
+        $stubarg write_flash "@flash_args" 0x9000 ${nvs}
     '';
 
     runtimeInputs = [
@@ -170,6 +181,6 @@ stdenv.mkDerivation (finalAttrs: {
   '';
 
   passthru = {
-    inherit shell;
+    inherit shell nvs;
   };
 })
