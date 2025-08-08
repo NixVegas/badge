@@ -10,6 +10,10 @@ Hardware features:
 - VSEL2 pin (VSEL / 2) to IO2 (used for reading battery level over ADC)
 - Serial obviously works over USB
 
+## Known issues
+
+**The SD card has 3v3 and GND wired backwards on v1.0 of the badge hardware. It may kill your SD card. There's no fix for this badge that doesn't involve cutting and soldering wires. :-(**
+
 ## Build
 
 - `nix build ^*` or `nix-build` (note that the `^*` will produce all outputs, as opposed to `nix build` which only produces the firmware)
