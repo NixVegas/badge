@@ -54,7 +54,8 @@ let
   } ''
     runPhase unpackPhase
     sh scripts/gen_nvs.sh \
-      --cache-cert=${./cache.nixos.org.pem} \
+      --cache-cert=${./cache.nixos.lv.pem} \
+      --cache-upstream=cache.nixos.lv \
       --router-ssid=NixVegas \
       --router-passwd=RebuildTheWorld \
       --output=$out
