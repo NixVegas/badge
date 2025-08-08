@@ -28,6 +28,10 @@ Hardware features:
 - `idf.py -p /dev/ttyACM0 build flash monitor`
     - Press ^] to exit
 
+## Starting the badge mesh
+
+Hold the button while booted. Default network is `NixBadge_XXXXXX`, password is 12345678.
+
 ## Automated testing
 
 Looks like Espressif has a test harness [using pytest](https://github.com/espressif/pytest-embedded). Soon?
