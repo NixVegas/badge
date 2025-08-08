@@ -11,6 +11,16 @@
 }:
 
 let
+  patchIdf = ''
+    (
+      cd idf/components/lwip/lwip
+      if [ ! -f ip4_napt.patched ]; then
+        patch -Np1 -i ${managed_components}/espressif__iot_bridge/patch/ip4_napt.patch
+        touch ip4_napt.patched
+      fi
+    )
+  '';
+
   shell = mkShell {
     name = "nixbadge-${target}-dev-shell";
     packages = [
@@ -30,6 +40,8 @@ let
       if [ ! -f sdkconfig ]; then
         idf.py set-target $target
       fi
+
+      ${patchIdf}
     '';
   };
 
@@ -147,8 +159,7 @@ stdenv.mkDerivation (finalAttrs: {
     export IDF_PATH=$(readlink -e idf)
 
     cp -r ${managed_components} managed_components
-
-    (cd idf/components/lwip/lwip; patch -Np1 -i ${managed_components}/espressif__iot_bridge/patch/ip4_napt.patch)
+    ${patchIdf}
   '';
 
   configurePhase = ''
