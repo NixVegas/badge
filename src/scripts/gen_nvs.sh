@@ -1,6 +1,7 @@
 #!/bin/sh
 
-cache_upstream=cache.nixos.org
+cache_upstream=cache.nixos.lv
+cache_cert=$(dirname $0)/../../pkgs/nixbadge/cache.nixos.lv.pem
 cache_store=/nix/store
 cache_priority=40
 cache_use_https=1
