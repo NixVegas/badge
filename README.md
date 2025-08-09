@@ -32,6 +32,15 @@ Hardware features:
 
 Hold the button while booted. Default network is `NixBadge_XXXXXX`, password is 12345678.
 
+## Substituting over the mesh
+
+- Connect to the wifi network listed above. You will be assigned a DHCP address.
+- `nix-shell --option substituters http://192.168.5.1:1008 -p hello` (just set the last octet to 1)
+
+Sadly, it won't be cached because the SD slot is borked. It's also pretty slow. By default, it connects to the NixVegas wifi for an upstream and substitutes from https://cache.nixos.lv.
+
+You can use the badge as a generic router, too. It will also be slow.
+
 ## Automated testing
 
 Looks like Espressif has a test harness [using pytest](https://github.com/espressif/pytest-embedded). Soon?
