@@ -75,7 +75,7 @@ config,namespace,,
 boot_mesh,data,u8,$boot_mesh
 cache_p2p,data,u8,$cache_p2p
 cache_use_https,data,u8,$cache_use_https
-cache_priority,data,u8,$cache_priority
+cache_priority,data,u32,$cache_priority
 cache_store,data,string,$cache_store
 cache_upstream,data,string,$cache_upstream
 EOF
