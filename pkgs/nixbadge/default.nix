@@ -6,6 +6,7 @@
   esp-idf,
   target,
   zig,
+  flakever,
   mkShell,
   runCommand,
 }:
@@ -63,6 +64,9 @@ let
 
   flash = writeShellApplication {
     name = "flash";
+    derivationArgs = {
+      inherit (flakever) version;
+    };
     text = ''
       set -euo pipefail
 
@@ -97,6 +101,9 @@ let
 
   console = writeShellApplication {
     name = "console";
+    derivationArgs = {
+      inherit (flakever) version;
+    };
     text = ''
       set -euo pipefail
       exec ${esp-idf}/python-env/bin/python3 -m esp_idf_monitor "$@"
@@ -129,7 +136,7 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "nixbadge-${finalAttrs.target}";
-  version = "0.1";
+  inherit (flakever) version;
 
   outputs = [
     "out"
