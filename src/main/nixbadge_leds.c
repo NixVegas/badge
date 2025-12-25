@@ -9,8 +9,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "led_strip_encoder.h"
-#include "nixbadge_mesh.h"
 #include "nixbadge_gpio.h"
+#include "nixbadge_mesh.h"
 
 #define GPIO_INPUT_PIN_SEL (1ULL << GPIO_INPUT_PIN)
 
@@ -110,17 +110,16 @@ void nixbadge_leds_pulse(float offset) {
     float angle = offset + (led * EXAMPLE_ANGLE_INC_LED);
     const float color_off = (M_PI * 2) / 3;
 
-    float mul = 64;
-    float off = 0;
+    float mul_hi = 256.0f / 2.0f;
+    float mul_lo = 2.0 / 2.0f;
+    float off = 1.0f;
 
-    if (led == 4) {
-      mul = 127;
-      off = 128;
-    }
-
-    led_strip_pixels[led * 3 + 0] = sinf(angle + color_off * 0) * mul + off;
-    led_strip_pixels[led * 3 + 1] = sinf(angle + color_off * 1) * mul + off;
-    led_strip_pixels[led * 3 + 2] = sinf(angle + color_off * 2) * mul + off;
+    led_strip_pixels[led * 3 + 0] =
+        floorf((sinf(angle + color_off * 0) + off) * mul_lo);  // G
+    led_strip_pixels[led * 3 + 1] =
+        floorf((sinf(angle + color_off * 1) + off) * mul_hi);  // R
+    led_strip_pixels[led * 3 + 2] =
+        floorf((sinf(angle + color_off * 2) + off) * mul_lo);  // B
   }
 }
 
