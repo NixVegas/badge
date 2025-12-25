@@ -2,7 +2,7 @@ const std = @import("std");
 const esp_idf = @import("esp-idf");
 const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
-const der = std.crypto.asn1.der;
+const der = std.crypto.codecs.asn1.der;
 
 pub const packet_size = 18;
 

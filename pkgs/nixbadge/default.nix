@@ -121,7 +121,7 @@ let
       esp-idf
     ];
 
-    outputHash = "sha256-SlOwixJ9nipYZOad4BIhXjX9l2i3QeRrTXNr7gRgaQY=";
+    outputHash = "sha256-t8nGtWoZ7DGPk70KHEVMAL/mi9aUkpENtwsUVUjtCPw=";
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
   } ''
