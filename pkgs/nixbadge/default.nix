@@ -6,6 +6,7 @@
   esp-idf,
   target,
   zig,
+  flakever,
   mkShell,
   runCommand,
 }:
@@ -63,6 +64,9 @@ let
 
   flash = writeShellApplication {
     name = "flash";
+    derivationArgs = {
+      inherit (flakever) version;
+    };
     text = ''
       set -euo pipefail
 
@@ -97,6 +101,9 @@ let
 
   console = writeShellApplication {
     name = "console";
+    derivationArgs = {
+      inherit (flakever) version;
+    };
     text = ''
       set -euo pipefail
       exec ${esp-idf}/python-env/bin/python3 -m esp_idf_monitor "$@"
@@ -114,7 +121,7 @@ let
       esp-idf
     ];
 
-    outputHash = "sha256-SlOwixJ9nipYZOad4BIhXjX9l2i3QeRrTXNr7gRgaQY=";
+    outputHash = "sha256-t8nGtWoZ7DGPk70KHEVMAL/mi9aUkpENtwsUVUjtCPw=";
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
   } ''
@@ -129,7 +136,7 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "nixbadge-${finalAttrs.target}";
-  version = "0.1";
+  inherit (flakever) version;
 
   outputs = [
     "out"
