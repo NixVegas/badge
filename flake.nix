@@ -1,26 +1,35 @@
 {
   description = "Rebuild the world... or just the Nix Badge.";
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
     flake-parts.url = "github:hercules-ci/flake-parts";
     flake-compat.url = "https://flakehub.com/f/edolstra/flake-compat/1.tar.gz";
+    flakever.url = "github:numinit/flakever";
   };
 
   outputs =
     inputs@{
       self,
       flake-parts,
+      flakever,
       nixpkgs-esp-dev,
       ...
     }:
+    let
+      flakeverConfig = flakever.lib.mkFlakever {
+        inherit inputs;
+
+        digits = [ 1 2 2 ];
+      };
+    in
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
         inputs.flake-parts.flakeModules.easyOverlay
       ];
 
       flake = {
-        # nothing for now
+        versionTemplate = "1.1pre-<lastModifiedDate>-<rev>";
       };
 
       systems = [
@@ -44,7 +53,11 @@
               nixpkgs-esp-dev.overlays.default
               self.overlays.default
             ];
-            config = { };
+            config = {
+              permittedInsecurePackages = [
+                "python3.13-ecdsa-0.19.1"
+              ];
+            };
           };
 
           overlayAttrs = {
@@ -53,6 +66,7 @@
               target = "esp32c6";
               esp-idf = pkgs."esp-idf-${target}";
             };
+            flakever = flakeverConfig;
           };
 
           packages = {

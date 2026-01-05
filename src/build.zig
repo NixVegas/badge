@@ -31,8 +31,9 @@ pub fn build(b: *std.Build) !void {
     const options = b.addOptions();
     options.addOption(Revision, "board_rev", board_rev);
 
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "nixbadge_zig",
+        .linkage = .static,
         .root_module = b.createModule(.{
             .root_source_file = b.path("main/nixbadge.zig"),
             .target = target,
@@ -41,11 +42,11 @@ pub fn build(b: *std.Build) !void {
                 .{
                     .name = "esp-idf",
                     .module = importIdf(b, .{
-        .target = target,
-        .optimize = optimize,
-        .source_path = esp_idf_source_path,
-        .build_path = esp_idf_build_path,
-    }),
+                        .target = target,
+                        .optimize = optimize,
+                        .source_path = esp_idf_source_path,
+                        .build_path = esp_idf_build_path,
+                    }),
                 },
                 .{
                     .name = "options",
@@ -54,7 +55,6 @@ pub fn build(b: *std.Build) !void {
             },
         }),
     });
-    lib.no_builtin = true;
 
     b.installArtifact(lib);
 }

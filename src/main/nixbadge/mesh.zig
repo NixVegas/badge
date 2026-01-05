@@ -2,6 +2,7 @@ const std = @import("std");
 const esp_idf = @import("esp-idf");
 const proto = @import("../proto.zig");
 const utils = @import("../utils.zig");
+const RingBuffer = @import("./RingBuffer.zig");
 const log = std.log.scoped(.nixbadge_mesh);
 
 extern var last_ping_timestamp: i64;
@@ -18,7 +19,7 @@ const PingEntry = struct {
 const max_packets = 50;
 
 var packet_queue_tx_buff = [_]u8{0} ** (max_packets * proto.packet_size);
-var packet_queue_tx = std.RingBuffer{
+var packet_queue_tx = RingBuffer{
     .data = &packet_queue_tx_buff,
     .write_index = 0,
     .read_index = 0,
