@@ -2,7 +2,10 @@
   description = "Rebuild the world... or just the Nix Badge.";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
+    nixpkgs-esp-dev = {
+      url = "github:mirrexagon/nixpkgs-esp-dev";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     flake-parts.url = "github:hercules-ci/flake-parts";
     flake-compat.url = "https://flakehub.com/f/edolstra/flake-compat/1.tar.gz";
     flakever.url = "github:numinit/flakever";
