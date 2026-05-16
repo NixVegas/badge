@@ -46,21 +46,24 @@ let
     '';
   };
 
-  nvs = runCommand "nvs.bin" {
-    src = ../../src;
+  nvs =
+    runCommand "nvs.bin"
+      {
+        src = ../../src;
 
-    nativeBuildInputs = [
-      esp-idf
-    ];
-  } ''
-    runPhase unpackPhase
-    sh scripts/gen_nvs.sh \
-      --cache-cert=${./cache.nixos.lv.pem} \
-      --cache-upstream=cache.nixos.lv \
-      --router-ssid=NixVegas \
-      --router-passwd=RebuildTheWorld \
-      --output=$out
-  '';
+        nativeBuildInputs = [
+          esp-idf
+        ];
+      }
+      ''
+        runPhase unpackPhase
+        sh scripts/gen_nvs.sh \
+          --cache-cert=${./cache.nixos.lv.pem} \
+          --cache-upstream=cache.nixos.lv \
+          --router-ssid=NixVegas \
+          --router-passwd=RebuildTheWorld \
+          --output=$out
+      '';
 
   flash = writeShellApplication {
     name = "flash";
@@ -113,26 +116,29 @@ let
     ];
   };
 
-  managed_components = runCommand "nixbadge-components" {
-    src = ../../src;
-    inherit target;
+  managed_components =
+    runCommand "nixbadge-components"
+      {
+        src = ../../src;
+        inherit target;
 
-    nativeBuildInputs = [
-      esp-idf
-    ];
+        nativeBuildInputs = [
+          esp-idf
+        ];
 
-    outputHash = "sha256-t8nGtWoZ7DGPk70KHEVMAL/mi9aUkpENtwsUVUjtCPw=";
-    outputHashAlgo = "sha256";
-    outputHashMode = "recursive";
-  } ''
-    runPhase unpackPhase
+        outputHash = "sha256-t8nGtWoZ7DGPk70KHEVMAL/mi9aUkpENtwsUVUjtCPw=";
+        outputHashAlgo = "sha256";
+        outputHashMode = "recursive";
+      }
+      ''
+        runPhase unpackPhase
 
-    mkdir .temp
-    export HOME="$(realpath .temp)"
+        mkdir .temp
+        export HOME="$(realpath .temp)"
 
-    idf.py set-target $target
-    cp -r managed_components $out
-  '';
+        idf.py set-target $target
+        cp -r managed_components $out
+      '';
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "nixbadge-${finalAttrs.target}";

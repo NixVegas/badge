@@ -57,7 +57,7 @@ pub const ResetReason = enum(c_uint) {
     jtag = 12,
 };
 
-pub const ShutdownHandler = *const fn () callconv(.C) void;
+pub const ShutdownHandler = *const fn () callconv(.c) void;
 
 extern fn esp_register_shutdown_handler(handle: ShutdownHandler) Error;
 pub inline fn registerShutdownHandler(handle: ShutdownHandler) !void {

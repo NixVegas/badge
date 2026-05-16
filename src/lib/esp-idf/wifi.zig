@@ -16,6 +16,46 @@ pub fn getStaRssi() !c_int {
     return rssi;
 }
 
+// wifi_config_t is a union of wifi_ap_config_t / wifi_sta_config_t / wifi_nan_config_t.
+// cImport can't render it (the STA variant carries C bitfields), so we just hand
+// ESP-IDF a properly sized zeroed buffer and poke the fields we care about by
+// offset. Both AP and STA variants start with ssid[32]+password[64].
+//
+// Sizes (ESP-IDF 5.5, RISC-V, default Kconfig):
+//   wifi_ap_config_t  = 132
+//   wifi_sta_config_t = 184
+//   wifi_nan_config_t =   8
+const wifi_config_size: usize = 200;
+const sta_pmf_required_offset: usize = 129;
+const ap_pmf_required_offset: usize = 118;
+
+const ConfigBuf = extern struct {
+    bytes: [wifi_config_size]u8 align(4) = @splat(0),
+};
+
+extern fn esp_bridge_wifi_set_config(interface: c.wifi_interface_t, conf: *const anyopaque) sys.Error;
+
+inline fn fillSsidPassword(buf: *ConfigBuf, ssid: []const u8, password: []const u8) void {
+    const n_ssid = @min(ssid.len, 32);
+    const n_pass = @min(password.len, 64);
+    @memcpy(buf.bytes[0..n_ssid], ssid[0..n_ssid]);
+    @memcpy(buf.bytes[32 .. 32 + n_pass], password[0..n_pass]);
+}
+
+pub fn setStaConfig(ssid: []const u8, password: []const u8) !void {
+    var buf = ConfigBuf{};
+    fillSsidPassword(&buf, ssid, password);
+    buf.bytes[sta_pmf_required_offset] = 1;
+    try esp_bridge_wifi_set_config(c.WIFI_IF_STA, &buf).throw();
+}
+
+pub fn setApConfig(ssid: []const u8, password: []const u8) !void {
+    var buf = ConfigBuf{};
+    fillSsidPassword(&buf, ssid, password);
+    buf.bytes[ap_pmf_required_offset] = 0;
+    try esp_bridge_wifi_set_config(c.WIFI_IF_AP, &buf).throw();
+}
+
 pub const Addr = extern union {
     addr: [6]u8,
     mip: Mip,
@@ -75,7 +115,7 @@ pub const InitConfig = extern struct {
     dump_hesigb_enable: bool = true,
     magic: c_int = c.WIFI_INIT_CONFIG_MAGIC,
 
-    extern fn esp_wifi_init(*const InitConfig) callconv(.C) sys.Error;
+    extern fn esp_wifi_init(*const InitConfig) callconv(.c) sys.Error;
     pub fn config(self: *const InitConfig) !void {
         return esp_wifi_init(self).throw();
     }
