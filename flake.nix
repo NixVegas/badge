@@ -6,6 +6,10 @@
     flake-parts.url = "github:hercules-ci/flake-parts";
     flake-compat.url = "https://flakehub.com/f/edolstra/flake-compat/1.tar.gz";
     flakever.url = "github:numinit/flakever";
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -14,18 +18,24 @@
       flake-parts,
       flakever,
       nixpkgs-esp-dev,
+      treefmt-nix,
       ...
     }:
     let
       flakeverConfig = flakever.lib.mkFlakever {
         inherit inputs;
 
-        digits = [ 1 2 2 ];
+        digits = [
+          1
+          2
+          2
+        ];
       };
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
         inputs.flake-parts.flakeModules.easyOverlay
+        inputs.treefmt-nix.flakeModule
       ];
 
       flake = {
@@ -67,6 +77,11 @@
               esp-idf = pkgs."esp-idf-${target}";
             };
             flakever = flakeverConfig;
+          };
+
+          treefmt.programs = {
+            nixfmt.enable = true;
+            zig.enable = true;
           };
 
           packages = {
