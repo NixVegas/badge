@@ -118,3 +118,10 @@ pub const LogLevel = enum(c_uint) {
 
 extern fn esp_log_write(level: LogLevel, tag: [*:0]const u8, format: [*:0]const u8, ...) void;
 pub const logWrite = esp_log_write;
+
+// Raw esp_err_t values for callers (handlers, etc.) that return c_int directly.
+pub const ESP_OK: c_int = 0;
+pub const ESP_FAIL: c_int = -1;
+pub const ESP_ERR_NO_MEM: c_int = 0x101;
+
+pub extern fn vTaskDelay(ticks: u32) void;

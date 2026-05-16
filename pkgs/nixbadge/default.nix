@@ -116,6 +116,14 @@ let
     ];
   };
 
+  zigDeps = zig.fetchDeps {
+    pname = "nixbadge";
+    inherit (flakever) version;
+    src = ../../src;
+    fetchAll = true;
+    hash = "sha256-GxDDvyVHaTn1uvvUbnd9FlfU+8BQEVzIuQq2w4DEJe8=";
+  };
+
   managed_components =
     runCommand "nixbadge-components"
       {
@@ -174,6 +182,13 @@ stdenv.mkDerivation (finalAttrs: {
 
     cp -r ${managed_components} managed_components
     ${patchIdf}
+
+    # Populate the Zig package cache from the FOD `zig.fetchDeps` produced for
+    # us (build.zig.zon dependencies, baked into a single derivation).
+    export ZIG_GLOBAL_CACHE_DIR="$HOME/zig-cache"
+    mkdir -p "$ZIG_GLOBAL_CACHE_DIR/p"
+    cp -rLT "${zigDeps}" "$ZIG_GLOBAL_CACHE_DIR/p"
+    chmod -R u+w "$ZIG_GLOBAL_CACHE_DIR/p"
   '';
 
   configurePhase = ''

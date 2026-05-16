@@ -1,7 +1,7 @@
 const std = @import("std");
 const math = std.math;
 const esp_idf = @import("esp-idf");
-const c = esp_idf.c;
+const rmt = esp_idf.rmt;
 const options = @import("options");
 const mesh = @import("mesh.zig");
 const strip_encoder = @import("led_strip_encoder.zig");
@@ -104,38 +104,11 @@ pub fn setupGpios() !void {
     try esp_idf.drivers.gpio.isrHandlerAdd(input_pin, gpioIsrHandler, @ptrFromInt(@as(usize, @intCast(input_pin))));
 }
 
-// cImport can't size rmt_tx_channel_config_t / rmt_transmit_config_t because
-// their bitfield-containing nested structs become opaque. Mirror the C layout
-// here so we can construct one in Zig and pass it through.
-const TxChannelConfig = extern struct {
-    gpio_num: c_int,
-    clk_src: c.rmt_clock_source_t,
-    resolution_hz: u32,
-    mem_block_symbols: usize,
-    trans_queue_depth: usize,
-    intr_priority: c_int,
-    flags: u32,
-};
+var led_chan: rmt.ChannelHandle = null;
+var led_encoder: rmt.EncoderHandle = null;
 
-const TransmitConfig = extern struct {
-    loop_count: c_int,
-    flags: u32,
-};
-
-extern fn rmt_new_tx_channel(config: *const TxChannelConfig, ret_chan: *c.rmt_channel_handle_t) c.esp_err_t;
-extern fn rmt_transmit(
-    tx_channel: c.rmt_channel_handle_t,
-    encoder: c.rmt_encoder_handle_t,
-    payload: *const anyopaque,
-    payload_bytes: usize,
-    config: *const TransmitConfig,
-) c.esp_err_t;
-
-var led_chan: c.rmt_channel_handle_t = null;
-var led_encoder: c.rmt_encoder_handle_t = null;
-
-inline fn checkErr(rc: c.esp_err_t) !void {
-    if (rc != c.ESP_OK) {
+inline fn checkErr(rc: c_int) !void {
+    if (rc != esp_idf.sys.ESP_OK) {
         log.err("esp_err 0x{x}", .{rc});
         return error.EspErr;
     }
@@ -143,22 +116,22 @@ inline fn checkErr(rc: c.esp_err_t) !void {
 
 pub fn setupRmt() !void {
     log.info("Create RMT TX channel", .{});
-    const tx_chan_config = TxChannelConfig{
+    const tx_chan_config = rmt.TxChannelConfig{
         .gpio_num = rmt_gpio_num,
-        .clk_src = c.RMT_CLK_SRC_DEFAULT,
+        .clk_src = .default,
         .resolution_hz = rmt_resolution_hz,
         .mem_block_symbols = 64,
         .trans_queue_depth = 4,
         .intr_priority = 0,
         .flags = 0,
     };
-    try checkErr(rmt_new_tx_channel(&tx_chan_config, &led_chan));
+    try checkErr(rmt.rmt_new_tx_channel(&tx_chan_config, &led_chan));
 
     log.info("Install led strip encoder", .{});
     try checkErr(strip_encoder.new(rmt_resolution_hz, &led_encoder));
 
     log.info("Enable RMT TX channel", .{});
-    try checkErr(c.rmt_enable(led_chan));
+    try checkErr(rmt.rmt_enable(led_chan));
 }
 
 pub fn init() !void {
@@ -167,8 +140,8 @@ pub fn init() !void {
 }
 
 pub fn sync() !void {
-    const tx_config = TransmitConfig{ .loop_count = 0, .flags = 0 };
-    try checkErr(rmt_transmit(led_chan, led_encoder, &pixels, pixels.len, &tx_config));
+    const tx_config = rmt.TransmitConfig{};
+    try checkErr(rmt.rmt_transmit(led_chan, led_encoder, &pixels, pixels.len, &tx_config));
     // rmt_tx_wait_all_done takes a c_int timeout in ms; -1 means wait forever.
-    try checkErr(c.rmt_tx_wait_all_done(led_chan, -1));
+    try checkErr(rmt.rmt_tx_wait_all_done(led_chan, -1));
 }

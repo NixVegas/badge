@@ -40,7 +40,6 @@ add_custom_target(zig_build
     -Desp-idf-build=${CMAKE_BINARY_DIR}/esp-idf
     -Dboard-rev=${BOARD_REV}
     -freference-trace
-    --prominent-compile-errors
     --cache-dir ${CMAKE_BINARY_DIR}/zig-cache
     --prefix ${CMAKE_BINARY_DIR}
     DEPENDS

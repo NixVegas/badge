@@ -1,7 +1,7 @@
 const std = @import("std");
 const math = std.math;
 const esp_idf = @import("esp-idf");
-const c = esp_idf.c;
+const options = @import("options");
 const utils = @import("../utils.zig");
 const mesh = @import("mesh.zig");
 const leds = @import("leds.zig");
@@ -11,15 +11,20 @@ const log = std.log.scoped(.nixbadge);
 const frame_duration_ms: u32 = 20;
 const angle_inc_frame: f32 = 0.02;
 
-fn check(err: c.esp_err_t) void {
-    if (err != c.ESP_OK) {
+fn check(err: c_int) void {
+    if (err != esp_idf.sys.ESP_OK) {
         log.err("esp_err {x}", .{err});
-        c.esp_system_abort("esp_err nonzero");
+        esp_idf.sys.systemAbort("esp_err nonzero");
     }
 }
 
-fn ipEventHandler(_: ?*anyopaque, _: c.esp_event_base_t, _: i32, event_data: ?*anyopaque) callconv(.c) void {
-    const event: *const c.ip_event_got_ip_t = @ptrCast(@alignCast(event_data orelse return));
+fn ipEventHandler(
+    _: ?*anyopaque,
+    _: esp_idf.event.EventBase,
+    _: i32,
+    event_data: ?*anyopaque,
+) callconv(.c) void {
+    const event: *const esp_idf.netif.IpEventGotIp = @ptrCast(@alignCast(event_data orelse return));
     const bytes: *const [4]u8 = @ptrCast(&event.ip_info.ip.addr);
     log.info("<IP_EVENT_STA_GOT_IP>IP:{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] });
 }
@@ -29,16 +34,21 @@ pub export fn app_main() void {
 
     esp_idf.nvs.flashInitOrErase() catch |err| @panic(@errorName(err));
 
-    check(c.esp_netif_init());
-    check(c.esp_event_loop_create_default());
-    check(c.esp_event_handler_register(c.IP_EVENT, c.IP_EVENT_STA_GOT_IP, &ipEventHandler, null));
+    check(esp_idf.netif.esp_netif_init());
+    check(esp_idf.event.esp_event_loop_create_default());
+    check(esp_idf.event.esp_event_handler_register(
+        esp_idf.netif.IP_EVENT,
+        esp_idf.netif.IP_EVENT_STA_GOT_IP,
+        &ipEventHandler,
+        null,
+    ));
 
     const cfg = esp_idf.wifi.InitConfig{
         .wpa_crypto_funcs = esp_idf.wifi.g_wifi_default_wpa_crypto_funcs,
     };
     cfg.config() catch |err| @panic(@errorName(err));
-    check(c.esp_wifi_set_mode(c.WIFI_MODE_APSTA));
-    check(c.esp_wifi_set_storage(c.WIFI_STORAGE_FLASH));
+    esp_idf.wifi.esp_wifi_set_mode(.apsta).throw() catch |err| @panic(@errorName(err));
+    esp_idf.wifi.esp_wifi_set_storage(.flash).throw() catch |err| @panic(@errorName(err));
 
     if (shouldEnableWireless()) {
         mesh.init();
@@ -70,12 +80,12 @@ pub export fn app_main() void {
         }
 
         leds.sync() catch |err| @panic(@errorName(err));
-        c.vTaskDelay(msToTicks(frame_duration_ms));
+        esp_idf.sys.vTaskDelay(msToTicks(frame_duration_ms));
     }
 }
 
-fn msToTicks(ms: u32) c.TickType_t {
-    return @intCast(@divTrunc(ms * c.configTICK_RATE_HZ, 1000));
+fn msToTicks(ms: u32) u32 {
+    return @divTrunc(ms * options.FREERTOS_HZ, 1000);
 }
 
 fn shouldEnableWireless() bool {

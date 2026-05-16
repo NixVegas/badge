@@ -63,21 +63,29 @@
           _module.args.pkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [
+              (_: prev: { python310 = prev.python311; })
               nixpkgs-esp-dev.overlays.default
               self.overlays.default
             ];
             config = {
               permittedInsecurePackages = [
                 "python3.13-ecdsa-0.19.1"
+                "python3.13-ecdsa-0.19.2"
               ];
             };
           };
 
           overlayAttrs = {
             # nothing for now
-            nixbadge = pkgs.callPackage ./pkgs/nixbadge rec {
+            nixbadge = pkgs.callPackage ./pkgs/nixbadge {
               target = "esp32c6";
-              esp-idf = pkgs."esp-idf-${target}";
+              esp-idf = pkgs.esp-idf-riscv.override {
+                toolsToInclude = [
+                  "riscv32-esp-elf"
+                  "openocd-esp32"
+                  "esp-rom-elfs"
+                ];
+              };
             };
             flakever = flakeverConfig;
           };

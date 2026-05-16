@@ -1,0 +1,18 @@
+.{
+    .name = .nixbadge,
+    .version = "0.0.0",
+    .fingerprint = 0x61ce547a324e8331,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zbor = .{
+            .url = "https://codeberg.org/r4gus/zbor/archive/0.21.2.tar.gz",
+            .hash = "zbor-0.21.2-kr-CoPF7AwAU2EqWqJzgxd1jHhpaaRBK0_c1LCgiwTbn",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "lib",
+        "main",
+    },
+}
