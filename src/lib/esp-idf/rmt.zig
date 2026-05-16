@@ -4,9 +4,12 @@
 
 pub const ChannelHandle = ?*anyopaque;
 pub const EncoderHandle = ?*Encoder;
+
 pub const EsClockSource = enum(c_uint) {
-    default = 1, // RMT_CLK_SRC_DEFAULT == SOC_MOD_CLK_PLL_F80M on esp32c6
-    _,
+    pll_f80m = 4,
+    xtal = 9,
+    rc_fast = 8,
+    pub const default: EsClockSource = .pll_f80m;
 };
 
 pub const EncodeState = c_uint;
@@ -33,8 +36,8 @@ pub const ResetFn = *const fn (encoder: *Encoder) callconv(.c) c_int;
 
 pub const Encoder = extern struct {
     encode: ?EncodeFn = null,
-    del: ?DelFn = null,
     reset: ?ResetFn = null,
+    del: ?DelFn = null,
 };
 
 /// `rmt_tx_channel_config_t` (driver/rmt_tx.h). `flags` is a C bitfield word;

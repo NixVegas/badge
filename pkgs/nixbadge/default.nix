@@ -9,6 +9,7 @@
   flakever,
   mkShell,
   runCommand,
+  nukeReferences,
 }:
 
 let
@@ -162,6 +163,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   nativeBuildInputs = [
     zig
+    nukeReferences
   ];
 
   buildInputs = [
@@ -205,7 +207,13 @@ stdenv.mkDerivation (finalAttrs: {
 
   installPhase = ''
     runHook preInstall
-    cp -a build $out
+    # $out is the deliverable artifact set, not the whole build tree —
+    # otherwise the runtime closure pulls in the toolchain and `nix copy`
+    # becomes huge.
+    mkdir -p $out
+    cp build/nixbadge.elf build/nixbadge.bin $out/
+    nuke-refs $out/nixbadge.elf
+    nuke-refs $out/nixbadge.bin
     runHook postInstall
   '';
 
@@ -213,13 +221,31 @@ stdenv.mkDerivation (finalAttrs: {
 
   doDist = true;
 
+  allowedReferences = [
+    flash
+    console
+  ];
+
   distPhase = ''
     runHook preDist
 
-    mkdir -p $flash/bin $flash/libexec/nixbadge
+    # Stage just the files the flash script reads at runtime into $flash so
+    # the output is self-contained.
+    build_dir=$flash/libexec/nixbadge/build
+    mkdir -p $flash/bin "$build_dir/bootloader" "$build_dir/partition_table"
     ln -s ${lib.getExe flash} $flash/bin/
     ln -s ${lib.getExe console} $flash/bin/
-    ln -s $out $flash/libexec/nixbadge/build
+
+    cp build/flasher_args.json "$build_dir/"
+    cp build/flash_args "$build_dir/"
+    cp build/nixbadge.bin "$build_dir/"
+    cp build/bootloader/bootloader.bin "$build_dir/bootloader/"
+    cp build/partition_table/partition-table.bin "$build_dir/partition_table/"
+
+    # Scrub embedded /nix/store/... references from the staged binaries.
+    nuke-refs "$build_dir/nixbadge.bin"
+    nuke-refs "$build_dir/bootloader/bootloader.bin"
+    nuke-refs "$build_dir/partition_table/partition-table.bin"
 
     runHook postDist
   '';

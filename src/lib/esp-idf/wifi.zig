@@ -4,13 +4,16 @@ const sys = @import("sys.zig");
 
 pub const OsiFuncs = opaque {};
 
-/// `wpa_crypto_funcs_t` (esp_wifi_crypto_types.h): two u32s + 10 function
-/// pointers = 48 bytes. We never construct one; ESP-IDF exports a fully
+/// `wpa_crypto_funcs_t` (esp_wifi_crypto_types.h): two u32s + 9 function
+/// pointers = 44 bytes. We never construct one; ESP-IDF exports a fully
 /// populated `g_wifi_default_wpa_crypto_funcs` that callers copy in.
+/// (The 9 fns: hmac_sha256_vector, pbkdf2_sha1, aes_128_encrypt,
+///  aes_128_decrypt, omac1_aes_128, ccmp_decrypt, ccmp_encrypt, aes_gmac,
+///  sha256_vector.)
 pub const CryptoFuncs = extern struct {
     size: u32,
     version: u32,
-    fns: [10]?*const anyopaque,
+    fns: [9]?*const anyopaque,
 };
 
 extern const g_wifi_osi_funcs: OsiFuncs;
