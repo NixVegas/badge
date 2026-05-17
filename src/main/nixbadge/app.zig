@@ -6,6 +6,7 @@ const utils = @import("../utils.zig");
 const mesh = @import("mesh.zig");
 const leds = @import("leds.zig");
 const http = @import("http.zig");
+const sdcard = @import("sdcard.zig");
 const log = std.log.scoped(.nixbadge);
 
 const frame_duration_ms: u32 = 20;
@@ -51,9 +52,11 @@ pub export fn app_main() void {
     esp_idf.wifi.esp_wifi_set_storage(.flash).throw() catch |err| @panic(@errorName(err));
 
     if (shouldEnableWireless()) {
-        mesh.init();
+        mesh.init(.{ .cache_only = readCacheOnlyFlag() });
         http.init();
     }
+
+    sdcard.mount();
 
     log.info("Start LED rainbow chase", .{});
     leds.init() catch |err| @panic(@errorName(err));
@@ -97,5 +100,12 @@ fn readBootMeshFlag() bool {
     const handle = esp_idf.nvs.open("config", .readonly) catch return false;
     defer esp_idf.nvs.close(handle);
     const value = esp_idf.nvs.getU8(handle, "boot_mesh") catch return false;
+    return (value orelse 0) != 0;
+}
+
+fn readCacheOnlyFlag() bool {
+    const handle = esp_idf.nvs.open("config", .readonly) catch return false;
+    defer esp_idf.nvs.close(handle);
+    const value = esp_idf.nvs.getU8(handle, "cache_only") catch return false;
     return (value orelse 0) != 0;
 }

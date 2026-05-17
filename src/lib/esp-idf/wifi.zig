@@ -68,6 +68,11 @@ pub fn getStaRssi() !c_int {
 const wifi_config_size: usize = 200;
 const sta_pmf_required_offset: usize = 129;
 const ap_pmf_required_offset: usize = 118;
+/// Offset of `wifi_ap_config_t.authmode` (enum, 4 bytes, aligned to 4).
+/// Layout: ssid[32] + password[64] + ssid_len(1) + channel(1) + pad(2) +
+/// authmode(4) → 96 + 4 = 100.
+const ap_authmode_offset: usize = 100;
+const WIFI_AUTH_WPA2_PSK: u8 = 3;
 
 const ConfigBuf = extern struct {
     bytes: [wifi_config_size]u8 align(4) = @splat(0),
@@ -93,6 +98,9 @@ pub fn setApConfig(ssid: []const u8, password: []const u8) !void {
     var buf = ConfigBuf{};
     fillSsidPassword(&buf, ssid, password);
     buf.bytes[ap_pmf_required_offset] = 0;
+    // Without an explicit authmode, ESP-IDF brings the AP up as WIFI_AUTH_OPEN
+    // (=0) even when a password is set, so clients fail WPA2 negotiation.
+    buf.bytes[ap_authmode_offset] = WIFI_AUTH_WPA2_PSK;
     try esp_bridge_wifi_set_config(.ap, &buf).throw();
 }
 

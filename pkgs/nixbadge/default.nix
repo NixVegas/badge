@@ -207,9 +207,6 @@ stdenv.mkDerivation (finalAttrs: {
 
   installPhase = ''
     runHook preInstall
-    # $out is the deliverable artifact set, not the whole build tree —
-    # otherwise the runtime closure pulls in the toolchain and `nix copy`
-    # becomes huge.
     mkdir -p $out
     cp build/nixbadge.elf build/nixbadge.bin $out/
     nuke-refs $out/nixbadge.elf

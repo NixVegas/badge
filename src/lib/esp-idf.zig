@@ -11,6 +11,7 @@ pub const mesh_lite = @import("esp-idf/mesh_lite.zig");
 pub const netif = @import("esp-idf/netif.zig");
 pub const nvs = @import("esp-idf/nvs.zig");
 pub const rmt = @import("esp-idf/rmt.zig");
+pub const sdmmc = @import("esp-idf/sdmmc.zig");
 pub const stdlib = @import("esp-idf/stdlib.zig");
 pub const sys = @import("esp-idf/sys.zig");
 pub const timer = @import("esp-idf/timer.zig");
@@ -28,7 +29,9 @@ fn logFn(
     args: anytype,
 ) void {
     var buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(&buf, format, args) catch return;
+    // `esp_log_write` does not add a newline; append one so messages don't
+    // run together in the serial console.
+    const msg = std.fmt.bufPrintZ(&buf, format ++ "\n", args) catch return;
     sys.logWrite(.fromStd(level), @tagName(scope), msg);
 }
 

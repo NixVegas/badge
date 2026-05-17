@@ -100,7 +100,7 @@ pub fn setupGpios() !void {
     try configGpios();
 
     gpio_evt_queue = try esp_idf.freertos.queueCreate(10, @sizeOf(u32));
-    try esp_idf.freertos.taskCreate(gpioTask, "gpio_task", 2048, null, 10, null);
+    try esp_idf.freertos.taskCreate(gpioTask, "gpio_task", 4096, null, 10, null);
     try esp_idf.drivers.gpio.isrHandlerAdd(input_pin, gpioIsrHandler, @ptrFromInt(@as(usize, @intCast(input_pin))));
 }
 

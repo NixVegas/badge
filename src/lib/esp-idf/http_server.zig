@@ -4,9 +4,13 @@ const std = @import("std");
 
 pub const Handle = ?*anyopaque;
 
-/// `enum http_method` from llhttp / http_parser. Only the values we care about.
 pub const Method = enum(c_int) {
+    DELETE = 0,
     GET = 1,
+    HEAD = 2,
+    POST = 3,
+    PUT = 4,
+    ANY = std.math.maxInt(c_int),
     _,
 };
 
@@ -73,7 +77,22 @@ pub const Config = extern struct {
 
 pub extern fn httpd_start(handle: *Handle, config: *const Config) c_int;
 pub extern fn httpd_register_uri_handler(handle: Handle, uri: *const UriEntry) c_int;
+
+pub const ErrCode = enum(c_uint) {
+    HTTPD_500_INTERNAL_SERVER_ERROR = 0,
+    HTTPD_501_METHOD_NOT_IMPLEMENTED = 1,
+    HTTPD_505_VERSION_NOT_SUPPORTED = 2,
+    HTTPD_400_BAD_REQUEST = 3,
+    HTTPD_401_UNAUTHORIZED = 4,
+    HTTPD_403_FORBIDDEN = 5,
+    HTTPD_404_NOT_FOUND = 6,
+    HTTPD_405_METHOD_NOT_ALLOWED = 7,
+    HTTPD_408_REQ_TIMEOUT = 8,
+    _,
+};
+
 pub extern fn httpd_resp_send(req: *Req, buf: [*]const u8, len: c_int) c_int;
+pub extern fn httpd_resp_send_err(req: *Req, error_code: ErrCode, msg: ?[*:0]const u8) c_int;
 pub extern fn httpd_resp_send_chunk(req: *Req, buf: [*]const u8, len: c_int) c_int;
 /// `httpd_resp_sendstr_chunk` is `static inline` in the header, so we provide
 /// the equivalent ourselves: NULL terminates the chunked response stream.

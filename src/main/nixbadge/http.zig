@@ -9,7 +9,43 @@ const hc = esp_idf.http_client;
 const hs = esp_idf.http_server;
 const c_stdlib = esp_idf.stdlib;
 const mesh = @import("mesh.zig");
+const sdcard = @import("sdcard.zig");
 const log = std.log.scoped(.nixbadge_http);
+
+/// Try to serve the request from the SD card's mounted FATFS volume. The
+/// HTTP path maps 1:1 onto the on-disk layout under `/sdcard`, matching
+/// `nix copy --to file://...` output: `<hash>.narinfo`, `nar/<hash>.nar.xz`.
+/// Returns true if the file existed and was streamed (caller is done);
+/// false on miss (caller should fall through to the proxy handler).
+fn tryLocal(req: *hs.Req, content_type: [*:0]const u8) bool {
+    if (!sdcard.isMounted()) return false;
+
+    const uri_ptr: [*:0]const u8 = @ptrCast(&req.uri);
+    const uri = std.mem.sliceTo(uri_ptr, 0);
+    if (uri.len < 2 or uri[0] != '/') return false;
+
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}{s}", .{ std.mem.span(sdcard.base_path), uri }) catch return false;
+
+    const fd = esp_idf.stdlib.open(path, esp_idf.stdlib.O_RDONLY);
+    if (fd < 0) {
+        log.info("SD miss: open({s}) -> errno {d}", .{ path, esp_idf.stdlib.errno() });
+        return false;
+    }
+    defer _ = esp_idf.stdlib.close(fd);
+
+    log.info("Serving {s} from SD card", .{path});
+    _ = hs.httpd_resp_set_hdr(req, "Content-Type", content_type);
+
+    var buf: [1024]u8 = undefined;
+    while (true) {
+        const n = esp_idf.stdlib.read(fd, &buf, buf.len);
+        if (n <= 0) break;
+        if (hs.httpd_resp_send_chunk(req, &buf, @intCast(n)) != esp_idf.sys.ESP_OK) break;
+    }
+    _ = hs.httpd_resp_sendstr_chunk(req, null);
+    return true;
+}
 
 fn httpClientEvent(evt: *hc.Event) callconv(.c) c_int {
     const req: *hs.Req = @ptrCast(@alignCast(evt.user_data));
@@ -107,6 +143,14 @@ fn nixCacheInfoHandler(req: *hs.Req) callconv(.c) c_int {
 }
 
 fn proxyHandler(req: *hs.Req, content_type: [*:0]const u8, buffer_size: c_int) c_int {
+    // In cache-only mode (no STA / mesh-lite) the proxy path has no upstream
+    // to reach. Return 404 immediately instead of letting `esp_http_client`
+    // hang on DNS lookup for several seconds per request.
+    if (!mesh.hasMesh()) {
+        _ = hs.httpd_resp_send_err(req, .HTTPD_404_NOT_FOUND, "Not in cache; no upstream configured");
+        return esp_idf.sys.ESP_OK;
+    }
+
     const cache_host = getCacheHost() orelse return esp_idf.sys.ESP_FAIL;
     defer c_stdlib.free(cache_host);
 
@@ -158,10 +202,12 @@ fn proxyHandler(req: *hs.Req, content_type: [*:0]const u8, buffer_size: c_int) c
 }
 
 fn narinfoHandler(req: *hs.Req) callconv(.c) c_int {
+    if (tryLocal(req, "text/x-nix-narinfo")) return esp_idf.sys.ESP_OK;
     return proxyHandler(req, "text/x-nix-narinfo", 16 * 1024);
 }
 
 fn narHandler(req: *hs.Req) callconv(.c) c_int {
+    if (tryLocal(req, "application/x-nix-nar")) return esp_idf.sys.ESP_OK;
     return proxyHandler(req, "application/x-nix-nar", 64 * 1024);
 }
 
@@ -172,9 +218,9 @@ const Entry = struct {
 };
 
 const uri_table = [_]Entry{
-    .{ .uri = "/nix-cache-info", .method = .GET, .handler = &nixCacheInfoHandler },
-    .{ .uri = "/nar/*", .method = .GET, .handler = &narHandler },
-    .{ .uri = "/*", .method = .GET, .handler = &narinfoHandler },
+    .{ .uri = "/nix-cache-info", .method = .ANY, .handler = &nixCacheInfoHandler },
+    .{ .uri = "/nar/*", .method = .ANY, .handler = &narHandler },
+    .{ .uri = "/*", .method = .ANY, .handler = &narinfoHandler },
 };
 
 fn httpdStart(port: u16) c_int {

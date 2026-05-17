@@ -123,7 +123,7 @@ pub fn broadcast(kind: u8) c_int {
     child_config.raw_msg.msg_id = message_id;
     child_config.raw_msg.expect_resp_msg_id = resp_message_id;
     child_config.raw_msg.max_retry = 3;
-    child_config.raw_msg.data = @ptrCast(@constCast(data.ptr));
+    child_config.raw_msg.data = data.ptr;
     child_config.raw_msg.size = @intCast(data.len);
     child_config.raw_msg.raw_resend = &ml.esp_mesh_lite_send_broadcast_raw_msg_to_child;
     _ = ml.esp_mesh_lite_send_msg(ml.ESP_MESH_LITE_RAW_MSG, &child_config);
@@ -133,7 +133,7 @@ pub fn broadcast(kind: u8) c_int {
         parent_config.raw_msg.msg_id = message_id;
         parent_config.raw_msg.expect_resp_msg_id = resp_message_id;
         parent_config.raw_msg.max_retry = 3;
-        parent_config.raw_msg.data = @ptrCast(@constCast(data.ptr));
+        parent_config.raw_msg.data = data.ptr;
         parent_config.raw_msg.size = @intCast(data.len);
         parent_config.raw_msg.raw_resend = &ml.esp_mesh_lite_send_broadcast_raw_msg_to_parent;
         _ = ml.esp_mesh_lite_send_msg(ml.ESP_MESH_LITE_RAW_MSG, &parent_config);
@@ -172,9 +172,11 @@ fn setSoftApInfo() void {
     if (ml.esp_mesh_lite_get_softap_ssid_from_nvs(&softap_ssid, &ssid_size) != esp_idf.sys.ESP_OK) {
         var softap_mac: [6]u8 = @splat(0);
         _ = esp_idf.wifi.esp_wifi_get_mac(.ap, &softap_mac);
+        // Match iot_bridge's lowercase `%02x` so the log line agrees with the
+        // SSID actually advertised by `esp_bridge_wifi_set_config`.
         const written = std.fmt.bufPrintZ(
             &softap_ssid,
-            "{s}_{X:0>2}{X:0>2}{X:0>2}",
+            "{s}_{x:0>2}{x:0>2}{x:0>2}",
             .{ options.BRIDGE_SOFTAP_SSID, softap_mac[3], softap_mac[4], softap_mac[5] },
         ) catch unreachable;
         _ = written;
@@ -188,8 +190,6 @@ fn setSoftApInfo() void {
     }
 
     log.info("Serving SoftAP as {s}", .{std.mem.sliceTo(&softap_ssid, 0)});
-
-    _ = ml.esp_mesh_lite_set_softap_info(@ptrCast(&softap_ssid), @ptrCast(&softap_psw));
 }
 
 extern fn esp_bridge_create_softap_netif(
@@ -205,10 +205,21 @@ extern fn esp_bridge_create_station_netif(
     enable_dhcps: bool,
 ) ?*esp_idf.netif.Netif;
 
-pub fn init() void {
-    is_meshing = true;
+pub const InitOptions = struct {
+    cache_only: bool = false,
+};
 
+pub fn init(opts: InitOptions) void {
     _ = esp_bridge_create_softap_netif(null, null, true, true);
+    esp_idf.wifi.setApConfig(options.BRIDGE_SOFTAP_SSID, options.BRIDGE_SOFTAP_PASSWORD) catch |err| @panic(@errorName(err));
+
+    if (opts.cache_only) {
+        log.info("Cache-only mode: skipping STA + mesh-lite", .{});
+        is_meshing = false;
+        return;
+    }
+
+    is_meshing = true;
     netif_sta = esp_bridge_create_station_netif(null, null, false, false);
 
     const handle = esp_idf.nvs.open("config", .readonly) catch |err| @panic(@errorName(err));
@@ -221,7 +232,6 @@ pub fn init() void {
     defer c_stdlib.free(router_passwd.ptr);
 
     esp_idf.wifi.setStaConfig(router_ssid, router_passwd) catch |err| @panic(@errorName(err));
-    esp_idf.wifi.setApConfig(options.BRIDGE_SOFTAP_SSID, options.BRIDGE_SOFTAP_PASSWORD) catch |err| @panic(@errorName(err));
 
     var mesh_lite_config = std.mem.zeroes(ml.Config);
     mesh_lite_config.vendor_id[0] = @intCast(options.MESH_LITE_VENDOR_ID_0 & 0xff);

@@ -123,5 +123,6 @@ pub const logWrite = esp_log_write;
 pub const ESP_OK: c_int = 0;
 pub const ESP_FAIL: c_int = -1;
 pub const ESP_ERR_NO_MEM: c_int = 0x101;
+pub const ESP_ERR_NOT_FOUND: c_int = 0x105;
 
 pub extern fn vTaskDelay(ticks: u32) void;

@@ -2,12 +2,17 @@
 
 pub const ROOT: c_int = 1;
 
-pub const ESP_MESH_LITE_RAW_MSG: c_int = 0;
+// esp_mesh_lite_msg_data_t enum from esp_mesh_lite_core.h:
+//   ESP_MESH_LITE_JSON_MSG = 0
+//   ESP_MESH_LITE_RAW_MSG  = 1
+//   ESP_MESH_LITE_OTHER_MSG = 2
+pub const ESP_MESH_LITE_JSON_MSG: c_int = 0;
+pub const ESP_MESH_LITE_RAW_MSG: c_int = 1;
+pub const ESP_MESH_LITE_OTHER_MSG: c_int = 2;
 
 pub const SendBroadcastRawFn = *const fn (
-    msg: ?*anyopaque,
-    size: u32,
-    flag: u32,
+    data: ?[*]const u8,
+    size: usize,
 ) callconv(.c) c_int;
 
 pub const RawProcess = *const fn (
@@ -24,18 +29,19 @@ pub const RawMsgAction = extern struct {
     raw_process: RawProcess,
 };
 
+pub const RawSendFailFn = *const fn (msg_id: u32) callconv(.c) void;
+
 pub const RawMsgConfig = extern struct {
     msg_id: u32 = 0,
     expect_resp_msg_id: u32 = 0,
-    max_retry: u8 = 0,
+    max_retry: u32 = 0,
     retry_interval: u16 = 0,
-    data: ?*anyopaque = null,
-    size: u32 = 0,
+    data: ?[*]const u8 = null,
+    size: usize = 0,
     raw_resend: ?SendBroadcastRawFn = null,
+    raw_send_fail: ?RawSendFailFn = null,
 };
 
-/// `esp_mesh_lite_msg_config_t` is a union of typed msg configs. RawMsgConfig
-/// is the largest variant in our usage; this struct mirrors that variant.
 pub const MsgConfig = extern struct {
     raw_msg: RawMsgConfig = .{},
 };
@@ -67,12 +73,10 @@ pub extern fn esp_mesh_lite_get_softap_ssid_from_nvs(ssid: [*]u8, size: *usize) 
 pub extern fn esp_mesh_lite_get_softap_psw_from_nvs(psw: [*]u8, size: *usize) c_int;
 pub extern fn esp_mesh_lite_set_softap_info(ssid: [*:0]const u8, psw: [*:0]const u8) c_int;
 pub extern fn esp_mesh_lite_send_broadcast_raw_msg_to_child(
-    msg: ?*anyopaque,
-    size: u32,
-    flag: u32,
+    data: ?[*]const u8,
+    size: usize,
 ) callconv(.c) c_int;
 pub extern fn esp_mesh_lite_send_broadcast_raw_msg_to_parent(
-    msg: ?*anyopaque,
-    size: u32,
-    flag: u32,
+    data: ?[*]const u8,
+    size: usize,
 ) callconv(.c) c_int;
