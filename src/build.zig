@@ -31,6 +31,26 @@ pub fn build(b: *std.Build) !void {
     const options = b.addOptions();
     options.addOption(Revision, "board_rev", board_rev);
 
+    // Parse sdkconfig.h once at build time and expose the values our Zig code
+    // needs as `options.*` consts. Avoids @cImport'ing sdkconfig.h (which
+    // would drag in newlib headers via aro's translate-c and explode).
+    addSdkconfigOptions(b, options, esp_idf_build_path) catch |err| @panic(@errorName(err));
+
+    const options_module = options.createModule();
+
+    const esp_idf_module = importIdf(b, .{
+        .target = target,
+        .optimize = optimize,
+        .source_path = esp_idf_source_path,
+        .build_path = esp_idf_build_path,
+        .options_module = options_module,
+    });
+
+    const zbor_dep = b.dependency("zbor", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const lib = b.addLibrary(.{
         .name = "nixbadge_zig",
         .linkage = .static,
@@ -39,19 +59,9 @@ pub fn build(b: *std.Build) !void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{
-                    .name = "esp-idf",
-                    .module = importIdf(b, .{
-                        .target = target,
-                        .optimize = optimize,
-                        .source_path = esp_idf_source_path,
-                        .build_path = esp_idf_build_path,
-                    }),
-                },
-                .{
-                    .name = "options",
-                    .module = options.createModule(),
-                },
+                .{ .name = "esp-idf", .module = esp_idf_module },
+                .{ .name = "options", .module = options_module },
+                .{ .name = "zbor", .module = zbor_dep.module("zbor") },
             },
         }),
     });
@@ -59,27 +69,114 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(lib);
 }
 
-pub fn importIdf(b: *std.Build, options: struct {
+pub fn importIdf(b: *std.Build, opts: struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     source_path: std.Build.LazyPath,
     build_path: std.Build.LazyPath,
+    options_module: *std.Build.Module,
 }) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path("lib/esp-idf.zig"),
-        .target = options.target,
-        .optimize = options.optimize,
+        .target = opts.target,
+        .optimize = opts.optimize,
         .link_libc = true,
     });
+    module.addImport("options", opts.options_module);
 
-    var iter = std.mem.splitSequence(u8, b.graph.env_map.get("INCLUDE_DIRS") orelse @panic("Missing INCLUDE_DIRS env"), ";");
-    while (iter.next()) |dir| {
-        module.addIncludePath(.{ .cwd_relative = dir });
-    }
-
-    module.addObjectFile(options.build_path.path(b, "esp_driver_uart/libesp_driver_uart.a"));
-    module.addObjectFile(options.build_path.path(b, "esp_system/libesp_system.a"));
-    module.addObjectFile(options.build_path.path(b, "esp_wifi/libesp_wifi.a"));
-    module.addObjectFile(options.build_path.path(b, "wpa_supplicant/libwpa_supplicant.a"));
+    // No @cImport anymore - all ESP-IDF bindings are written by hand in
+    // lib/esp-idf/*.zig, so we don't need to feed clang/aro the INCLUDE_DIRS.
+    // We still pull in the prebuilt ESP-IDF static archives directly so the
+    // linker resolves esp_wifi_init / xQueueGenericCreate / etc.
+    module.addObjectFile(opts.build_path.path(b, "esp_driver_uart/libesp_driver_uart.a"));
+    module.addObjectFile(opts.build_path.path(b, "esp_system/libesp_system.a"));
+    module.addObjectFile(opts.build_path.path(b, "esp_wifi/libesp_wifi.a"));
+    module.addObjectFile(opts.build_path.path(b, "wpa_supplicant/libwpa_supplicant.a"));
     return module;
+}
+
+// CONFIG_* keys we expose to Zig (subset of sdkconfig.h we actually use).
+const sdkconfig_u32_keys = [_][]const u8{
+    "BRIDGE_SOFTAP_MAX_CONNECT_NUMBER",
+    "ESP_WIFI_DYNAMIC_RX_BUFFER_NUM",
+    "ESP_WIFI_DYNAMIC_RX_MGMT_BUF",
+    "ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM",
+    "ESP_WIFI_STATIC_RX_BUFFER_NUM",
+    "ESP_WIFI_TX_BUFFER_TYPE",
+    "HTTPD_MAX_REQ_HDR_LEN",
+    "HTTPD_MAX_URI_LEN",
+    "MESH_LITE_ID",
+    "MESH_LITE_MAXIMUM_LEVEL_ALLOWED",
+    "MESH_LITE_MAX_ROUTER_NUMBER",
+    "MESH_LITE_VENDOR_ID_0",
+    "MESH_LITE_VENDOR_ID_1",
+    // Additional WiFi init defaults (resolved through WIFI_*_NUM macros).
+    "ESP_WIFI_STATIC_TX_BUFFER_NUM",
+    "ESP_WIFI_DYNAMIC_TX_BUFFER_NUM",
+    "ESP_WIFI_CACHE_TX_BUFFER_NUM",
+    "ESP_WIFI_RX_MGMT_BUF_NUM_DEF",
+    "ESP_WIFI_RX_BA_WIN",
+    "ESP_WIFI_SOFTAP_BEACON_MAX_LEN",
+    "ESP_WIFI_MGMT_SBUF_NUM",
+    "ESP_WIFI_TX_HETB_QUEUE_NUM",
+    "FREERTOS_HZ",
+    // Optional (default 0 if unset in sdkconfig)
+    "MESH_LITE_MAXIMUM_NODE_NUMBER",
+    "JOIN_MESH_IGNORE_ROUTER_STATUS",
+    "JOIN_MESH_WITHOUT_CONFIGURED_WIFI_INFO",
+    "LEAF_NODE",
+    "OTA_DATA_LEN",
+    "OTA_WND_DEFAULT",
+};
+
+const sdkconfig_string_keys = [_][]const u8{
+    "BRIDGE_SOFTAP_SSID",
+    "BRIDGE_SOFTAP_PASSWORD",
+    "DEVICE_CATEGORY",
+};
+
+fn addSdkconfigOptions(b: *std.Build, options: *std.Build.Step.Options, esp_idf_build: std.Build.LazyPath) !void {
+    // sdkconfig.h is generated by `idf.py set-target` at <esp-idf-build>/../config/sdkconfig.h.
+    // esp-idf-build = <build>/esp-idf, so config dir is its sibling.
+    const build_dir = esp_idf_build.getPath(b);
+    const sdkconfig_h_path = try std.fs.path.join(b.allocator, &.{ build_dir, "..", "config", "sdkconfig.h" });
+    const io = b.graph.io;
+    const content = std.Io.Dir.cwd().readFileAlloc(io, sdkconfig_h_path, b.allocator, .limited(4 * 1024 * 1024)) catch |err| {
+        std.debug.print("could not read sdkconfig.h at {s}: {}\n", .{ sdkconfig_h_path, err });
+        return err;
+    };
+
+    inline for (sdkconfig_u32_keys) |key| {
+        const value = parseDefineU32(content, "CONFIG_" ++ key) orelse 0;
+        options.addOption(u32, key, value);
+    }
+    inline for (sdkconfig_string_keys) |key| {
+        const value = parseDefineString(content, "CONFIG_" ++ key) orelse "";
+        options.addOption([:0]const u8, key, b.allocator.dupeZ(u8, value) catch @panic("OOM"));
+    }
+}
+
+fn parseDefineU32(content: []const u8, key: []const u8) ?u32 {
+    const val = parseDefineRaw(content, key) orelse return null;
+    return std.fmt.parseInt(u32, std.mem.trim(u8, val, " \t"), 0) catch null;
+}
+
+fn parseDefineString(content: []const u8, key: []const u8) ?[]const u8 {
+    const val = parseDefineRaw(content, key) orelse return null;
+    const trimmed = std.mem.trim(u8, val, " \t");
+    if (trimmed.len < 2 or trimmed[0] != '"' or trimmed[trimmed.len - 1] != '"') return trimmed;
+    return trimmed[1 .. trimmed.len - 1];
+}
+
+fn parseDefineRaw(content: []const u8, key: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, content, '\n');
+    while (it.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t");
+        if (!std.mem.startsWith(u8, t, "#define ")) continue;
+        const rest = t[8..];
+        const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse continue;
+        if (!std.mem.eql(u8, rest[0..sp], key)) continue;
+        return rest[sp + 1 ..];
+    }
+    return null;
 }

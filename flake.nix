@@ -2,10 +2,17 @@
   description = "Rebuild the world... or just the Nix Badge.";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
+    nixpkgs-esp-dev = {
+      url = "github:mirrexagon/nixpkgs-esp-dev";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     flake-parts.url = "github:hercules-ci/flake-parts";
     flake-compat.url = "https://flakehub.com/f/edolstra/flake-compat/1.tar.gz";
     flakever.url = "github:numinit/flakever";
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -14,18 +21,24 @@
       flake-parts,
       flakever,
       nixpkgs-esp-dev,
+      treefmt-nix,
       ...
     }:
     let
       flakeverConfig = flakever.lib.mkFlakever {
         inherit inputs;
 
-        digits = [ 1 2 2 ];
+        digits = [
+          1
+          2
+          2
+        ];
       };
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
         inputs.flake-parts.flakeModules.easyOverlay
+        inputs.treefmt-nix.flakeModule
       ];
 
       flake = {
@@ -50,23 +63,36 @@
           _module.args.pkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [
+              (_: prev: { python310 = prev.python311; })
               nixpkgs-esp-dev.overlays.default
               self.overlays.default
             ];
             config = {
               permittedInsecurePackages = [
                 "python3.13-ecdsa-0.19.1"
+                "python3.13-ecdsa-0.19.2"
               ];
             };
           };
 
           overlayAttrs = {
             # nothing for now
-            nixbadge = pkgs.callPackage ./pkgs/nixbadge rec {
+            nixbadge = pkgs.callPackage ./pkgs/nixbadge {
               target = "esp32c6";
-              esp-idf = pkgs."esp-idf-${target}";
+              esp-idf = pkgs.esp-idf-riscv.override {
+                toolsToInclude = [
+                  "riscv32-esp-elf"
+                  "openocd-esp32"
+                  "esp-rom-elfs"
+                ];
+              };
             };
             flakever = flakeverConfig;
+          };
+
+          treefmt.programs = {
+            nixfmt.enable = true;
+            zig.enable = true;
           };
 
           packages = {

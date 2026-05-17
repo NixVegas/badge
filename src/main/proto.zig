@@ -1,8 +1,5 @@
 const std = @import("std");
-const esp_idf = @import("esp-idf");
-const utils = @import("utils.zig");
-const Allocator = std.mem.Allocator;
-const der = std.crypto.codecs.asn1.der;
+const zbor = @import("zbor");
 
 pub const packet_size = 18;
 
@@ -16,59 +13,23 @@ pub const Packet = union(Tag) {
     req_ping: void,
 
     pub fn init(tag: std.meta.Tag(Packet)) Packet {
-        inline for (std.meta.fields(Packet)) |f| {
-            const expected: Tag = std.meta.stringToEnum(Tag, f.name) orelse unreachable;
-            if (tag == expected) {
-                return @unionInit(Packet, f.name, switch (f.type) {
-                    void => {},
-                    inline else => f.type.init(),
-                });
-            }
-        }
-        unreachable;
+        return switch (tag) {
+            inline else => |t| @unionInit(Packet, @tagName(t), {}),
+        };
     }
 
-    pub fn decodeDer(decoder: *der.Decoder) !Packet {
-        const tag: Tag = try decoder.any(Tag);
-
-        inline for (std.meta.fields(Packet)) |f| {
-            const expected: Tag = std.meta.stringToEnum(Tag, f.name) orelse unreachable;
-            if (tag == expected) {
-                return @unionInit(Packet, f.name, switch (f.type) {
-                    void => {},
-                    inline else => try decoder.any(f.type),
-                });
-            }
-        }
-        return error.Unexpected;
-    }
-
-    pub fn encodeDer(self: Packet, encoder: *der.Encoder) !void {
-        switch (self) {
-            .req_ping, .ping => {},
-        }
-
-        try encoder.any(std.meta.activeTag(self));
-    }
-
+    /// Wire format: CBOR-encoded `Tag` value, zero-padded to `packet_size`.
+    /// The variants currently carry no payload, so the tag is the whole packet.
     pub fn encode(self: Packet) ![packet_size]u8 {
-        var tmpbuff = [_]u8{0} ** (packet_size * 2);
-        var fba = std.heap.FixedBufferAllocator.init(&tmpbuff);
-
-        var encoder = der.Encoder.init(fba.allocator());
-        try encoder.buffer.ensureCapacity(packet_size);
-
-        try encoder.any(self);
-
-        var buff = [_]u8{0} ** packet_size;
-        const i: usize = @min(buff.len, encoder.buffer.data.len);
-        @memcpy(buff[0..i], encoder.buffer.data[0..i]);
-
+        var buff: [packet_size]u8 = @splat(0);
+        var writer = std.Io.Writer.fixed(&buff);
+        zbor.stringify(std.meta.activeTag(self), .{}, &writer) catch return error.Encode;
         return buff;
     }
 
     pub fn decode(buff: []const u8) !Packet {
-        var decoder = der.Decoder{ .bytes = buff };
-        return try decoder.any(Packet);
+        const item = zbor.DataItem.new(buff) catch return error.Malformed;
+        const tag = zbor.parse(Tag, item, .{}) catch return error.Decode;
+        return init(tag);
     }
 };

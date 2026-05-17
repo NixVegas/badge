@@ -2,7 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const sys = @import("../sys.zig");
 
-pub const IsrHandler = *const fn (?*anyopaque) callconv(.C) void;
+pub const IsrHandler = *const fn (?*anyopaque) callconv(.c) void;
 
 pub const Config = extern struct {
     pin_bit_mask: u64,
@@ -58,6 +58,9 @@ extern fn gpio_set_level(c_int, u32) sys.Error;
 pub inline fn setLevel(gpio_num: c_int, level: u32) !void {
     return gpio_set_level(gpio_num, level).throw();
 }
+
+extern fn gpio_get_level(c_int) c_int;
+pub const getLevel = gpio_get_level;
 
 comptime {
     assert(@sizeOf(IntType) == 4);

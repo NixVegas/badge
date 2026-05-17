@@ -21,6 +21,8 @@ if(CONFIG_BADGE_HW_REV_0_5 STREQUAL "y")
     set(BOARD_REV "0.5")
 elseif(CONFIG_BADGE_HW_REV_1_0 STREQUAL "y")
     set(BOARD_REV "1.0")
+elseif(CONFIG_BADGE_HW_REV_1_5 STREQUAL "y")
+    set(BOARD_REV "1.5")
 else()
     message(FATAL_ERROR "Unrecognized hardware revision configured")
 endif()
@@ -38,7 +40,6 @@ add_custom_target(zig_build
     -Desp-idf-build=${CMAKE_BINARY_DIR}/esp-idf
     -Dboard-rev=${BOARD_REV}
     -freference-trace
-    --prominent-compile-errors
     --cache-dir ${CMAKE_BINARY_DIR}/zig-cache
     --prefix ${CMAKE_BINARY_DIR}
     DEPENDS

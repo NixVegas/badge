@@ -9,6 +9,7 @@
   flakever,
   mkShell,
   runCommand,
+  nukeReferences,
 }:
 
 let
@@ -46,21 +47,24 @@ let
     '';
   };
 
-  nvs = runCommand "nvs.bin" {
-    src = ../../src;
+  nvs =
+    runCommand "nvs.bin"
+      {
+        src = ../../src;
 
-    nativeBuildInputs = [
-      esp-idf
-    ];
-  } ''
-    runPhase unpackPhase
-    sh scripts/gen_nvs.sh \
-      --cache-cert=${./cache.nixos.lv.pem} \
-      --cache-upstream=cache.nixos.lv \
-      --router-ssid=NixVegas \
-      --router-passwd=RebuildTheWorld \
-      --output=$out
-  '';
+        nativeBuildInputs = [
+          esp-idf
+        ];
+      }
+      ''
+        runPhase unpackPhase
+        sh scripts/gen_nvs.sh \
+          --cache-cert=${./cache.nixos.lv.pem} \
+          --cache-upstream=cache.nixos.lv \
+          --router-ssid=NixVegas \
+          --router-passwd=RebuildTheWorld \
+          --output=$out
+      '';
 
   flash = writeShellApplication {
     name = "flash";
@@ -113,26 +117,37 @@ let
     ];
   };
 
-  managed_components = runCommand "nixbadge-components" {
+  zigDeps = zig.fetchDeps {
+    pname = "nixbadge";
+    inherit (flakever) version;
     src = ../../src;
-    inherit target;
+    fetchAll = true;
+    hash = "sha256-GxDDvyVHaTn1uvvUbnd9FlfU+8BQEVzIuQq2w4DEJe8=";
+  };
 
-    nativeBuildInputs = [
-      esp-idf
-    ];
+  managed_components =
+    runCommand "nixbadge-components"
+      {
+        src = ../../src;
+        inherit target;
 
-    outputHash = "sha256-t8nGtWoZ7DGPk70KHEVMAL/mi9aUkpENtwsUVUjtCPw=";
-    outputHashAlgo = "sha256";
-    outputHashMode = "recursive";
-  } ''
-    runPhase unpackPhase
+        nativeBuildInputs = [
+          esp-idf
+        ];
 
-    mkdir .temp
-    export HOME="$(realpath .temp)"
+        outputHash = "sha256-t8nGtWoZ7DGPk70KHEVMAL/mi9aUkpENtwsUVUjtCPw=";
+        outputHashAlgo = "sha256";
+        outputHashMode = "recursive";
+      }
+      ''
+        runPhase unpackPhase
 
-    idf.py set-target $target
-    cp -r managed_components $out
-  '';
+        mkdir .temp
+        export HOME="$(realpath .temp)"
+
+        idf.py set-target $target
+        cp -r managed_components $out
+      '';
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "nixbadge-${finalAttrs.target}";
@@ -148,6 +163,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   nativeBuildInputs = [
     zig
+    nukeReferences
   ];
 
   buildInputs = [
@@ -168,6 +184,13 @@ stdenv.mkDerivation (finalAttrs: {
 
     cp -r ${managed_components} managed_components
     ${patchIdf}
+
+    # Populate the Zig package cache from the FOD `zig.fetchDeps` produced for
+    # us (build.zig.zon dependencies, baked into a single derivation).
+    export ZIG_GLOBAL_CACHE_DIR="$HOME/zig-cache"
+    mkdir -p "$ZIG_GLOBAL_CACHE_DIR/p"
+    cp -rLT "${zigDeps}" "$ZIG_GLOBAL_CACHE_DIR/p"
+    chmod -R u+w "$ZIG_GLOBAL_CACHE_DIR/p"
   '';
 
   configurePhase = ''
@@ -184,7 +207,10 @@ stdenv.mkDerivation (finalAttrs: {
 
   installPhase = ''
     runHook preInstall
-    cp -a build $out
+    mkdir -p $out
+    cp build/nixbadge.elf build/nixbadge.bin $out/
+    nuke-refs $out/nixbadge.elf
+    nuke-refs $out/nixbadge.bin
     runHook postInstall
   '';
 
@@ -192,13 +218,31 @@ stdenv.mkDerivation (finalAttrs: {
 
   doDist = true;
 
+  allowedReferences = [
+    flash
+    console
+  ];
+
   distPhase = ''
     runHook preDist
 
-    mkdir -p $flash/bin $flash/libexec/nixbadge
+    # Stage just the files the flash script reads at runtime into $flash so
+    # the output is self-contained.
+    build_dir=$flash/libexec/nixbadge/build
+    mkdir -p $flash/bin "$build_dir/bootloader" "$build_dir/partition_table"
     ln -s ${lib.getExe flash} $flash/bin/
     ln -s ${lib.getExe console} $flash/bin/
-    ln -s $out $flash/libexec/nixbadge/build
+
+    cp build/flasher_args.json "$build_dir/"
+    cp build/flash_args "$build_dir/"
+    cp build/nixbadge.bin "$build_dir/"
+    cp build/bootloader/bootloader.bin "$build_dir/bootloader/"
+    cp build/partition_table/partition-table.bin "$build_dir/partition_table/"
+
+    # Scrub embedded /nix/store/... references from the staged binaries.
+    nuke-refs "$build_dir/nixbadge.bin"
+    nuke-refs "$build_dir/bootloader/bootloader.bin"
+    nuke-refs "$build_dir/partition_table/partition-table.bin"
 
     runHook postDist
   '';

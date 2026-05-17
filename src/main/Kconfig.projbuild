@@ -13,6 +13,11 @@ menu "NixBadge Configuration"
       bool "1_0"
       prompt "Revision 1.0"
       select BADGE_ENABLE_SDCARD
+
+    config BADGE_HW_REV_1_5
+      bool "1_5"
+      prompt "Revision 1.5"
+      select BADGE_ENABLE_SDCARD
   endchoice
 
   config BADGE_ENABLE_SDCARD
