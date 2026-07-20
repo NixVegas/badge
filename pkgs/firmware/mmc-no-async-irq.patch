@@ -1,0 +1,11 @@
+--- a/drivers/mmc/core/sdio.c	2026-06-28 00:16:45.186365554 -0700
++++ b/drivers/mmc/core/sdio.c	2026-06-28 00:16:45.196365718 -0700
+@@ -231,7 +231,7 @@
+ 			if (ret)
+ 				goto out;
+ 
+-			if (data & SDIO_INTERRUPT_EXT_SAI) {
++			if (0 /* cv18xx: host cannot deliver async SDIO irq; keep chip in normal in-band IRQ mode like vendor 5.10 so the AIC8800 fmac START_APP cfm is delivered */ && (data & SDIO_INTERRUPT_EXT_SAI)) {
+ 				data |= SDIO_INTERRUPT_EXT_EAI;
+ 				ret = mmc_io_rw_direct(card, 1, 0, SDIO_CCCR_INTERRUPT_EXT,
+ 						       data, NULL);

@@ -1,0 +1,399 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Device tree for the Milk-V Duo S (Sophgo SG2000, aarch64 ARM Cortex-A53).
+ *
+ * Based on mainline arch/arm64/boot/dts/sophgo/sg2000-milkv-duo-module-01-evb.dts
+ * and cross-checked READ-ONLY against the vendor SDK Duo S arm64 DTS at
+ * duo-buildroot-sdk-v2 build/boards/cv181x/sg2000_milkv_duos_glibc_arm64_sd/dts_arm64/.
+ *
+ * The Duo S uses the SG2000 SoM (Module 01) with a dedicated carrier board.
+ * This DTS reuses the Module 01 DTSI (which already enables eMMC, sdhci1/WiFi
+ * stubs, and aliases), then adds only what the Duo S carrier contributes:
+ *   - uart0 enabled (same pinout as EVB, confirms from vendor SDK)
+ *   - sdhci0 enabled for SD card root (same pinout as EVB, confirms from vendor SDK)
+ *   - chosen stdout-path for ttyS0 console
+ *   - Ethernet: SG2000 internal EPHY (phy-mode = "internal"), confirmed from the
+ *     Duo S schematic. No external RTL8201F/RMII PHY. The dtsi already sets
+ *     phy-handle=<&internal_ephy> and phy-mode="internal"; we just enable the
+ *     MAC and MDIO. Mirrors mainline cv1812h-huashan-pi.dts.
+ *   - USB: usb node enabled with dr_mode = "host" (Duo S has USB-A host port).
+ *     SDK source: cv1813h_milkv_duos_sd.dts shows dr_mode = "otg"; switched to
+ *     "host" to match the physical USB-A connector, mirroring cv1812h-huashan-pi.
+ *     No vbus-supply: VBUS enable is on GPIO portb pin 5 (USB_VBUS_EN) if ever
+ *     needed for bus-powered devices; upstream omits the regulator node.
+ *
+ * Carrier nodes OMITTED:
+ *   - LEDs, GPIO buttons: carrier-specific; not in mainline sg2000 dtsi.
+ *   - Camera/CSI: ISP nodes are not in the mainline sg2000 dtsi.
+ */
+
+/dts-v1/;
+#include "sg2000-milkv-duo-module-01.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	model = "Milk-V Duo S";
+	compatible = "milkv,duo-s", "sophgo,sg2000";
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+};
+
+/*
+ * SoC reset / userspace `reboot`.
+ *
+ * The mainline sg2000.dtsi has NO watchdog node, so mainline Linux registers
+ * no restart handler for this SoC other than PSCI. The inherited /psci node
+ * (arm,psci-0.2, method "smc") routes machine_restart -> SYSTEM_RESET into
+ * BL31, but the SG2000 BL31 blob does not implement SYSTEM_RESET, so the SMC
+ * returns and machine_restart() falls through to an infinite spin: the console
+ * prints "reboot: Restarting system" and hangs forever.
+ *
+ * Fix: expose the CV1800B/SG2000 Synopsys DesignWare watchdog. The mainline
+ * dw_wdt driver (CONFIG_DW_WDT) registers a restart handler at priority 128
+ * (watchdog_set_restart_priority, drivers/watchdog/dw_wdt.c) whose
+ * dw_wdt_restart() programs the shortest timeout in RESET response mode and
+ * kicks the counter, asserting the SoC watchdog-reset line.
+ *
+ * Why this actually resets the whole chip: on the CV18xx/SG2000 the watchdog
+ * reset output is gated in the always-on RTC block by RTC_EN_WDT_RST_REQ
+ * (0x050260E0). The vendor FSBL we boot (sophgo/fsbl plat/cv181x, built by
+ * pkgs/firmware/fsbl.nix) writes 0x050260E0 = 1 in early platform init
+ * ("enable rtc_core watchdog reset enable"), so a watchdog timeout propagates
+ * to a full SoC reset. Nothing in mainline Linux clears that bit, so it
+ * persists and the watchdog restart handler resets the board.
+ *
+ * Node facts (evidence):
+ *   - base 0x03010000, size 0x1000: vendor cv181x_base.dtsi "cv-wd@0x3010000"
+ *     (compatible "snps,dw-wdt") and vendor u-boot WATCHDOG_BASE = TOP_BASE +
+ *     0x10000 = 0x03000000 + 0x10000.
+ *   - clock CLK_APB_WDT (58): the mainline sophgo clk driver registers the
+ *     clk_apb_wdt gate off the 25 MHz osc (drivers/clk/sophgo/clk-cv1800.c),
+ *     matching the vendor CONFIG_DW_WDT_CLOCK_KHZ 25000. dw_wdt takes the first
+ *     unnamed clock (devm_clk_get_enabled(dev, NULL)) as its timer clock.
+ * `resets` is intentionally omitted: dw_wdt treats it as optional and the WDT
+ * is already out of reset (u-boot ran it), so we avoid depending on the
+ * sophgo,cv1800b-reset driver being built in.
+ */
+/* mainline sg2000.dtsi gives the soc node no label, so merge by full path. */
+/ {
+	soc {
+		watchdog@3010000 {
+			compatible = "snps,dw-wdt";
+			reg = <0x03010000 0x1000>;
+			clocks = <&clk CLK_APB_WDT>;
+		};
+
+		/* Reset controller (reset-simple handles sophgo,cv1800b-reset).
+		 * Mainline sg2000.dtsi omits it; SPI3 comes up HELD IN RESET on the
+		 * ARM core, so its register access stalls the dw_spi probe until the
+		 * driver deasserts RST_SPI3. */
+		rst: reset-controller@3003000 {
+			compatible = "sophgo,cv1800b-reset";
+			reg = <0x03003000 0x1000>;
+			#reset-cells = <1>;
+		};
+
+		/* SPI3 (DesignWare APB SSI). Mainline sg2000.dtsi omits the SPI
+		 * controllers entirely (only the RISC-V cv180x.dtsi has them), so
+		 * we define the node here. Exposed on the Duo-S 40-pin header:
+		 *   pin19 XGPIOB_13/SPI3_SDO(MOSI)  pin21 XGPIOB_14/SPI3_SDI(MISO)
+		 *   pin23 XGPIOB_15/SPI3_SCK        pin24 XGPIOB_16/SPI3_CS
+		 * pads VIVO_D5..D8, SPI3 = pinmux 5 (see &spi3_cfg). */
+		spi3: spi@41b0000 {
+			compatible = "snps,dw-apb-ssi";
+			reg = <0x041b0000 0x10000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			interrupts = <SOC_PERIPHERAL_IRQ(41) IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk CLK_SPI>, <&clk CLK_APB_SPI3>;
+			clock-names = "ssi_clk", "pclk";
+			/* No reset: SPI3 is already out of reset from u-boot/FSBL, and
+			 * the vendor arm64 DTS drives it with no reset at all. Mainline
+			 * has no cv18xx reset header to verify an RST_SPI3 index against,
+			 * so we avoid poking an unverified reset bit. The reset-controller
+			 * node stays for wifi-pwrseq. */
+			num-cs = <1>;
+			pinctrl-0 = <&spi3_cfg>;
+			pinctrl-names = "default";
+			status = "okay";
+
+			/* spidev for bring-up/testing -> /dev/spidev3.0. spidev only
+			 * binds known compatibles; rohm,dh2228fv is in spidev_dt_ids. */
+			spidev@0 {
+				compatible = "rohm,dh2228fv";
+				reg = <0>;
+				spi-max-frequency = <10000000>;
+			};
+		};
+	};
+};
+
+/*
+ * Pin configuration reused from the EVB (confirmed from vendor SDK Duo S dts:
+ * the SD0 and UART0 pinmux is identical to the EVB carrier).
+ */
+&pinctrl {
+	/* SPI3 on the 40-pin header (pads VIVO_D5..D8, mux 5). The VIVO pads are
+	 * 3.3V on the carrier, so power-source = <3300>. power-source is REQUIRED:
+	 * the mainline sophgo pinctrl (cv1800_dt_node_to_map_post) returns -EINVAL
+	 * for any pinmux subnode that omits it, which fails pinctrl_bind_pins in
+	 * really_probe BEFORE dw_spi_mmio_probe ever runs (silent EINVAL, no dev_err). */
+	spi3_cfg: spi3-cfg {
+		/* No bias-disable: the mainline sophgo pinctrl (sophgo_pconf_set)
+		 * only supports pull-up / pull-down / bus-hold, not BIAS_DISABLE,
+		 * and returns -ENOTSUPP for it. That failure rolls back the WHOLE
+		 * pinctrl state (mux included), leaving the pins UNCLAIMED. Omitting
+		 * bias leaves the pad at its default (no pull), which is what we want
+		 * for a push-pull SCK/MOSI anyway. */
+		spi3-sck-pins {
+			pinmux = <PINMUX(PIN_VIVO_D6, 5)>;
+			power-source = <3300>;
+		};
+		spi3-sdo-pins {
+			pinmux = <PINMUX(PIN_VIVO_D8, 5)>;
+			power-source = <3300>;
+		};
+		spi3-sdi-pins {
+			pinmux = <PINMUX(PIN_VIVO_D7, 5)>;
+			bias-pull-up;
+			power-source = <3300>;
+		};
+		spi3-cs-pins {
+			pinmux = <PINMUX(PIN_VIVO_D5, 5)>;
+			bias-pull-up;
+			power-source = <3300>;
+		};
+	};
+
+	sdhci0_cfg: sdhci0-cfg {
+		sdhci0-cd-pins {
+			pinmux = <PINMUX(PIN_SD0_CD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		sdhci0-clk-pins {
+			pinmux = <PINMUX(PIN_SD0_CLK, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <16100>;
+			power-source = <3300>;
+		};
+
+		sdhci0-cmd-pins {
+			pinmux = <PINMUX(PIN_SD0_CMD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		sdhci0-data-pins {
+			pinmux = <PINMUX(PIN_SD0_D0, 0)>,
+				 <PINMUX(PIN_SD0_D1, 0)>,
+				 <PINMUX(PIN_SD0_D2, 0)>,
+				 <PINMUX(PIN_SD0_D3, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+	uart0_cfg: uart0-cfg {
+		uart0-pins {
+			pinmux = <PINMUX(PIN_UART0_TX, 0)>,
+				 <PINMUX(PIN_UART0_RX, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+};
+
+/* Console UART */
+&uart0 {
+	pinctrl-0 = <&uart0_cfg>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/* SD card (rootfs on /dev/mmcblk0 / NIXOS_ARM label) */
+&sdhci0 {
+	bus-width = <4>;
+	no-1-8-v;
+	no-mmc;
+	no-sdio;
+	disable-wp;
+	pinctrl-0 = <&sdhci0_cfg>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/* On-chip 10/100 Ethernet: SG2000 internal EPHY straight to the RJ45 magnetics
+ * (no external PHY - confirmed from the Duo S schematic). phy-mode set
+ * explicitly to "internal" with the internal EPHY handle. Mirrors mainline
+ * cv1812h-huashan-pi.dts. NOTE: mainline 7.0.x has no driver to power/init the
+ * internal EPHY (no cv1800b dwmac glue, no EPHY phy driver), so eth0 registers
+ * but will not link until the EPHY is initialized (e.g. in U-Boot) or a kernel
+ * driver lands. This DT is correct/ready for that. */
+&gmac0 {
+	status = "okay";
+	phy-mode = "internal";
+	phy-handle = <&internal_ephy>;
+};
+
+&mdio {
+	status = "okay";
+};
+
+/*
+ * USB: SG2000 DWC2 OTG core driving the Duo S USB-A host port.
+ * dr_mode forced "host" (SDK says otg; the carrier exposes a USB-A host port).
+ * VBUS to the USB-A port is gated by USB_VBUS_EN = GPIO portb pin 5, modelled
+ * as a fixed regulator so the port powers bus-powered devices.
+ */
+/ {
+	usb_vbus: regulator-usb-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpio = <&portb 5 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+};
+
+&usb {
+	dr_mode = "host";
+	vbus-supply = <&usb_vbus>;
+	status = "okay";
+};
+
+/*
+ * Onboard WiFi: AICSemi AIC8800 on the SDIO bus mmc@4320000 (label sdhci1).
+ * mmc@4310000=SD card (sdhci0), mmc@4300000=eMMC. The AIC8800 is powered by
+ * GPIO PORTA pin 15 (WL_REG_ON, active-high), driven via mmc-pwrseq so the
+ * chip powers up before the SDIO scan and enumerates on the bus (vid 0xC8A1).
+ * (First-gate config; the out-of-tree aic8800 driver + firmware are separate.)
+ */
+/ {
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		/* WL_REG_ON = PORTA15, active-high: ACTIVE_LOW here so the pwrseq's
+		 * deassert (power-up) drives it high. Give the AIC8800 time to come
+		 * out of power-on before the SDIO scan. */
+		reset-gpios = <&porta 15 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <50>;
+	};
+
+	/* The AIC8800's core VDD reports a 3.3V OCR window in CMD5, so the mmc core
+	 * must see vmmc as 3.3V or it rejects the card ("no support for card's
+	 * volts", -EINVAL) before it powers. The bus I/O is taken to 1.8V PHYSICALLY
+	 * by the cv18xx-vsw driver patch (SD_PWRSW_CTRL) under NO_1_8_V, matching the
+	 * vendor, so there is deliberately NO 1.8V vqmmc regulator. */
+	wifi_vdd: regulator-wifi-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "aic8800-vdd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+};
+
+/*
+ * WiFi SDIO bus pads. The mmc@4320000 controller uses the SD1 pads
+ * (PIN_SD1_*, mux 0 = SDIO1, same scheme as the SD0 pads for the card).
+ * Without this mux the controller toggles pads stuck on their default
+ * function and the AIC8800 never answers the SDIO probe.
+ */
+&pinctrl {
+	/* The AIC8800 SDIO IO (VIO) is fixed 1.8V on this board, so the SoC's SD1
+	 * pads must be in the 1.8V IO domain, NOT 3.3V. With power-source=3300 the
+	 * pad domain mismatches the chip's 1.8V VIO; the bootrom limps but the fmac
+	 * firmware's higher-rate SDIO fails to confirm START_APP. Set 1800 to match.
+	 */
+	sdhci1_cfg: sdhci1-cfg {
+		sdhci1-clk-pins {
+			pinmux = <PINMUX(PIN_SD1_CLK, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <16100>;
+			power-source = <1800>;
+		};
+
+		sdhci1-cmd-pins {
+			pinmux = <PINMUX(PIN_SD1_CMD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <1800>;
+		};
+
+		sdhci1-data-pins {
+			pinmux = <PINMUX(PIN_SD1_D0, 0)>,
+				 <PINMUX(PIN_SD1_D1, 0)>,
+				 <PINMUX(PIN_SD1_D2, 0)>,
+				 <PINMUX(PIN_SD1_D3, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <1800>;
+		};
+	};
+};
+
+&sdhci1 {
+	/* MAINLINE host: keep the inherited compatible "sophgo,cv1800b-dwcmshc"
+	 * from cv180x.dtsi (the mainline dwcmshc cv18xx variant carries the PHY
+	 * tap/delay + tuning + reset for this SoC). No vendor graft.
+	 *
+	 * The whole point of this config: route the AIC8800's in-band SDIO interrupt
+	 * (CARD_INT on DAT1) through stock sdhci's real sdio_claim_irq path. With
+	 * cap-sdio-irq + the driver claiming the IRQ (poll workaround removed), stock
+	 * sdhci enables SDHCI_INT_CARD_INT AND pins the controller runtime-resumed
+	 * (pm_runtime_get_noresume in sdhci_enable_sdio_irq) so the card clock keeps
+	 * toggling during the idle post-START_APP wait and the fmac's confirmation
+	 * interrupt is actually sensed. The prior poll never did this. */
+	status = "okay";
+	/* Marks this as the SD1/SDIO (wifi) instance for the cv18xx-vsw kernel
+	 * patch: its cv18xx_init sets FLAG_CV18XX_SD1 (reg_0x200[16] instance
+	 * select + [8]/[9] reset-out in cv18xx_sdhci_reset) and FLAG_IO_FIXED_1V8
+	 * (forces true 1.8V signalling). Without this the patched glue treats the
+	 * node like an SD card and none of the SDIO-specific bring-up runs. */
+	sophgo,sdio-inst1;
+	/* VENDOR SDHCI: bind the out-of-tree cvitek cv181x SDHCI host driver
+	 * (pkgs/firmware/sdhci-cv181x) instead of mainline sdhci-of-dwcmshc, to
+	 * reproduce the exact vendor SDIO bring-up the AIC8800 fmac needs. Replaces
+	 * the inherited "sophgo,cv1800b-dwcmshc" compatible. clk_wifisd = SD1
+	 * functional clock (driver sets to max-frequency); axi = register-bus clock. */
+	compatible = "cvitek,cv181x-sdio";
+	clocks = <&clk CLK_AXI4_SD1>, <&clk CLK_SD1>;
+	clock-names = "axi", "clk_wifisd";
+	bus-width = <4>;
+	non-removable;
+	no-mmc;
+	no-sd;
+	/* CONFIG_OOB=n driver -> needs the in-band SDIO interrupt. mmc_of_parse maps
+	 * this to MMC_CAP_SDIO_IRQ so sdhci wires up SDHCI_INT_CARD_INT. */
+	cap-sdio-irq;
+	/* Hold the SDIO function powered + the controller from idling away the clock
+	 * across the post-jump wait. */
+	keep-power-in-suspend;
+	/* Match the vendor's 375MHz SDIO source clock (CLK_SD1): the bootrom->fmac
+	 * handoff timing depends on it; the mainline default (100MHz) skews it and
+	 * the firmware never comes alive. */
+	/* assigned-clocks dropped: vendor driver sets CLK_SD1 to max-frequency */
+	/* 25MHz: the cv18xx PHY runs the AIC8800 with an untuned default tap on this
+	 * mainline HS/NO_1_8_V path (no SDR104 tuning). At 50MHz+ the bus is marginal
+	 * and the core enumeration throws intermittent -84 (CRC). 25MHz gives solid
+	 * margin for bring-up. Matches the driver's lowered FEATURE_SDIO_CLOCK_V3. */
+	max-frequency = <150000000>;
+	/* Card core VDD OCR window is 3.3V (see wifi_vdd). The 1.8V bus I/O is done
+	 * physically at the SoC pad rail by the cv18xx-vsw patch under NO_1_8_V, so
+	 * there is intentionally no vqmmc regulator (a 1.8V vqmmc pinned ocr_avail
+	 * to 1.8V and the core rejected the card's 3.3V OCR). */
+	vmmc-supply = <&wifi_vdd>;
+	pinctrl-0 = <&sdhci1_cfg>;
+	pinctrl-names = "default";
+	mmc-pwrseq = <&wifi_pwrseq>;
+};

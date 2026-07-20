@@ -1,0 +1,82 @@
+--- a/include/linux/shmem_fs.h
++++ b/include/linux/shmem_fs.h
+@@ -37,6 +37,7 @@
+ 	kuid_t uid;		    /* Mount uid for root directory */
+ 	kgid_t gid;		    /* Mount gid for root directory */
+ 	bool full_inums;	    /* If i_ino should be uint or ino_t */
++	bool noswap;		    /* shmem mounted with noswap, do not swap out pages */
+ 	ino_t next_ino;		    /* The next per-sb inode number to use */
+ 	ino_t __percpu *ino_batch;  /* The next per-cpu inode number to use */
+ 	struct mempolicy *mpol;     /* default memory policy for mappings */
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -115,12 +115,14 @@
+ 	kgid_t gid;
+ 	umode_t mode;
+ 	bool full_inums;
++	bool noswap;
+ 	int huge;
+ 	int seen;
+ #define SHMEM_SEEN_BLOCKS 1
+ #define SHMEM_SEEN_INODES 2
+ #define SHMEM_SEEN_HUGE 4
+ #define SHMEM_SEEN_INUMS 8
++#define SHMEM_SEEN_NOSWAP 16
+ };
+ 
+ #ifdef CONFIG_TMPFS
+@@ -1363,6 +1365,7 @@
+ 	struct inode *inode;
+ 	swp_entry_t swap;
+ 	pgoff_t index;
++	struct shmem_sb_info *sbinfo;
+ 
+ 	VM_BUG_ON_PAGE(PageCompound(page), page);
+ 	BUG_ON(!PageLocked(page));
+@@ -1370,9 +1373,10 @@
+ 	index = page->index;
+ 	inode = mapping->host;
+ 	info = SHMEM_I(inode);
++	sbinfo = SHMEM_SB(inode->i_sb);
+ 	if (info->flags & VM_LOCKED)
+ 		goto redirty;
+-	if (!total_swap_pages)
++	if (!total_swap_pages || sbinfo->noswap)
+ 		goto redirty;
+ 
+ 	/*
+@@ -3423,6 +3427,7 @@
+ 	Opt_uid,
+ 	Opt_inode32,
+ 	Opt_inode64,
++	Opt_noswap,
+ };
+ 
+ static const struct constant_table shmem_param_enums_huge[] = {
+@@ -3444,6 +3449,7 @@
+ 	fsparam_u32   ("uid",		Opt_uid),
+ 	fsparam_flag  ("inode32",	Opt_inode32),
+ 	fsparam_flag  ("inode64",	Opt_inode64),
++	fsparam_flag  ("noswap",	Opt_noswap),
+ 	{}
+ };
+ 
+@@ -3527,6 +3533,10 @@
+ 		ctx->full_inums = true;
+ 		ctx->seen |= SHMEM_SEEN_INUMS;
+ 		break;
++	case Opt_noswap:
++		ctx->noswap = true;
++		ctx->seen |= SHMEM_SEEN_NOSWAP;
++		break;
+ 	}
+ 	return 0;
+ 
+@@ -3761,6 +3771,7 @@
+ 	sbinfo->mode = ctx->mode;
+ 	sbinfo->huge = ctx->huge;
+ 	sbinfo->mpol = ctx->mpol;
++	sbinfo->noswap = ctx->noswap;
+ 	ctx->mpol = NULL;
+ 
+ 	spin_lock_init(&sbinfo->stat_lock);

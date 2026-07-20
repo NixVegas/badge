@@ -1,0 +1,228 @@
+--- a/drivers/mmc/host/sdhci-of-dwcmshc.c	2026-06-27 19:16:03.231268442 -0700
++++ b/drivers/mmc/host/sdhci-of-dwcmshc.c	2026-06-28 09:46:33.314189172 -0700
+@@ -68,6 +68,9 @@
+ #define CV18XX_SDHCI_MSHC_CTRL			0x00
+ #define  CV18XX_EMMC_FUNC_EN			BIT(0)
+ #define  CV18XX_LATANCY_1T			BIT(1)
++#define  CV18XX_SD1_INST_EN			BIT(16)	/* reg_0x200[16]: SD1/SDIO instance */
++#define  CV18XX_RST_OUT_HIGH			BIT(8)	/* reg_0x200[8]: drive ctrl reset-out line high (deassert) */
++#define  CV18XX_RST_OUT_EN			BIT(9)	/* reg_0x200[9]: ctrl reset-out output enable */
+ #define CV18XX_SDHCI_PHY_TX_RX_DLY		0x40
+ #define  CV18XX_PHY_TX_DLY_MSK			GENMASK(6, 0)
+ #define  CV18XX_PHY_TX_SRC_MSK			GENMASK(9, 8)
+@@ -82,6 +85,15 @@
+ #define CV18XX_TUNE_STEP			1
+ #define CV18XX_RETRY_TUNING_MAX			50
+ 
++/* cv18xx SD/SDIO pad voltage switch (vendor sdhci-cv181x.c), outside SDHCI window */
++#define CV18XX_TOP_BASE			0x03000000
++#define CV18XX_PINMUX_BASE		0x03001000
++#define CV18XX_SD_PWRSW_CTRL		0x1f4
++#define  CV18XX_PWRSW_VSEL_MASK		GENMASK(3, 0)
++#define  CV18XX_PWRSW_SET_1V8		0xb	/* auto=1 disc=0 vsel=1(1.8V) en=1 */
++#define CV18XX_SDIO0_PAD_CLK		0xa00
++#define  CV18XX_SDIO0_CLK_DS		(BIT(7) | BIT(6) | BIT(5))
++
+ /* Rockchip specific Registers */
+ #define DWCMSHC_EMMC_DLL_CTRL		0x800
+ #define DWCMSHC_EMMC_DLL_RXCLK		0x804
+@@ -216,6 +228,7 @@
+ #define DLL_ERROR_STS			BIT(1)
+ 
+ #define FLAG_IO_FIXED_1V8	BIT(0)
++#define FLAG_CV18XX_SD1		BIT(2)	/* cv18xx sd1/SDIO instance */
+ 
+ #define BOUNDARY_OK(addr, len) \
+ 	((addr | (SZ_128M - 1)) == ((addr + len - 1) | (SZ_128M - 1)))
+@@ -281,6 +294,7 @@
+ 	void *priv; /* pointer to SoC private stuff */
+ 	u16 delay_line;
+ 	u16 flags;
++	u8 cv18xx_final_tap;	/* cv18xx SDR104 tuned RX delay, restored on reset */
+ };
+ 
+ struct dwcmshc_pltfm_data {
+@@ -1048,28 +1062,145 @@
+ 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+ 	struct dwcmshc_priv *priv = sdhci_pltfm_priv(pltfm_host);
+ 	u32 val, emmc_caps = MMC_CAP2_NO_SD | MMC_CAP2_NO_SDIO;
++	u16 ctrl_2;
+ 
+ 	dwcmshc_reset(host, mask);
+ 
+-	if ((host->mmc->caps2 & emmc_caps) == emmc_caps) {
+-		val = sdhci_readl(host, priv->vendor_specific_area1 + CV18XX_SDHCI_MSHC_CTRL);
++	val = sdhci_readl(host, priv->vendor_specific_area1 + CV18XX_SDHCI_MSHC_CTRL);
++	if ((host->mmc->caps2 & emmc_caps) == emmc_caps)
+ 		val |= CV18XX_EMMC_FUNC_EN;
++	if (priv->flags & FLAG_CV18XX_SD1) {
++		val |= CV18XX_SD1_INST_EN;
++		/* THE structural bit mainline misses: the vendor sdhci-cv181x parks
++		 * MSHC_CTRL[8]|[9] high+enabled at probe for SD/SDIO (its eMMC hw-reset
++		 * routine toggles BIT(8) as the controller reset-out line). Mainline
++		 * leaves them 0, so the AIC8800 never gets its reset/enable line driven
++		 * and the fmac stays silent post-jump. Drive them for the SD1 (wifi)
++		 * instance, matching the vendor host. */
++		val |= CV18XX_RST_OUT_HIGH | CV18XX_RST_OUT_EN;
++	}
++
++	ctrl_2 = sdhci_readw(host, SDHCI_HOST_CONTROL2) & SDHCI_CTRL_UHS_MASK;
++
++	if (ctrl_2 == SDHCI_CTRL_UHS_SDR104) {
++		/* SDR104: restore the tuned PHY (matches cv18xx_sdhci_set_tap). Mainline
++		 * used to always revert to DS/HS here, clobbering the tuned tap. */
++		val &= ~CV18XX_LATANCY_1T;
+ 		sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_MSHC_CTRL);
++
++		val = sdhci_readl(host, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_CONFIG);
++		val &= ~CV18XX_PHY_TX_BPS;
++		sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_CONFIG);
++
++		val = (FIELD_PREP(CV18XX_PHY_TX_SRC_MSK, CV18XX_PHY_TX_SRC_INVERT_CLK_TX) |
++		       FIELD_PREP(CV18XX_PHY_RX_DLY_MSK, priv->cv18xx_final_tap));
++		sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_TX_RX_DLY);
++	} else {
++		val |= CV18XX_LATANCY_1T;
++		sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_MSHC_CTRL);
++
++		val = sdhci_readl(host, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_CONFIG);
++		val |= CV18XX_PHY_TX_BPS;
++		sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_CONFIG);
++
++		val =  (FIELD_PREP(CV18XX_PHY_TX_DLY_MSK, 0) |
++			FIELD_PREP(CV18XX_PHY_TX_SRC_MSK, CV18XX_PHY_TX_SRC_INVERT_CLK_TX) |
++			FIELD_PREP(CV18XX_PHY_RX_DLY_MSK, 0) |
++			FIELD_PREP(CV18XX_PHY_RX_SRC_MSK, CV18XX_PHY_RX_SRC_INVERT_RX_CLK));
++		sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_TX_RX_DLY);
+ 	}
++}
+ 
+-	val = sdhci_readl(host, priv->vendor_specific_area1 + CV18XX_SDHCI_MSHC_CTRL);
+-	val |= CV18XX_LATANCY_1T;
+-	sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_MSHC_CTRL);
++struct cv18xx_priv {
++	void __iomem *topbase;
++	void __iomem *pinmuxbase;
++};
+ 
+-	val = sdhci_readl(host, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_CONFIG);
+-	val |= CV18XX_PHY_TX_BPS;
+-	sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_CONFIG);
++/* Port of vendor sdhci_cv181x_sd_voltage_switch(): drive the SoC pad rail to
++ * 1.8V so the generic 1.8V switch actually completes on cv18xx. */
++static void cv18xx_sdhci_voltage_switch(struct sdhci_host *host)
++{
++	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
++	struct dwcmshc_priv *priv = sdhci_pltfm_priv(pltfm_host);
++	struct cv18xx_priv *cv = priv->priv;
++	u32 val;
+ 
+-	val =  (FIELD_PREP(CV18XX_PHY_TX_DLY_MSK, 0) |
+-		FIELD_PREP(CV18XX_PHY_TX_SRC_MSK, CV18XX_PHY_TX_SRC_INVERT_CLK_TX) |
+-		FIELD_PREP(CV18XX_PHY_RX_DLY_MSK, 0) |
+-		FIELD_PREP(CV18XX_PHY_RX_SRC_MSK, CV18XX_PHY_RX_SRC_INVERT_RX_CLK));
+-	sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_TX_RX_DLY);
++	if (!cv)
++		return;
++
++	writeb(readb(cv->pinmuxbase + CV18XX_SDIO0_PAD_CLK) | CV18XX_SDIO0_CLK_DS,
++	       cv->pinmuxbase + CV18XX_SDIO0_PAD_CLK);
++
++	val = readl(cv->topbase + CV18XX_SD_PWRSW_CTRL) & ~CV18XX_PWRSW_VSEL_MASK;
++	val |= CV18XX_PWRSW_SET_1V8;
++	writel(val, cv->topbase + CV18XX_SD_PWRSW_CTRL);
++
++	usleep_range(1000, 2000);
++}
++
++static int cv18xx_init(struct device *dev, struct sdhci_host *host,
++		       struct dwcmshc_priv *dwc_priv)
++{
++	struct cv18xx_priv *cv;
++
++	cv = devm_kzalloc(dev, sizeof(*cv), GFP_KERNEL);
++	if (!cv)
++		return -ENOMEM;
++	cv->topbase = devm_ioremap(dev, CV18XX_TOP_BASE, SZ_4K);
++	cv->pinmuxbase = devm_ioremap(dev, CV18XX_PINMUX_BASE, SZ_4K);
++	if (!cv->topbase || !cv->pinmuxbase)
++		return -ENOMEM;
++	/* Force the SD1 (SDIO1/wifi) data + CMD pads to bias pull-up. The in-band
++	 * SDIO card interrupt is open-drain on DAT1: without a pull-up the line
++	 * cannot idle high so CARD_INT never latches and the driver must poll. The
++	 * bias bits live in the RTC pinconf block (base 0x05027000) which the
++	 * pinctrl driver claims, so devmem cannot reach them; do it here via a
++	 * non-exclusive ioremap. BIT(2)=pull-up enable, BIT(3)=pull-down enable.
++	 * Offsets: D3=0x58 D2=0x5c D1=0x60 D0=0x64 CMD=0x68 (sg2000 pin table). */
++	{
++		void __iomem *cv_rtc = devm_ioremap(dev, 0x05027000, SZ_4K);
++		if (cv_rtc) {
++			static const u16 cv_pads[] = {0x58, 0x5c, 0x60, 0x64, 0x68};
++			int cv_i; u32 cv_v;
++			for (cv_i = 0; cv_i < 5; cv_i++) {
++				cv_v = readl(cv_rtc + cv_pads[cv_i]);
++				dev_info(dev, "cv18xx sd1 pad[0x%03x]=0x%08x pre\n", cv_pads[cv_i], cv_v);
++				writel((cv_v | BIT(2)) & ~BIT(3), cv_rtc + cv_pads[cv_i]);
++			}
++		}
++	}
++	/* The wifi controller is the SD1/SDIO instance; its reset must set the
++	 * reg_0x200[16] instance-select bit (vendor sdhci_cv181x_sdio_reset). */
++	dwc_priv->priv = cv;
++	if (device_property_read_bool(dev, "sophgo,sdio-inst1")) {
++		dwc_priv->flags |= FLAG_CV18XX_SD1;
++		/* Match the vendor SDIO host EXACTLY. The AIC8800 reports a 3.3V OCR
++		 * window in CMD5, so OCR/VDD stays 3.3V (vmmc). Do NOT force 1.8V
++		 * signalling: FLAG_IO_FIXED_1V8 pinned ocr_avail to 1.8V and the core
++		 * rejected the card ("no support for card's volts", -EINVAL) before it
++		 * ever powered. Instead take the bus to 1.8V PHYSICALLY at the SoC pad
++		 * rail (below) and tell the core NO_1_8_V so it never runs the SD-spec
++		 * CMD11 1.8V UHS switch the AIC8800 does not need. This is the vendor's
++		 * proven-good combination (3.3V OCR + NO_1_8_V + 1.8V pad rail). */
++		host->quirks2 |= SDHCI_QUIRK2_NO_1_8_V;
++		/* With NO_1_8_V the core never calls .voltage_switch, so drive the pad
++		 * rail to 1.8V here at probe (vendor sdhci_cv181x does it in probe +
++		 * set_power; SD_PWRSW_CTRL is a sticky SoC TOP register). */
++		cv18xx_sdhci_voltage_switch(host);
++	}
++	return 0;
++}
++
++static void cv18xx_postinit(struct sdhci_host *host, struct dwcmshc_priv *priv)
++{
++	/* Force a low-speed UHS mode for the wifi SDIO. The mainline cv18xx SDR104/
++	 * SDR50 PHY support is incomplete (tuning timing), so drop those caps after
++	 * setup_host; the card then negotiates SDR25/SDR12 (1.8V, NO tuning), which
++	 * is robust enough to bring the AIC8800 fmac up. Higher modes can come once
++	 * the host SDR104 PHY path is finished. */
++	if (priv->flags & FLAG_CV18XX_SD1)
++		host->mmc->caps &= ~(MMC_CAP_UHS_SDR104 | MMC_CAP_UHS_SDR50 |
++				     MMC_CAP_UHS_DDR50);
+ }
+ 
+ static void cv18xx_sdhci_set_tap(struct sdhci_host *host, int tap)
+@@ -1170,6 +1293,7 @@
+ 
+ 	/* use average delay to get the best timing */
+ 	avg = (target_min + target_max) / 2;
++	((struct dwcmshc_priv *)sdhci_pltfm_priv(sdhci_priv(host)))->cv18xx_final_tap = avg;
+ 	cv18xx_sdhci_set_tap(host, avg);
+ 	ret = mmc_send_tuning(host->mmc, opcode, NULL);
+ 
+@@ -1730,6 +1854,7 @@
+ 	.get_max_clock		= dwcmshc_get_max_clock,
+ 	.reset			= cv18xx_sdhci_reset,
+ 	.adma_write_desc	= dwcmshc_adma_write_desc,
++	.voltage_switch		= cv18xx_sdhci_voltage_switch,
+ 	.platform_execute_tuning = cv18xx_sdhci_execute_tuning,
+ };
+ 
+@@ -1825,6 +1950,8 @@
+ 		.quirks = SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN,
+ 		.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN,
+ 	},
++	.init = cv18xx_init,
++	.postinit = cv18xx_postinit,
+ };
+ 
+ static const struct dwcmshc_pltfm_data sdhci_dwcmshc_sg2042_pdata = {

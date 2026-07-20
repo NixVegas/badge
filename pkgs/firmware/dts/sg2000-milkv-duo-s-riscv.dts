@@ -1,0 +1,244 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Device tree for the Milk-V Duo S RISC-V core (Sophgo SG2000, T-Head C906).
+ *
+ * The SG2000 die is the SG2002 family (cv181x/cv180x) with an added ARM core.
+ * From the C906 perspective the SoC is identical to the SG2002, so we reuse
+ * the mainline sg2002.dtsi directly.
+ *
+ * Based on arch/riscv/boot/dts/sophgo/sg2002-licheerv-nano-b.dts (Bootlin 2024).
+ * Pinctrl configuration cross-checked against the vendor SDK Duo S riscv DTS.
+ *
+ * Nodes INCLUDED (boot-focused):
+ *   - uart0: console at ttyS0, 115200n8
+ *   - sdhci0: SD card root (NIXOS_RISCV label), 4-bit bus
+ *   - osc: 25 MHz oscillator (same as LicheeRV Nano)
+ *   - memory: overrides sg2002.dtsi 256MB with 512MB (0x80000000/0x20000000)
+ *     to match the Duo S firmware memory map.
+ *   - Ethernet/gmac0: SG2000 internal EPHY (phy-mode = "internal"), confirmed
+ *     from the Duo S schematic. No external RTL8201F/RMII PHY. The dtsi already
+ *     sets phy-handle=<&internal_ephy> and phy-mode="internal"; we just enable
+ *     the MAC and MDIO. Mirrors mainline cv1812h-huashan-pi.dts.
+ *   - USB: enabled with dr_mode = "host" (USB-A port on Duo S carrier).
+ *     Board fact source: vendor SDK shows dr_mode = "otg"; changed to "host"
+ *     to match physical USB-A connector, mirroring cv1812h-huashan-pi.dts.
+ *     VBUS enable (if needed for bus-powered devices) is on GPIO portb pin 5
+ *     (USB_VBUS_EN); upstream omits the regulator node, so we do too.
+ *
+ * Nodes OMITTED:
+ *   - LEDs, GPIO buttons, camera/CSI: not in mainline sg2002 dtsi
+ *
+ * CPU (thead,c906, rv64imafdc, sv39) comes from cv180x-cpus.dtsi via sg2002.dtsi.
+ */
+
+/dts-v1/;
+#include "sg2002.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	model = "Milk-V Duo S";
+	compatible = "milkv,duo-s", "sophgo,sg2002";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	/* Override sg2002.dtsi 256MB with 512MB to match Duo S firmware memmap */
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x20000000>;
+	};
+};
+
+&osc {
+	clock-frequency = <25000000>;
+};
+
+&pinctrl {
+	uart0_cfg: uart0-cfg {
+		uart0-pins {
+			pinmux = <PINMUX(PIN_UART0_TX, 0)>,
+				 <PINMUX(PIN_UART0_RX, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+	sdhci0_cfg: sdhci0-cfg {
+		sdhci0-clk-pins {
+			pinmux = <PINMUX(PIN_SD0_CLK, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <16100>;
+			power-source = <3300>;
+		};
+
+		sdhci0-cmd-pins {
+			pinmux = <PINMUX(PIN_SD0_CMD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		sdhci0-data-pins {
+			pinmux = <PINMUX(PIN_SD0_D0, 0)>,
+				 <PINMUX(PIN_SD0_D1, 0)>,
+				 <PINMUX(PIN_SD0_D2, 0)>,
+				 <PINMUX(PIN_SD0_D3, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		sdhci0-cd-pins {
+			pinmux = <PINMUX(PIN_SD0_CD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+};
+
+/* Console UART */
+&uart0 {
+	pinctrl-0 = <&uart0_cfg>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/* SD card (rootfs on NIXOS_RISCV label) */
+&sdhci0 {
+	pinctrl-0 = <&sdhci0_cfg>;
+	pinctrl-names = "default";
+	bus-width = <4>;
+	no-1-8-v;
+	no-mmc;
+	no-sdio;
+	disable-wp;
+	status = "okay";
+};
+
+/* On-chip 10/100 Ethernet: SG2000 internal EPHY straight to the RJ45 magnetics
+ * (no external PHY - confirmed from the Duo S schematic). The dtsi defaults
+ * phy-handle=<&internal_ephy> and phy-mode="internal"; just enable the MAC + MDIO.
+ * Mirrors mainline cv1812h-huashan-pi.dts. */
+/* On-chip 10/100 Ethernet: SG2000 internal EPHY straight to the RJ45 magnetics
+ * (no external PHY - confirmed from the Duo S schematic). phy-mode set
+ * explicitly to "internal" with the internal EPHY handle. Mirrors mainline
+ * cv1812h-huashan-pi.dts. NOTE: mainline 7.0.x has no driver to power/init the
+ * internal EPHY, so eth0 registers but will not link until the EPHY is
+ * initialized (e.g. in U-Boot) or a kernel driver lands. DT is ready for that. */
+&gmac0 {
+	status = "okay";
+	phy-mode = "internal";
+	phy-handle = <&internal_ephy>;
+};
+
+&mdio {
+	status = "okay";
+};
+
+/*
+ * USB: SG2002/SG2000 DWC2 OTG core driving the Duo S USB-A host port.
+ * dr_mode forced "host" (SDK says otg; the carrier exposes a USB-A host port).
+ * VBUS to the USB-A port is gated by USB_VBUS_EN = GPIO portb pin 5, modelled
+ * as a fixed regulator so the port powers bus-powered devices.
+ */
+/ {
+	usb_vbus: regulator-usb-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpio = <&portb 5 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+};
+
+&usb {
+	dr_mode = "host";
+	vbus-supply = <&usb_vbus>;
+	status = "okay";
+};
+
+/*
+ * Onboard WiFi: AICSemi AIC8800 on the SDIO bus mmc@4320000 (label sdhci1).
+ * mmc@4310000=SD card (sdhci0), mmc@4300000=eMMC. The AIC8800 is powered by
+ * GPIO PORTA pin 15 (WL_REG_ON, active-high), driven via mmc-pwrseq so the
+ * chip powers up before the SDIO scan and enumerates on the bus (vid 0xC8A1).
+ * (First-gate config; the out-of-tree aic8800 driver + firmware are separate.)
+ */
+/ {
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		/* WL_REG_ON = PORTA15, active-high: ACTIVE_LOW here so the pwrseq's
+		 * deassert (power-up) drives it high. Give the AIC8800 time to come
+		 * out of power-on before the SDIO scan. */
+		reset-gpios = <&porta 15 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <50>;
+	};
+};
+
+/*
+ * WiFi SDIO bus pads. The mmc@4320000 controller uses the SD1 pads
+ * (PIN_SD1_*, mux 0 = SDIO1, same scheme as the SD0 pads for the card).
+ * Without this mux the controller toggles pads stuck on their default
+ * function and the AIC8800 never answers the SDIO probe.
+ */
+&pinctrl {
+	sdhci1_cfg: sdhci1-cfg {
+		sdhci1-clk-pins {
+			pinmux = <PINMUX(PIN_SD1_CLK, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <16100>;
+			power-source = <3300>;
+		};
+
+		sdhci1-cmd-pins {
+			pinmux = <PINMUX(PIN_SD1_CMD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		sdhci1-data-pins {
+			pinmux = <PINMUX(PIN_SD1_D0, 0)>,
+				 <PINMUX(PIN_SD1_D1, 0)>,
+				 <PINMUX(PIN_SD1_D2, 0)>,
+				 <PINMUX(PIN_SD1_D3, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+};
+
+&sdhci1 {
+	status = "okay";
+	bus-width = <4>;
+	non-removable;
+	no-mmc;
+	no-sd;
+	/* The wifi SDIO has no 1.8V signaling rail configured in mainline, so the
+	 * mmc core must NOT select UHS modes (SDR50/SDR104/DDR50 all require 1.8V).
+	 * Confirmed on hardware: without this the bus negotiates SDR104 *timing* but
+	 * stays at 3.3V signaling (mmc2/ios: "SDR104" + "3.30 V") - an out-of-spec
+	 * mode that corrupts the large fmac firmware upload in chip RAM, so the
+	 * bootrom's DBG_START_APP (cmd 1037) never confirms ("8800d80 wifi start
+	 * fail"). Force valid 3.3V high-speed (<=50MHz) instead. */
+	no-1-8-v;
+	/* The AIC8800 driver builds CONFIG_OOB=n, so it signals command
+	 * confirmations via the in-band SDIO interrupt (sdio_claim_irq on DAT1).
+	 * Without cap-sdio-irq the host never delivers that card interrupt, the
+	 * busrx thread never wakes, and the first firmware command (cmd 1037)
+	 * times out with "8800d80 wifi start fail". */
+	cap-sdio-irq;
+	pinctrl-0 = <&sdhci1_cfg>;
+	pinctrl-names = "default";
+	mmc-pwrseq = <&wifi_pwrseq>;
+};
