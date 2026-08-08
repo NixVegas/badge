@@ -23,6 +23,30 @@
     options = [ "x-systemd.growfs" ];
   };
 
+  # The FAT boot partition, so swap-core can reach fip.bin and the per-core
+  # extlinux trees without a manual mount.
+  #
+  # WARNING: this partition does NOT hold a stock NixOS boot layout. It holds
+  # the dual-core tree that pkgs/sdcard/make-boot-dir.nix builds:
+  #   /fip.bin /fip-arm.bin /fip-riscv.bin
+  #   /arm/nixos/... /riscv/nixos/...
+  #   /extlinux/extlinux.conf   (a copy of the active core's, paths rewritten
+  #                              from ../nixos/ to /arm/nixos/ or /riscv/nixos/)
+  # A `nixos-rebuild switch` ON THE BADGE would run the
+  # generic-extlinux-compatible installer against /boot, write its own
+  # /boot/nixos plus a single-core extlinux.conf with relative ../nixos/ paths,
+  # and leave fip.bin alone. The board would still boot, but the dual-core
+  # layout and swap-core would be broken until the card is reflashed. Build
+  # images on the dev host, do not rebuild in place.
+  #
+  # nofail keeps a missing or damaged boot partition from blocking the boot.
+  # The rootfs does not need it, only tooling does.
+  fileSystems."/boot" = {
+    device = "/dev/disk/by-label/BOOT";
+    fsType = "vfat";
+    options = [ "nofail" ];
+  };
+
   # 24 WS2812 LEDs on the SPI3 MOSI line (40-pin header pin 19). The service
   # starts in the initrd and keeps running after switch_root, so the ring shows
   # life from very early boot. See modules/duo-s/leds.nix for the option set and
@@ -65,6 +89,11 @@
     htop
     i2c-tools
     usbutils
+    # Switch the active core from the badge itself. It swaps fip.bin AND
+    # extlinux/extlinux.conf together, which is the part that is easy to get
+    # wrong by hand: copying only fip.bin leaves the new core's U-Boot loading
+    # the other core's kernel, and it stops at "Bad Linux RISCV Image magic!".
+    (import ../../pkgs/sdcard/swap-core.nix { inherit pkgs; })
   ];
 
   # Keep the closure small, this is going on an SD card.

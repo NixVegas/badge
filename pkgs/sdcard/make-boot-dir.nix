@@ -1,6 +1,11 @@
 # Build the FAT boot-partition tree for the dual-core Duo S card: per-core
-# kernel/initrd/dtb + extlinux (paths rewritten absolute so the active copy
-# works from the FAT root), both fips, and the default core marked active.
+# kernel/initrd/dtb + extlinux, both fips, and the default core marked active.
+#
+# There is deliberately NO shared /extlinux/extlinux.conf. Each core's U-Boot
+# is built to read its own /<core>/extlinux/extlinux.conf (see
+# pkgs/firmware/uboot-duos-{arm,riscv}.nix), so the only file that selects a
+# core is fip.bin. That is what the BootROM reads, and it is the one thing that
+# cannot be made per-core.
 { pkgs }:
 { armSys, riscvSys, fipArm, fipRiscv, defaultCore ? "arm" }:
 pkgs.runCommand "duos-boot-dir" { } ''
@@ -17,7 +22,4 @@ pkgs.runCommand "duos-boot-dir" { } ''
   cp ${fipArm}   "$out/fip-arm.bin"
   cp ${fipRiscv} "$out/fip-riscv.bin"
   cp "$out/fip-${defaultCore}.bin" "$out/fip.bin"
-
-  mkdir -p "$out/extlinux"
-  cp "$out/${defaultCore}/extlinux/extlinux.conf" "$out/extlinux/extlinux.conf"
 ''

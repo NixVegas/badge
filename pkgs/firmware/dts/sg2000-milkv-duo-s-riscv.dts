@@ -104,6 +104,43 @@
 		device_type = "memory";
 		reg = <0x80000000 0x20000000>;
 	};
+
+	/*
+	 * OpenSBI stays resident in M-mode at 0x80000000 and PMP-protects its
+	 * own memory from S-mode. Its boot banner states the exact regions:
+	 *
+	 *   Domain0 Region01 : 0x80000000-0x8003ffff M: (F,R,X) S/U: ()
+	 *   Domain0 Region00 : 0x80040000-0x8005ffff M: (F,R,W) S/U: ()
+	 *
+	 * so 0x80000000..0x8005ffff (384 KB) is unreachable from Linux.
+	 *
+	 * OpenSBI normally patches an mmode_resv node into the device tree it
+	 * hands onward, but our chain is OpenSBI -> U-Boot -> a DTB loaded
+	 * fresh from the FAT boot partition, so that fixup never reaches the
+	 * DTB that Linux actually gets. Without this node the kernel treats
+	 * the firmware as free RAM, hands out the page at physical
+	 * 0x80000000, and dies the moment it zeroes it:
+	 *
+	 *   Oops - store (or AMO) access fault
+	 *   epc : __memset      ra : kernel_init_pages
+	 *   badaddr : ffffffd600000000    cause : 0x7
+	 *
+	 * badaddr is PAGE_OFFSET_L3 (arch/riscv/include/asm/page.h), the base
+	 * of the sv39 linear map, so it is physical 0x80000000 exactly.
+	 *
+	 * We reserve 512 KB, which is the measured 384 KB rounded up, to give
+	 * an OpenSBI version bump some room before this breaks again.
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		mmode_resv0@80000000 {
+			reg = <0x80000000 0x80000>;
+			no-map;
+		};
+	};
 };
 
 &osc {

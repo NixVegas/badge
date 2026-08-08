@@ -54,6 +54,10 @@
 // polls once per frame instead, which it gets for free.
 #define IDLE_POLL_HZ 2
 
+// How long to keep looking for the SPI clock in debugfs. The service starts in
+// the initrd, so debugfs only appears once stage 2 mounts it.
+#define CLK_REPORT_TIMEOUT_SECONDS 120
+
 #define MAX_LEDS 1024
 #define MAX_COLORS 16
 #define LATCH_BYTES 64 // about 280 us of low, which covers the SK6812 80 us
@@ -388,6 +392,37 @@ static unsigned long read_ssi_clk(void)
 	return hz;
 }
 
+// Report the bit timing that the hardware really produces. Returns 1 when it
+// managed to read the clock, 0 when the clock is not available yet.
+//
+// SPI_IOC_RD_MAX_SPEED_HZ is useless for this: spidev.c returns the value we
+// wrote, not the rate the controller uses. The DesignWare driver picks an even
+// divider of its input clock at transfer time (spi-dw-core.c):
+//
+//   clk_div  = (DIV_ROUND_UP(ssi_clk, freq) + 1) & 0xfffe
+//   speed_hz = ssi_clk / clk_div
+//
+// So we read ssi_clk and do the same arithmetic. The service starts in the
+// initrd, where debugfs is not mounted, so the first attempt usually fails and
+// the caller retries until stage 2 mounts it.
+static int log_clock(const struct config *c)
+{
+	unsigned long ssi = read_ssi_clk();
+	if (!ssi)
+		return 0;
+
+	unsigned long div =
+		(((ssi + c->speed_hz - 1) / c->speed_hz) + 1) & 0xfffeUL;
+	unsigned long actual = div ? ssi / div : 0;
+	unsigned ns = actual ? (unsigned)(1000000000ull / actual) : 0;
+	fprintf(stderr,
+		"nixbadge-leds: %s ssi_clk %lu Hz, divider %lu, actual %lu Hz, "
+		"SPI bit %u ns, T0H %u ns, T1H %u ns "
+		"(WS2812B wants 400 and 800 ns, +/- 150 ns)\n",
+		c->device, ssi, div, actual, ns, ns, ns * 2);
+	return 1;
+}
+
 static int spi_open(const struct config *c)
 {
 	int fd = -1;
@@ -425,36 +460,6 @@ static int spi_open(const struct config *c)
 	if (ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0)
 		die("SPI_IOC_WR_MAX_SPEED_HZ: %s", strerror(errno));
 
-	// NOTE: SPI_IOC_RD_MAX_SPEED_HZ only echoes the value we just wrote
-	// (spidev.c returns spidev->speed_hz), so it can NOT tell us the rate
-	// the hardware really uses. The DesignWare driver picks an even
-	// divider of its input clock at transfer time (spi-dw-core.c):
-	//
-	//   clk_div  = (DIV_ROUND_UP(ssi_clk, freq) + 1) & 0xfffe
-	//   speed_hz = ssi_clk / clk_div
-	//
-	// So we read ssi_clk and do the same arithmetic. When the clock is not
-	// readable, for example in the initrd where debugfs is not mounted, we
-	// say the rate is unknown rather than print a number we did not
-	// measure.
-	unsigned long ssi = read_ssi_clk();
-	if (ssi) {
-		unsigned long div =
-			(((ssi + c->speed_hz - 1) / c->speed_hz) + 1) & 0xfffeUL;
-		unsigned long actual = div ? ssi / div : 0;
-		unsigned ns = actual ? (unsigned)(1000000000ull / actual) : 0;
-		fprintf(stderr,
-			"nixbadge-leds: %s ssi_clk %lu Hz, divider %lu, "
-			"actual %lu Hz, SPI bit %u ns, T0H %u ns, T1H %u ns "
-			"(WS2812B wants 400 and 800 ns, +/- 150 ns)\n",
-			c->device, ssi, div, actual, ns, ns, ns * 2);
-	} else {
-		fprintf(stderr,
-			"nixbadge-leds: %s requested %u Hz. Actual rate is "
-			"UNKNOWN, %s is not readable, so the bit timing is "
-			"not verified here.\n",
-			c->device, c->speed_hz, SSI_CLK_RATE_PATH);
-	}
 	return fd;
 }
 
@@ -486,6 +491,7 @@ static void reload_live(struct config *cfg, const char *base)
 	cfg->pattern = fresh.pattern;
 	cfg->brightness = fresh.brightness;
 	cfg->fps = fresh.fps;
+	cfg->count = fresh.count;
 	cfg->ncolors = fresh.ncolors;
 	memcpy(cfg->colors, fresh.colors, sizeof(cfg->colors));
 
@@ -528,7 +534,8 @@ static int cmd_run(int argc, char **argv)
 		free(frame);
 		return 0; // clean stop, so systemd does not restart us forever
 	}
-	const size_t framelen = cfg.count * 9 + LATCH_BYTES;
+	// Not const: a reload can change the LED count and resize the buffers.
+	size_t framelen = cfg.count * 9 + LATCH_BYTES;
 
 	fprintf(stderr,
 		"nixbadge-leds: %u leds, pattern %s, brightness %u, %u fps, "
@@ -536,12 +543,33 @@ static int cmd_run(int argc, char **argv)
 		cfg.count, pattern_names[cfg.pattern], cfg.brightness, cfg.fps,
 		framelen);
 
+	// The clock lives in debugfs, which is not mounted in the initrd, so we
+	// keep trying until stage 2 mounts it. We stop after a while so a
+	// system without debugfs does not poll for ever.
+	int clk_logged = log_clock(&cfg);
+	time_t clk_deadline = time(NULL) + CLK_REPORT_TIMEOUT_SECONDS;
+	if (!clk_logged)
+		fprintf(stderr,
+			"nixbadge-leds: %s not readable yet, will report the "
+			"real bit timing once it appears\n",
+			SSI_CLK_RATE_PATH);
+
 	struct timespec seen;
 	int have_seen = runtime_mtime(&seen) == 0;
 	unsigned n = 0;
-	int dirty = 1; // paint at least one frame before we idle
 
 	while (!stop_requested) {
+		if (!clk_logged) {
+			clk_logged = log_clock(&cfg);
+			if (!clk_logged && time(NULL) > clk_deadline) {
+				fprintf(stderr,
+					"nixbadge-leds: giving up on %s, bit "
+					"timing stays unverified\n",
+					SSI_CLK_RATE_PATH);
+				clk_logged = 1; // stop retrying
+			}
+		}
+
 		struct timespec now;
 		int have_now = runtime_mtime(&now) == 0;
 		if (have_now != have_seen ||
@@ -549,17 +577,50 @@ static int cmd_run(int argc, char **argv)
 				  now.tv_nsec != seen.tv_nsec))) {
 			seen = now;
 			have_seen = have_now;
+			unsigned old_count = cfg.count;
 			reload_live(&cfg, base);
 			n = 0;
-			dirty = 1;
+
+			// count is reloadable so the ring length can be
+			// bisected without a rebuild. That matters when only
+			// the first few LEDs respond and you need to find
+			// where the chain stops working.
+			if (cfg.count != old_count) {
+				struct rgb *npx =
+					realloc(px, cfg.count * sizeof(*px));
+				uint8_t *nframe = realloc(
+					frame, cfg.count * 9 + LATCH_BYTES);
+				if (npx && nframe) {
+					px = npx;
+					frame = nframe;
+					framelen = cfg.count * 9 + LATCH_BYTES;
+					fprintf(stderr,
+						"nixbadge-leds: count now %u, "
+						"%zu bytes per frame\n",
+						cfg.count, framelen);
+				} else {
+					// Keep the old buffers rather than
+					// touch memory we no longer own.
+					if (npx)
+						px = npx;
+					if (nframe)
+						frame = nframe;
+					cfg.count = old_count;
+					fprintf(stderr,
+						"nixbadge-leds: cannot resize "
+						"to %u leds, keeping %u\n",
+						cfg.count, old_count);
+				}
+			}
 		}
 
 		int animated = cfg.pattern != PAT_OFF && cfg.pattern != PAT_SOLID;
 
-		// A static pattern holds its colours, so we only push a frame
-		// when something changed. That keeps the SPI bus quiet instead
-		// of resending the same bytes 30 times a second.
-		if (animated || dirty) {
+		// Every tick repaints, including static patterns. A WS2812 chain
+		// has no error recovery of its own: one corrupted frame stays on
+		// screen for ever. Repainting at the idle rate makes the display
+		// self-healing, and 280 bytes twice a second costs nothing.
+		{
 			render(&cfg, n, px);
 			encode_frame(px, cfg.count, frame);
 
@@ -578,7 +639,6 @@ static int cmd_run(int argc, char **argv)
 					"nixbadge-leds: transfer failed: %s\n",
 					strerror(errno));
 			}
-			dirty = 0;
 		}
 		n++;
 
@@ -618,6 +678,13 @@ static int cmd_set(int argc, char **argv)
 		} else if (strcmp(a, "--brightness") == 0 && i + 1 < argc) {
 			unsigned n = (unsigned)strtoul(argv[++i], NULL, 10);
 			incoming.brightness = n > 255 ? 255 : n;
+		} else if (strcmp(a, "--count") == 0 && i + 1 < argc) {
+			// Reloadable so a chain that only lights partway can be
+			// bisected without a rebuild.
+			unsigned n = (unsigned)strtoul(argv[++i], NULL, 10);
+			if (n == 0 || n > MAX_LEDS)
+				die("count %u is out of range 1-%u", n, MAX_LEDS);
+			incoming.count = n;
 		} else if (strcmp(a, "--color") == 0 && i + 1 < argc) {
 			if (!have_colors) {
 				incoming.ncolors = 0;
@@ -644,6 +711,7 @@ static int cmd_set(int argc, char **argv)
 	fprintf(f, "# after the declarative config, so these values win.\n");
 	fprintf(f, "pattern = %s\n", pattern_names[incoming.pattern]);
 	fprintf(f, "brightness = %u\n", incoming.brightness);
+	fprintf(f, "count = %u\n", incoming.count);
 	fprintf(f, "colors = ");
 	for (unsigned i = 0; i < incoming.ncolors; i++)
 		fprintf(f, "%s#%02x%02x%02x", i ? "," : "",
@@ -680,7 +748,7 @@ static void usage(void)
 		"usage:\n"
 		"  nixbadge-leds run --config FILE\n"
 		"  nixbadge-leds set [--pattern P] [--brightness 0-255] "
-		"[--color '#rrggbb' ...]\n"
+		"[--count N] [--color '#rrggbb' ...]\n"
 		"  nixbadge-leds show\n"
 		"\n"
 		"patterns: off solid pulse rainbow chase\n");

@@ -93,13 +93,20 @@ with open("include/configs/cv181x-asic.h", "r") as f:
 
 insert = r"""
 /* BadgeOS override: replace vendor FIT/hush boot with NixOS extlinux/sysboot.
- * sysboot mmc 0:1 any <scriptaddr> /extlinux/extlinux.conf
+ * sysboot mmc 0:1 any <scriptaddr> /riscv/extlinux/extlinux.conf
  * - kernel_addr_r/fdt_addr_r/ramdisk_addr_r: _r suffix required by sysboot
  * - non-overlapping with U-Boot text (0x80200000) and ION reserve (0x9A600000)
+ *
+ * The path is PER CORE (/riscv/, and /arm/ in the ARM U-Boot). Each core boots
+ * its own U-Boot out of its own fip-<core>.bin, so each one can look in its own
+ * directory. That means switching cores only has to swap fip.bin, and no shared
+ * /extlinux/extlinux.conf has to be kept in sync. Swapping only fip.bin used to
+ * leave the new core's U-Boot loading the other core's kernel, which stops with
+ * "Bad Linux RISCV Image magic!".
  */
 #undef  CONFIG_BOOTCOMMAND
 #define CONFIG_BOOTCOMMAND \
-    "sysboot mmc 0:1 any 0x82000000 /extlinux/extlinux.conf"
+    "sysboot mmc 0:1 any 0x82000000 /riscv/extlinux/extlinux.conf"
 
 #undef  CONFIG_EXTRA_ENV_SETTINGS
 #define CONFIG_EXTRA_ENV_SETTINGS \
