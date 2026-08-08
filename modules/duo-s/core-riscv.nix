@@ -13,9 +13,4 @@
   });
 
   # TODO: firmware. RISC-V boot chain is vendor FSBL -> OpenSBI -> U-Boot.
-
-  fileSystems."/" = {
-    device = "/dev/disk/by-label/NIXOS_ROOT";
-    fsType = "ext4";
-  };
 }

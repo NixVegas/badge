@@ -20,9 +20,4 @@
 
   # TODO: firmware. ARM boot chain is vendor FSBL -> ATF (BL31) -> U-Boot.
   # The FSBL is a vendor blob regardless of core; package fip.bin here.
-
-  fileSystems."/" = {
-    device = "/dev/disk/by-label/NIXOS_ROOT";
-    fsType = "ext4";
-  };
 }

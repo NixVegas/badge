@@ -12,13 +12,15 @@
 # the aic8800/ tree (top Makefile drives the three obj-m subdirs):
 #   make -C $KERNELDIR M=<src>/SDIO/driver_fw/driver/aic8800 modules
 #
-# Kernel 7.0 API drift: the fork targets <= ~6.19. The radxa quilt series in
-# debian/patches/ already carries LINUX_VERSION_CODE-gated shims for 6.1..6.19
-# and 7.1. We apply that series. Verified against the actual 7.0.12 cfg80211.h:
-# at 7.0.12 the cfg80211_ops key/station callbacks still take struct net_device
-# (the wireless_dev change is a 7.1 thing, correctly gated >= 7.1.0), so the
-# 6.17 link_id/radio_idx shims are the highest that activate at 7.0.12 and the
-# tree compiles on the pre-7.1 path. See the report for the full mapping.
+# Kernel API drift: the fork targets <= ~6.19. The radxa quilt series in
+# debian/patches/ carries LINUX_VERSION_CODE-gated shims for 6.1..6.19, so we
+# apply that series. Two gaps remain at 7.1:
+#
+#   * fix-linux-7.1-build.patch (the cfg80211 net_device -> wireless_dev change
+#     in the key/station callbacks, and the flattened TDLS discovery-response
+#     frame) touches ONLY the USB tree upstream. We carry the same fix ported to
+#     the SDIO tree in aic8800-linux-7.1-sdio.patch.
+#   * <linux/of_gpio.h> is gone since 6.16. See the btlpm rfkill.c drop below.
 #
 # Firmware path: the SDIO build sets CONFIG_USE_FW_REQUEST = n, so the driver
 # loads firmware by literal filp_open("<CONFIG_AIC_FW_PATH>/<name>"), NOT via
@@ -97,8 +99,26 @@ pkgs.stdenv.mkDerivation {
       patch -p1 --binary -i "debian/patches/$p"
     done
 
+    # The radxa series ships fix-linux-7.1-build.patch, but it only touches the
+    # USB tree, so the SDIO tree we build keeps the pre-7.1 cfg80211 prototypes
+    # and fails on 7.1. This is that same fix ported to the SDIO sources.
+    echo "applying aic8800-linux-7.1-sdio.patch"
+    patch -p1 --binary -i ${./aic8800-linux-7.1-sdio.patch}
+
     substituteInPlace ${driverSubdir}/aic8800_bsp/Makefile \
       --replace-fail '"/lib/firmware/aic8800_fw/SDIO/aic8800D80"' '"${fwPath}"'
+
+    # Kernel 6.16 deleted <linux/of_gpio.h> (the legacy OF GPIO API moved fully
+    # to gpiod). The radxa series does not carry a fix for the btlpm tree. Of the
+    # three btlpm files that include it, only rfkill.c is compiled here
+    # (aic8800_btlpm-y = aic_bluetooth_main.o + rfkill.o; lpm.o needs
+    # CONFIG_SUPPORT_LPM = y, and aic8800_btlpm.c is not in the object list), and
+    # rfkill.c uses NO of_gpio symbol - the include is dead. Drop it.
+    # lpm.c/aic8800_btlpm.c keep the include, because they are not built and a
+    # true port needs of_get_named_gpio_flags -> gpiod_get() rework.
+    substituteInPlace ${driverSubdir}/aic8800_btlpm/rfkill.c \
+      --replace-fail '#include <linux/of_gpio.h>
+' ""
 
     # Optional cv18xx SDIO RX poll workaround (off by default): on mainline
     # dwcmshc with cap-sdio-irq the real sdio_claim_irq path delivers the in-band

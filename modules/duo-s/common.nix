@@ -5,6 +5,24 @@
 {
   networking.hostName = "nixbadge-duos";
 
+  # The SD image ships an ext4 root sized exactly to the store closure, so a
+  # fresh card boots 100% full no matter how large the card is. These two
+  # options fix that on every boot, in order:
+  #   growPartition   -> growpart.service extends the last MBR partition
+  #                      (NIXOS_ROOT, mmcblk0p2) to the end of the card.
+  #   x-systemd.growfs -> systemd-growfs-root.service then grows the ext4 to
+  #                      fill the new partition, online.
+  # Both are no-ops once the card is full, so they are safe to leave on.
+  # The root mount lives here, not in core-*.nix, because it is identical on
+  # both cores and the two systems share one root partition.
+  boot.growPartition = true;
+
+  fileSystems."/" = {
+    device = "/dev/disk/by-label/NIXOS_ROOT";
+    fsType = "ext4";
+    options = [ "x-systemd.growfs" ];
+  };
+
   # Networking via NetworkManager: it manages eth0 (auto-connects wired) and
   # wlan0 once the AIC8800 WiFi comes up. wpa_supplicant backend because the
   # AIC8800 is a fullMAC driver that iwd handles poorly. NetworkManager does its
