@@ -24,6 +24,26 @@
       boot.loader.generic-extlinux-compatible.enable = true;
 
       hardware.deviceTree.enable = true;
+
+      # SPI3 drives the WS2812 LED ring through spidev (see modules/duo-s/leds.nix).
+      # nixpkgs leaves SPIDEV off and builds the DesignWare SPI glue as modules.
+      # The LED service starts in the initrd, so we build all of it in (=y) and
+      # avoid module load ordering that early. Without SPIDEV the spidev@0 node
+      # in the DTS binds nothing and /dev/spidev3.0 never appears.
+      boot.kernelPatches = [
+        {
+          name = "enable-spidev-for-leds";
+          patch = null;
+          # The Kconfig symbol is SPI_SPIDEV, not SPIDEV. The module file is
+          # spidev.c, which is what makes the short name look right.
+          extraConfig = ''
+            SPI y
+            SPI_DESIGNWARE y
+            SPI_DW_MMIO y
+            SPI_SPIDEV y
+          '';
+        }
+      ];
     }
 
     # --- The only legitimate in-module arch fork: ISA-only differences with

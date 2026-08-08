@@ -78,6 +78,15 @@
  */
 /* mainline sg2000.dtsi gives the soc node no label, so merge by full path. */
 / {
+	/* The SPI core sets bus_num from of_alias_get_id(node, "spi") and falls
+	 * back to dynamic numbering when no alias matches (drivers/spi/spi.c).
+	 * Without this the only enabled controller took bus 0 and spidev showed
+	 * up as /dev/spidev0.0, not spidev3.0. The vendor DTS carries the same
+	 * alias, commented out (cv181x_base.dtsi "//spi3 = &spi3;"). */
+	aliases {
+		spi3 = &spi3;
+	};
+
 	soc {
 		watchdog@3010000 {
 			compatible = "snps,dw-wdt";

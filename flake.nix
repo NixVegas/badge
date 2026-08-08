@@ -32,6 +32,7 @@
             ./modules/duo-s/common.nix
             ./modules/duo-s/base.nix
             ./modules/duo-s/wifi.nix
+            ./modules/duo-s/leds.nix
             ./modules/duo-s/core-${core}.nix
           ];
         };

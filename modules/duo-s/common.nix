@@ -23,6 +23,15 @@
     options = [ "x-systemd.growfs" ];
   };
 
+  # 24 WS2812 LEDs on the SPI3 MOSI line (40-pin header pin 19). The service
+  # starts in the initrd and keeps running after switch_root, so the ring shows
+  # life from very early boot. See modules/duo-s/leds.nix for the option set and
+  # the nixbadge-leds CLI.
+  nixbadge.leds = {
+    enable = true;
+    count = 24;
+  };
+
   # Networking via NetworkManager: it manages eth0 (auto-connects wired) and
   # wlan0 once the AIC8800 WiFi comes up. wpa_supplicant backend because the
   # AIC8800 is a fullMAC driver that iwd handles poorly. NetworkManager does its

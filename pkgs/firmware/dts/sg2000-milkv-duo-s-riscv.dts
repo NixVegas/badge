@@ -35,12 +35,64 @@
 #include "sg2002.dtsi"
 #include <dt-bindings/gpio/gpio.h>
 
+/*
+ * PIN IDS AND THE PIN CONTROLLER
+ *
+ * The Duo S carries an SG2000 die, not the SG2002 that sg2002.dtsi assumes.
+ * The two packages have different pin tables and they are NOT interchangeable:
+ *
+ *   pinctrl-sg2002.h   65 QFN pins, flat indices,   NO VIVO pads
+ *   pinctrl-sg2000.h  110 BGA pins, row/col coords, HAS VIVO pads
+ *
+ * For example UART0_TX is 18 on SG2002 but PINPOS('M', 5) on SG2000.
+ *
+ * We drive the WS2812 LED ring from SPI3, and the SPI3 pads are VIVO_D5..D8,
+ * which the SG2002 table cannot name at all. So we bind the pin controller to
+ * the SG2000 driver (see the &pinctrl compatible override below) and give
+ * EVERY pinmux an SG2000 coordinate. These are the same identifiers the ARM
+ * DTS already uses, so both cores now name the pads the same way.
+ *
+ * We define the pads by hand rather than include pinctrl-sg2000.h, because
+ * sg2002.dtsi already pulled in pinctrl-sg2002.h and the two headers define
+ * the same PIN_* names with different values.
+ */
+#define PINPOS(row, col)	((((row) - 'A' + 1) << 8) + ((col) - 1))
+
+#define DUOS_UART0_TX		PINPOS('M', 5)
+#define DUOS_UART0_RX		PINPOS('M', 4)
+
+#define DUOS_SD0_CLK		PINPOS('L', 1)
+#define DUOS_SD0_CMD		PINPOS('L', 3)
+#define DUOS_SD0_D0		PINPOS('L', 2)
+#define DUOS_SD0_D1		PINPOS('K', 3)
+#define DUOS_SD0_D2		PINPOS('M', 2)
+#define DUOS_SD0_D3		PINPOS('M', 1)
+#define DUOS_SD0_CD		PINPOS('K', 2)
+
+#define DUOS_SD1_CLK		PINPOS('G', 14)
+#define DUOS_SD1_CMD		PINPOS('G', 15)
+#define DUOS_SD1_D0		PINPOS('H', 15)
+#define DUOS_SD1_D1		PINPOS('H', 14)
+#define DUOS_SD1_D2		PINPOS('F', 14)
+#define DUOS_SD1_D3		PINPOS('G', 13)
+
+/* SPI3 on the 40-pin header: pin19 MOSI, pin21 MISO, pin23 SCK, pin24 CS */
+#define DUOS_VIVO_D5		PINPOS('B', 10)
+#define DUOS_VIVO_D6		PINPOS('C', 10)
+#define DUOS_VIVO_D7		PINPOS('B', 11)
+#define DUOS_VIVO_D8		PINPOS('C', 11)
+
 / {
 	model = "Milk-V Duo S";
 	compatible = "milkv,duo-s", "sophgo,sg2002";
 
 	aliases {
 		serial0 = &uart0;
+		/* The SPI core sets bus_num from of_alias_get_id(node, "spi")
+		 * and falls back to dynamic numbering when no alias matches
+		 * (drivers/spi/spi.c). Without this the only enabled controller
+		 * takes bus 0 and spidev appears as /dev/spidev0.0. */
+		spi3 = &spi3;
 	};
 
 	chosen {
@@ -58,11 +110,17 @@
 	clock-frequency = <25000000>;
 };
 
+/* Rebind the pin controller to the SG2000 driver so the VIVO pads exist. The
+ * node itself (pinctrl@3001000) comes from sg2002.dtsi, which declares it as
+ * "sophgo,sg2002-pinctrl". Same register block either way, different pin
+ * table. CONFIG_PINCTRL_SOPHGO_SG2000 is already y on this kernel. */
 &pinctrl {
+	compatible = "sophgo,sg2000-pinctrl";
+
 	uart0_cfg: uart0-cfg {
 		uart0-pins {
-			pinmux = <PINMUX(PIN_UART0_TX, 0)>,
-				 <PINMUX(PIN_UART0_RX, 0)>;
+			pinmux = <PINMUX(DUOS_UART0_TX, 0)>,
+				 <PINMUX(DUOS_UART0_RX, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <10800>;
 			power-source = <3300>;
@@ -71,35 +129,83 @@
 
 	sdhci0_cfg: sdhci0-cfg {
 		sdhci0-clk-pins {
-			pinmux = <PINMUX(PIN_SD0_CLK, 0)>;
+			pinmux = <PINMUX(DUOS_SD0_CLK, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <16100>;
 			power-source = <3300>;
 		};
 
 		sdhci0-cmd-pins {
-			pinmux = <PINMUX(PIN_SD0_CMD, 0)>;
+			pinmux = <PINMUX(DUOS_SD0_CMD, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <10800>;
 			power-source = <3300>;
 		};
 
 		sdhci0-data-pins {
-			pinmux = <PINMUX(PIN_SD0_D0, 0)>,
-				 <PINMUX(PIN_SD0_D1, 0)>,
-				 <PINMUX(PIN_SD0_D2, 0)>,
-				 <PINMUX(PIN_SD0_D3, 0)>;
+			pinmux = <PINMUX(DUOS_SD0_D0, 0)>,
+				 <PINMUX(DUOS_SD0_D1, 0)>,
+				 <PINMUX(DUOS_SD0_D2, 0)>,
+				 <PINMUX(DUOS_SD0_D3, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <10800>;
 			power-source = <3300>;
 		};
 
 		sdhci0-cd-pins {
-			pinmux = <PINMUX(PIN_SD0_CD, 0)>;
+			pinmux = <PINMUX(DUOS_SD0_CD, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <10800>;
 			power-source = <3300>;
 		};
+	};
+
+	/* SPI3 for the WS2812 ring, mux 5 on the VIVO pads. No bias-disable and
+	 * no omitted power-source: the mainline sophgo pinctrl rejects a pinmux
+	 * subnode without power-source, and it would fail pinctrl_bind_pins
+	 * before dw_spi_mmio_probe ever runs. Same reasoning as the ARM DTS. */
+	spi3_cfg: spi3-cfg {
+		spi3-sck-pins {
+			pinmux = <PINMUX(DUOS_VIVO_D6, 5)>;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		spi3-sdo-pins {
+			pinmux = <PINMUX(DUOS_VIVO_D8, 5)>;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		spi3-sdi-pins {
+			pinmux = <PINMUX(DUOS_VIVO_D7, 5)>;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		spi3-cs-pins {
+			pinmux = <PINMUX(DUOS_VIVO_D5, 5)>;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+};
+
+/* SPI3 drives the WS2812 LED ring through spidev. Unlike the ARM side we do
+ * NOT have to declare the controller: cv180x.dtsi already has spi@41b0000
+ * with its clocks, interrupt and RST_SPI3 reset, it is only disabled. */
+&spi3 {
+	num-cs = <1>;
+	pinctrl-0 = <&spi3_cfg>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	/* spidev binds known compatibles only, and rohm,dh2228fv is in
+	 * spidev_dt_ids. Gives /dev/spidev3.0. */
+	spidev@0 {
+		compatible = "rohm,dh2228fv";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
 	};
 };
 
@@ -186,31 +292,31 @@
 
 /*
  * WiFi SDIO bus pads. The mmc@4320000 controller uses the SD1 pads
- * (PIN_SD1_*, mux 0 = SDIO1, same scheme as the SD0 pads for the card).
+ * (DUOS_SD1_*, mux 0 = SDIO1, same scheme as the SD0 pads for the card).
  * Without this mux the controller toggles pads stuck on their default
  * function and the AIC8800 never answers the SDIO probe.
  */
 &pinctrl {
 	sdhci1_cfg: sdhci1-cfg {
 		sdhci1-clk-pins {
-			pinmux = <PINMUX(PIN_SD1_CLK, 0)>;
+			pinmux = <PINMUX(DUOS_SD1_CLK, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <16100>;
 			power-source = <3300>;
 		};
 
 		sdhci1-cmd-pins {
-			pinmux = <PINMUX(PIN_SD1_CMD, 0)>;
+			pinmux = <PINMUX(DUOS_SD1_CMD, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <10800>;
 			power-source = <3300>;
 		};
 
 		sdhci1-data-pins {
-			pinmux = <PINMUX(PIN_SD1_D0, 0)>,
-				 <PINMUX(PIN_SD1_D1, 0)>,
-				 <PINMUX(PIN_SD1_D2, 0)>,
-				 <PINMUX(PIN_SD1_D3, 0)>;
+			pinmux = <PINMUX(DUOS_SD1_D0, 0)>,
+				 <PINMUX(DUOS_SD1_D1, 0)>,
+				 <PINMUX(DUOS_SD1_D2, 0)>,
+				 <PINMUX(DUOS_SD1_D3, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <10800>;
 			power-source = <3300>;
