@@ -36,6 +36,16 @@
           patch = null;
           # The Kconfig symbol is SPI_SPIDEV, not SPIDEV. The module file is
           # spidev.c, which is what makes the short name look right.
+          # NOTE: no DMA here on purpose. SPI3 runs in PIO, which stalls a
+          # little (a 417 byte LED frame took 1481 us against 1067 us of real
+          # bit time) and makes fast animations flicker. Wiring the SPI3 DMA
+          # was tried and REVERTED: the mainline dw-axi-dmac programs its
+          # handshake number through an apb_regs window that only exists for
+          # compatibles with AXI_DMA_FLAG_HAS_APB_REGS, which
+          # snps,axi-dma-1.01a is not, so every slave transfer failed with
+          # "apb_regs not initialized". dw_spi retried per frame, flooding the
+          # console and starving the SD probe until the board would not boot.
+          # See the NO DMA comment on spi3 in the device trees.
           extraConfig = ''
             SPI y
             SPI_DESIGNWARE y

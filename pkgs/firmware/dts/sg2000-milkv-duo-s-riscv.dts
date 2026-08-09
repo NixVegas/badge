@@ -220,8 +220,12 @@
 			power-source = <3300>;
 		};
 
+		/* CS is a GPIO here, not SPI3_CS. Mux 3 is XGPIOB_16, mux 5
+		 * would be SPI3_CS. The badge gates LED_DIN with CS through the
+		 * U10 AND gate and needs it ACTIVE HIGH, which the native DW CS
+		 * cannot do. See the cs-gpios comment on &spi3. */
 		spi3-cs-pins {
-			pinmux = <PINMUX(DUOS_VIVO_D5, 5)>;
+			pinmux = <PINMUX(DUOS_VIVO_D5, 3)>;
 			drive-strength-microamp = <10800>;
 			power-source = <3300>;
 		};
@@ -233,6 +237,28 @@
  * with its clocks, interrupt and RST_SPI3 reset, it is only disabled. */
 &spi3 {
 	num-cs = <1>;
+	/* NO DMA. The mainline dw-axi-dmac cannot do slave DMA on this SoC:
+	 * dw_axi_dma_set_hw_channel() programs the handshake number through a
+	 * second register window it calls apb_regs, mapped only for compatibles
+	 * carrying AXI_DMA_FLAG_HAS_APB_REGS. snps,axi-dma-1.01a has no such flag,
+	 * and on the SG2000 the handshake selection lives in the dmamux instead.
+	 * Adding dmas = <&dmamux 23 1>, <&dmamux 22 1> made EVERY slave prepare
+	 * fail with "apb_regs not initialized", which dw_spi retried per frame at
+	 * 30 fps, flooding the console and starving the SD probe. The IDs are
+	 * right (SPI3_TX 23, SPI3_RX 22, cpu 0 = CA53 / 1 = C906B); the driver
+	 * support is not. PIO stalls a little, which beats not booting. */
+	/* GPIO chip select, ACTIVE HIGH. The badge wires LED_DIN = CS AND SDO
+	 * through U10, so the AND gate only passes data while CS is high.
+	 *
+	 * The native DW CS cannot do this: dw_spi_set_cs only decides whether
+	 * to set the Slave Enable bit, and its own comment says SER is set "no
+	 * matter whether the SPI core is configured to support active-high or
+	 * active-low CS level", so the pad stays active-low and SPI_CS_HIGH has
+	 * no effect on it. A gpiod CS does honour polarity, and dw_spi sets
+	 * SPI_CONTROLLER_GPIO_SS so SER is still raised and data still flows.
+	 *
+	 * VIVO_D5 is XGPIOB_16 at mux 3, hence the GPIO mux in &spi3_cfg. */
+	cs-gpios = <&portb 16 GPIO_ACTIVE_HIGH>;
 	pinctrl-0 = <&spi3_cfg>;
 	pinctrl-names = "default";
 	status = "okay";
@@ -243,7 +269,79 @@
 		compatible = "rohm,dh2228fv";
 		reg = <0>;
 		spi-max-frequency = <10000000>;
+		/* REQUIRED for the U10 AND gate. The GPIO_ACTIVE_HIGH flag on
+		 * cs-gpios is NOT what decides polarity: gpiolib-of.c has a
+		 * quirk that forces every SPI cs-gpio active low unless the
+		 * CHILD node carries "spi-cs-high" ("SPI children have active
+		 * low chip selects by default"). Without this the line came up
+		 * as
+		 *   line 16: output active-low consumer="spi3 CS0"
+		 * so CS went LOW during transfers, the AND gate emitted zero,
+		 * and the LEDs saw nothing. */
+		spi-cs-high;
 	};
+};
+
+/*
+ * Badge GPIO line names, so gpioinfo reads as a wiring diagram instead of a
+ * list of numbers. Transcribed from the Nix Badge board device tree.
+ *
+ * Names only. This sets no direction, no pull and no pad mux, so it cannot
+ * change how the board behaves. Every consumer still has to claim its line.
+ *
+ * porta and portb are XGPIOA and XGPIOB. The badge also uses a porte
+ * (PWR_GPIO, the RTC domain block at 0x05021000) for the USER button and the
+ * HDMI I2C pads, but mainline has no such controller node and
+ * pinctrl-sg2000.h names only PWR_GPIO0..2, so those lines are not
+ * representable here yet.
+ */
+&porta {
+	gpio-line-names =
+		"",                  /* 0  CAM_MCLK0 (pin 12, NC) */
+		"hdmi-5v-fault-n",   /* 1  U19 /FAULT */
+		"", "", "", "", "", "",
+		"", "",
+		"",                  /* 10 SD_D1 */
+		"", "",
+		"sd-cd-n",           /* 13 SD card detect */
+		"",
+		"wifi-poweron",      /* 15 on-module AIC8800 */
+		"",                  /* 16 UART0_TX */
+		"",
+		"jtag-tck",          /* 18 */
+		"jtag-tms",          /* 19 */
+		"jtag-trst",         /* 20 */
+		"", "", "", "", "", "", "",
+		"jtag-tdi",          /* 28 v1A datasheet swaps TDI/TDO */
+		"jtag-tdo",          /* 29 */
+		"usb-5v-fault-n",    /* 30 U5 /FAULT */
+		"";
+};
+
+&portb {
+	gpio-line-names =
+		"pwm0-buck",         /* 0 */
+		"adc3-j6",           /* 1  SARADC ch3 */
+		"adc-vbat",          /* 2  SARADC ch2 */
+		"adc-vsel",          /* 3  SARADC ch1 */
+		"btn-boot-n",        /* 4  S1, also the ROM recovery strap */
+		"usb-host-vbus-en",  /* 5  wired-AND with SERIAL_VBUS */
+		"usb-vbus-det",      /* 6 */
+		"", "", "", "",
+		"core-sel-latch-clk",/* 11 U2 74AUP1G175 CP */
+		"core-sel-latch-d",  /* 12 1=ARM, 0=RISC-V on next boot */
+		"",                  /* 13 SPI3_SDO, LED chain via U10 */
+		"",                  /* 14 SPI3_SDI */
+		"",                  /* 15 SPI3_SCK */
+		"",                  /* 16 SPI3_CS, gates LED_DIN via U10 */
+		"sao-sda",           /* 17 IIC1 through U12 TXS0104E */
+		"sao-scl",           /* 18 IIC1 */
+		"sao-gpio2",         /* 19 */
+		"sao-fault-n",       /* 20 U13 /FAULT */
+		"sao-power-en",      /* 21 U13 EN + U12 OE */
+		"sd-fault-n",        /* 22 U8 /FAULT */
+		"core-sel-strap",    /* 23 readback: 1=RISC-V, 0=ARM */
+		"", "", "", "", "", "", "", "";
 };
 
 /* Console UART */

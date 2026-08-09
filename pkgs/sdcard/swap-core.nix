@@ -30,6 +30,8 @@ pkgs.writeShellApplication {
     fi
     cp -f "$bootdir/fip-$core.bin" "$bootdir/fip.bin"
     sync
-    echo "swap-core: active core is now $core; flip the board switch to $core and reboot."
+    echo "swap-core: firmware for $core is active."
+    echo "swap-core: also set the core-select latch, then reboot with the switch in AUTO:"
+    echo "    nix-badge core $core"
   '';
 }

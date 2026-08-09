@@ -89,6 +89,10 @@
     htop
     i2c-tools
     usbutils
+    # gpioinfo / gpioget / gpioset. The DTS gives porta and portb real line
+    # names, so gpioinfo reads as a wiring diagram. Needed to poke things like
+    # sao-power-en by hand while bringing the board up.
+    libgpiod
     # Switch the active core from the badge itself. It swaps fip.bin AND
     # extlinux/extlinux.conf together, which is the part that is easy to get
     # wrong by hand: copying only fip.bin leaves the new core's U-Boot loading

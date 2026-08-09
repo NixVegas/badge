@@ -8,8 +8,8 @@
 # and systemd.services.
 #
 # To change the pattern or the colours at run time use the CLI:
-#   nixbadge-leds set --pattern solid --color '#ff00ff'
-# The CLI only writes /var/lib/nixbadge/leds.conf. The running service watches
+#   nix-badge leds set --pattern solid --color '#ff00ff'
+# The CLI only writes /var/lib/nix-badge/leds.conf. The running service watches
 # that file and reloads when the mtime moves, so nothing calls systemctl and
 # the binary keeps a glibc-only closure. An animation notices within one frame,
 # a static pattern within half a second.
@@ -26,12 +26,14 @@
 let
   cfg = config.nixbadge.leds;
 
-  pkg = import ../../pkgs/leds/nixbadge-leds.nix { inherit pkgs; };
+  pkg = import ../../pkgs/badge/nix-badge.nix { inherit pkgs; };
 
-  configFile = pkgs.writeText "nixbadge-leds.conf" ''
+  configFile = pkgs.writeText "nix-badge-leds.conf" ''
     device = ${cfg.device}
     count = ${toString cfg.count}
     speed_hz = ${toString cfg.speedHz}
+    bits = ${toString cfg.bits}
+    cs_high = ${if cfg.csHigh then "1" else "0"}
     brightness = ${toString cfg.brightness}
     fps = ${toString cfg.fps}
     pattern = ${cfg.pattern}
@@ -52,7 +54,7 @@ let
     };
     serviceConfig = {
       Type = "simple";
-      ExecStart = "${pkg}/bin/nixbadge-leds run --config ${configFile}";
+      ExecStart = "${pkg}/bin/nix-badge leds run --config ${configFile}";
       # on-failure, not always. The service exits 0 when the spidev node never
       # appears, which is what a core without an SPI3 pinmux does, and we must
       # not spin on that.
@@ -76,13 +78,67 @@ in
       description = "spidev node for the SPI3 controller.";
     };
 
+    bits = lib.mkOption {
+      type = lib.types.enum [
+        3
+        4
+        8
+      ];
+      default = 8;
+      description = ''
+        SPI bits sent for each WS2812 bit.
+
+          4  0 -> 1000, 1 -> 1110   high 25% or 75%, 12 bytes per LED
+          3  0 -> 100,  1 -> 110    high 33% or 67%,  9 bytes per LED
+
+        4 is the default and matches joosteto/ws2812-spi. Its wider 25/75 split
+        has about twice the discrimination margin of the 3-bit 33/67 split. The
+        3-bit encoding only worked on this badge within about 1% of nominal
+        timing, and even then bits flipped at random.
+
+        Reloadable at run time: nix-badge leds set --bits 3
+      '';
+    };
+
+    csHigh = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Ask spidev for SPI_CS_HIGH. Keep this true.
+
+        The badge wires LED_DIN = CS AND SDO through U10, so chip select gates
+        the LED data and has to be active HIGH. That is fixed in the device
+        tree, not here: spi3 declares
+
+          cs-gpios = <&portb 16 GPIO_ACTIVE_HIGH>
+
+        with the pad muxed to XGPIOB_16 (mux 3) rather than SPI3_CS (mux 5).
+
+        SPI_CS_HIGH cannot do it. With the native DesignWare chip select,
+        dw_spi_set_cs only decides whether to raise the Slave Enable bit, and
+        the pad polarity is fixed active-low in hardware. Only a gpiod chip
+        select honours polarity. This option is kept purely as an escape hatch.
+      '';
+    };
+
     speedHz = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 2400000;
+      default = 6400000;
       description = ''
-        SPI clock in Hz. The encoder sends 3 SPI bits for each LED bit, so this
-        must give a 1.25 us LED bit. The driver rounds to an even divisor of
-        ssi_clk, and the service logs the rate it actually got.
+        SPI clock in Hz. Together with `bits` this sets the LED bit time. The
+        driver rounds to an even divisor of ssi_clk, and the service logs the
+        timing it actually got.
+
+        The badge chain is mixed XL-1615 and XL-2020, whose T1H window is
+        0.9 to 1.0 us, NOT the WS2812B 0.8 us. With ssi_clk at 187.5 MHz and
+        bits = 4, 3200000 gives divider 60, so 3125000 Hz: a 320 ns SPI bit,
+        T0H 320 ns and T1H 960 ns, which sits inside that window.
+
+        bits = 4 is required to reach it. With bits = 3 a 960 ns T1H would need
+        a 480 ns SPI bit, giving a 1440 ns period that is too slow.
+
+        Reloadable at run time, so a sweep needs no rebuild:
+          nix-badge leds set --speed-hz 6400000
       '';
     };
 
@@ -142,15 +198,15 @@ in
     # The binary and its config must live inside the initrd, not only on the
     # real root, because the service starts before switch_root.
     boot.initrd.systemd.storePaths = [
-      "${pkg}/bin/nixbadge-leds"
+      "${pkg}/bin/nix-badge"
       configFile
     ];
 
     boot.initrd.systemd.services.nixbadge-leds = unit [ "initrd.target" ];
     systemd.services.nixbadge-leds = unit [ "sysinit.target" ];
 
-    # /var/lib/nixbadge holds the runtime config the CLI writes. The initrd has
+    # /var/lib/nix-badge holds the runtime config the CLI writes. The initrd has
     # no /var, which is why early boot always uses the declarative config.
-    systemd.tmpfiles.rules = [ "d /var/lib/nixbadge 0755 root root -" ];
+    systemd.tmpfiles.rules = [ "d /var/lib/nix-badge 0755 root root -" ];
   };
 }
