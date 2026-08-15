@@ -10,3 +10,5 @@ nvs.csv
 nvs.bin
 src/idf
 managed_components
+result
+result-*

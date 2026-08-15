@@ -1,0 +1,108 @@
+# Architecture-agnostic system config for the Milk-V Duo S badge.
+# Everything here is identical whether the ARM (aarch64) or RISC-V (riscv64)
+# large core boots. Nothing arch-specific belongs in this file.
+{ pkgs, lib, ... }:
+{
+  networking.hostName = "nixbadge-duos";
+
+  # The SD image ships an ext4 root sized exactly to the store closure, so a
+  # fresh card boots 100% full no matter how large the card is. These two
+  # options fix that on every boot, in order:
+  #   growPartition   -> growpart.service extends the last MBR partition
+  #                      (NIXOS_ROOT, mmcblk0p2) to the end of the card.
+  #   x-systemd.growfs -> systemd-growfs-root.service then grows the ext4 to
+  #                      fill the new partition, online.
+  # Both are no-ops once the card is full, so they are safe to leave on.
+  # The root mount lives here, not in core-*.nix, because it is identical on
+  # both cores and the two systems share one root partition.
+  boot.growPartition = true;
+
+  fileSystems."/" = {
+    device = "/dev/disk/by-label/NIXOS_ROOT";
+    fsType = "ext4";
+    options = [ "x-systemd.growfs" ];
+  };
+
+  # The FAT boot partition, so swap-core can reach fip.bin and the per-core
+  # extlinux trees without a manual mount.
+  #
+  # WARNING: this partition does NOT hold a stock NixOS boot layout. It holds
+  # the dual-core tree that pkgs/sdcard/make-boot-dir.nix builds:
+  #   /fip.bin /fip-arm.bin /fip-riscv.bin
+  #   /arm/nixos/... /riscv/nixos/...
+  #   /extlinux/extlinux.conf   (a copy of the active core's, paths rewritten
+  #                              from ../nixos/ to /arm/nixos/ or /riscv/nixos/)
+  # A `nixos-rebuild switch` ON THE BADGE would run the
+  # generic-extlinux-compatible installer against /boot, write its own
+  # /boot/nixos plus a single-core extlinux.conf with relative ../nixos/ paths,
+  # and leave fip.bin alone. The board would still boot, but the dual-core
+  # layout and swap-core would be broken until the card is reflashed. Build
+  # images on the dev host, do not rebuild in place.
+  #
+  # nofail keeps a missing or damaged boot partition from blocking the boot.
+  # The rootfs does not need it, only tooling does.
+  fileSystems."/boot" = {
+    device = "/dev/disk/by-label/BOOT";
+    fsType = "vfat";
+    options = [ "nofail" ];
+  };
+
+  # 24 WS2812 LEDs on the SPI3 MOSI line (40-pin header pin 19). The service
+  # starts in the initrd and keeps running after switch_root, so the ring shows
+  # life from very early boot. See modules/duo-s/leds.nix for the option set and
+  # the nixbadge-leds CLI.
+  nixbadge.leds = {
+    enable = true;
+    count = 24;
+  };
+
+  # Networking via NetworkManager: it manages eth0 (auto-connects wired) and
+  # wlan0 once the AIC8800 WiFi comes up. wpa_supplicant backend because the
+  # AIC8800 is a fullMAC driver that iwd handles poorly. NetworkManager does its
+  # own DHCP, so the scripted dhcpcd is off. Public nameservers as a fallback so
+  # resolution works even if DHCP hands over no resolver.
+  networking.networkmanager = {
+    enable = true;
+    wifi.backend = "wpa_supplicant";
+  };
+  networking.useDHCP = false;
+  networking.nameservers = lib.mkDefault [
+    "1.1.1.1"
+    "9.9.9.9"
+  ];
+
+  # Minimal headless userland. Flesh out with the badge services later.
+  users.users.badge = {
+    isNormalUser = true;
+    extraGroups = [ "wheel" "dialout" "gpio" "networkmanager" ];
+    # TODO: replace with a real key before flashing.
+    openssh.authorizedKeys.keys = [ ];
+    initialPassword = "nixbadge";
+  };
+
+  services.openssh = {
+    enable = true;
+    settings.PermitRootLogin = "no";
+  };
+
+  environment.systemPackages = with pkgs; [
+    htop
+    i2c-tools
+    usbutils
+    # gpioinfo / gpioget / gpioset. The DTS gives porta and portb real line
+    # names, so gpioinfo reads as a wiring diagram. Needed to poke things like
+    # sao-power-en by hand while bringing the board up.
+    libgpiod
+    # Switch the active core from the badge itself. It swaps fip.bin AND
+    # extlinux/extlinux.conf together, which is the part that is easy to get
+    # wrong by hand: copying only fip.bin leaves the new core's U-Boot loading
+    # the other core's kernel, and it stops at "Bad Linux RISCV Image magic!".
+    (import ../../pkgs/sdcard/swap-core.nix { inherit pkgs; })
+  ];
+
+  # Keep the closure small, this is going on an SD card.
+  documentation.enable = lib.mkDefault false;
+  documentation.nixos.enable = lib.mkDefault false;
+
+  system.stateVersion = "26.05";
+}
