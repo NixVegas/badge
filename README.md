@@ -3,6 +3,10 @@
 For the PCB, use [our git server](https://git.nixos.lv/NixVegas/pcb)
 since it doesn't fit on GitHub anymore.
 
+For the v1 readme, see [v1.md](v1.md).
+
+This README is still very TODO, since this is the first release after DEF CON.
+
 ## Hardware features
 
 - Dual-core ARM/RISC-V [Milk-V Duo Module 01](https://milkv.io/docs/duo/getting-started/duo-module-01) (core selected at boot; both ARM and RISC-V boot)
@@ -20,3 +24,15 @@ since it doesn't fit on GitHub anymore.
 - OLED connector (4-pin I2C)
 - Front pin header for a [Sharp Memory Display](https://www.adafruit.com/product/4694)
 - Button
+
+## Build
+
+- Modify your config in modules/duo-s/common.nix
+- `nix build` will cross-compile a polyglot ARM and RISC-V image
+
+## Running
+
+- ARM is selected by default, set the physical `builtins.currentSystem` switch to aarch64-linux.
+  Yes, really, this is not a joke.
+- Connect over serial (115200/8n1)
+- Run `nix-badge` to control the badge once it's booted

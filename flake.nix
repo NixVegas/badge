@@ -24,7 +24,11 @@
       flakeverConfig = flakever.lib.mkFlakever {
         inherit inputs;
 
-        digits = [ 1 2 2 ];
+        digits = [
+          1
+          2
+          2
+        ];
       };
 
       # ----------------------------------------------------------------------
@@ -90,16 +94,26 @@
         buildSystem:
         let
           pkgs = nixpkgs-2605.legacyPackages.${buildSystem};
-          armSys = self.nixosConfigurations.${
-            if buildSystem == "aarch64-linux" then "duo-s-arm" else "duo-s-arm-x86_64"
-          };
+          armSys =
+            self.nixosConfigurations.${
+              if buildSystem == "aarch64-linux" then "duo-s-arm" else "duo-s-arm-x86_64"
+            };
           riscvSys = self.nixosConfigurations."duo-s-riscv-${shortArch buildSystem}";
           fipArmReal = import ./pkgs/firmware/fip.nix { inherit pkgs; };
-          fipRiscvReal = import ./pkgs/firmware/fip.nix { inherit pkgs; core = "riscv"; };
+          fipRiscvReal = import ./pkgs/firmware/fip.nix {
+            inherit pkgs;
+            core = "riscv";
+          };
           mkCombinedRoot = import ./pkgs/sdcard/make-combined-root.nix { inherit pkgs; };
           mkBoot = import ./pkgs/sdcard/make-boot-dir.nix { inherit pkgs; };
           mkImg = import ./pkgs/sdcard/make-sd-image.nix { inherit pkgs; };
-          root = mkCombinedRoot { systems = [ armSys riscvSys ]; label = "NIXOS_ROOT"; };
+          root = mkCombinedRoot {
+            systems = [
+              armSys
+              riscvSys
+            ];
+            label = "NIXOS_ROOT";
+          };
           # Both ARM and RISC-V now use real firmware.
           bootDir = mkBoot {
             inherit armSys riscvSys;
@@ -126,7 +140,8 @@
       ];
 
       flake = {
-        versionTemplate = "1.1pre-<lastModifiedDate>-<rev>";
+        versionTemplate = "2.0-<lastModifiedDate>-<rev>";
+
         # badgeOS NixOS systems (built against nixpkgs 26.05).
         nixosConfigurations = duosNixosConfigurations;
       };
@@ -160,27 +175,25 @@
           };
 
           overlayAttrs = {
-            # nothing for now
-            nixbadge = pkgs.callPackage ./pkgs/nixbadge rec {
+            nixbadge = pkgs.callPackage ./pkgs/idf/nixbadge rec {
               target = "esp32c6";
               esp-idf = pkgs."esp-idf-${target}";
             };
             flakever = flakeverConfig;
+          }
+          # badgeOS combined dual-core SD image (nixpkgs 26.05), on the hosts
+          # that can build it.
+          // duosLib.optionalAttrs (duosLib.elem system duosBuildSystems) {
+            duo-s-sdcard = sdcardFor system;
           };
 
-          packages =
-            {
-              default = pkgs.nixbadge;
-              inherit (pkgs) nixbadge;
-            }
-            # badgeOS combined dual-core SD image (nixpkgs 26.05), on the hosts
-            # that can build it.
-            // duosLib.optionalAttrs (duosLib.elem system duosBuildSystems) {
-              duo-s-sdcard = sdcardFor system;
-            };
+          packages = {
+            default = pkgs.duo-s-sdcard;
+            v1 = pkgs.nixbadge-v1;
+          };
 
           devShells = {
-            default = pkgs.nixbadge.shell;
+            v1 = pkgs.nixbadge-v1.shell;
           };
         };
     };
