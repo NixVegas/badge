@@ -1,9 +1,9 @@
-# Nix Badge v2
+# NixOS Badge
 
 For the PCB, use [our git server](https://git.nixos.lv/NixVegas/pcb)
 since it doesn't fit on GitHub anymore.
 
-For the v1 readme, see [v1.md](v1.md).
+For the Nix Badge v1 readme, see [v1.md](v1.md).
 
 This README is still very TODO, since this is the first release after DEF CON.
 
