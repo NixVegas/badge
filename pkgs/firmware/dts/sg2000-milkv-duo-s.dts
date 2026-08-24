@@ -250,6 +250,38 @@
 			power-source = <3300>;
 		};
 	};
+
+	/*
+	 * I2C2 (SG2000 IIC2) — LT8912B DSI->HDMI bridge control bus.
+	 * Pads PIN_IIC2_SCL (ball J13) / PIN_IIC2_SDA (ball J14) = module pins
+	 * 39/40, schematic net I2C_SENSOR1. IIC2 is the pads' PRIMARY function,
+	 * so mux 0 selects it (same "named pad -> mux 0" pattern the working
+	 * uart0/sd0 groups use; verified against the mainline sg2000 pin table,
+	 * drivers/pinctrl/sophgo/pinctrl-sg2000.c: CV1800_GENERAL_PIN(PIN_IIC2_*)).
+	 *
+	 * power-source = <1800>, NOT 3300: both pads are IO_TYPE_1V8_ONLY in the
+	 * VDDIO_RTC domain (same pin table). The mainline sophgo pinctrl records
+	 * one power-cfg per domain (cv1800_set_power_cfg) and returns -EINVAL if a
+	 * later pin in the SAME domain disagrees — but no other VDDIO_RTC pad is
+	 * muxed on this board (uart0=EMMC, spi3=VIVO, sd0=SD0, sd1=SD1), so 1800
+	 * is unambiguous. A 3300 here would both mis-set the 1V8 RTC rail and
+	 * risk that -EINVAL rollback (which unclaims the whole group).
+	 *
+	 * No bias: I2C is open-drain with external 10k pull-ups (R20/R21). The
+	 * sophgo pinctrl rejects bias-disable (-ENOTSUPP, rolls back the mux), and
+	 * an internal pull is unnecessary given the board pull-ups, so bias is
+	 * omitted entirely (pad default = no pull), mirroring the spi3 sck/sdo pins.
+	 */
+	iic2_cfg: iic2-cfg {
+		iic2-scl-pins {
+			pinmux = <PINMUX(PIN_IIC2_SCL, 0)>;
+			power-source = <1800>;
+		};
+		iic2-sda-pins {
+			pinmux = <PINMUX(PIN_IIC2_SDA, 0)>;
+			power-source = <1800>;
+		};
+	};
 };
 
 /*
@@ -318,6 +350,26 @@
 	pinctrl-0 = <&uart0_cfg>;
 	pinctrl-names = "default";
 	status = "okay";
+};
+
+/*
+ * I2C2 (IIC2) — control bus for the LT8912B DSI->HDMI bridge (BadgeOS #4, M1).
+ * The mainline cv180x.dtsi defines i2c2 (i2c@4020000, snps,designware-i2c,
+ * CLK_I2C/CLK_APB_I2C2, RST_I2C2) with status="disabled"; enable it and mux
+ * the IIC2 pads (see &iic2_cfg). No child yet: the mainline lontium-lt8912b
+ * DRM bridge cannot bind without a DSI host, so M1 only makes the bus visible
+ * to i2c-tools (i2cdetect should ACK 0x48/0x49/0x4A). The DSI graph + bridge
+ * node come with the DSI-host work (M3+).
+ *
+ * 100 kHz: the board uses 10k pull-ups (R20/R21); 400 kHz would violate the
+ * I2C rise-time spec. The mainline node sets no clock-frequency (driver would
+ * default to fast mode), so set it explicitly.
+ */
+&i2c2 {
+	status = "okay";
+	clock-frequency = <100000>;
+	pinctrl-0 = <&iic2_cfg>;
+	pinctrl-names = "default";
 };
 
 /* SD card (rootfs on /dev/mmcblk0, NIXOS_ARM label) */
