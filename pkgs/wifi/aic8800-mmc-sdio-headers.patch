@@ -1,0 +1,16 @@
+Add the mmc core, host, card, and sdio_func headers. The CVITEK
+enumeration code needs them.
+
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_driver.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_driver.c
+@@ -16,6 +16,10 @@
+ #include <linux/delay.h>
+ #include <linux/vmalloc.h>
+ #include <linux/firmware.h>
++#include <linux/mmc/core.h>
++#include <linux/mmc/host.h>
++#include <linux/mmc/card.h>
++#include <linux/mmc/sdio_func.h>
+ 
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 12, 0)
+ #include <linux/hardirq.h>

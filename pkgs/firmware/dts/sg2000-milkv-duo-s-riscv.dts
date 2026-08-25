@@ -3,32 +3,28 @@
  * Device tree for the Milk-V Duo S RISC-V core (Sophgo SG2000, T-Head C906).
  *
  * The SG2000 die is the SG2002 family (cv181x/cv180x) with an added ARM core.
- * From the C906 perspective the SoC is identical to the SG2002, so we reuse
- * the mainline sg2002.dtsi directly.
+ * From the C906 the SoC is identical to the SG2002. The mainline sg2002.dtsi
+ * applies directly.
  *
- * Based on arch/riscv/boot/dts/sophgo/sg2002-licheerv-nano-b.dts (Bootlin 2024).
- * Pinctrl configuration cross-checked against the vendor SDK Duo S riscv DTS.
+ * Based on arch/riscv/boot/dts/sophgo/sg2002-licheerv-nano-b.dts.
  *
- * Nodes INCLUDED (boot-focused):
- *   - uart0: console at ttyS0, 115200n8
- *   - sdhci0: SD card root (NIXOS_RISCV label), 4-bit bus
- *   - osc: 25 MHz oscillator (same as LicheeRV Nano)
- *   - memory: overrides sg2002.dtsi 256MB with 512MB (0x80000000/0x20000000)
- *     to match the Duo S firmware memory map.
- *   - Ethernet/gmac0: SG2000 internal EPHY (phy-mode = "internal"), confirmed
- *     from the Duo S schematic. No external RTL8201F/RMII PHY. The dtsi already
- *     sets phy-handle=<&internal_ephy> and phy-mode="internal"; we just enable
- *     the MAC and MDIO. Mirrors mainline cv1812h-huashan-pi.dts.
- *   - USB: enabled with dr_mode = "host" (USB-A port on Duo S carrier).
- *     Board fact source: vendor SDK shows dr_mode = "otg"; changed to "host"
- *     to match physical USB-A connector, mirroring cv1812h-huashan-pi.dts.
- *     VBUS enable (if needed for bus-powered devices) is on GPIO portb pin 5
- *     (USB_VBUS_EN); upstream omits the regulator node, so we do too.
+ * Nodes included (boot-focused):
+ *   - uart0: console at ttyS0, 115200n8.
+ *   - sdhci0: SD card root (NIXOS_RISCV label), 4-bit bus.
+ *   - osc: 25 MHz oscillator (same as LicheeRV Nano).
+ *   - memory: overrides the sg2002.dtsi 256MB with 512MB
+ *     (0x80000000/0x20000000) to match the firmware memory map.
+ *   - Ethernet/gmac0: SG2000 internal EPHY (phy-mode = "internal"). No external
+ *     PHY. The dtsi sets phy-handle=<&internal_ephy> and phy-mode="internal";
+ *     enable the MAC and MDIO. Mirrors mainline cv1812h-huashan-pi.dts.
+ *   - USB: dr_mode = "host" for the USB-A host port. VBUS enable is GPIO portb
+ *     pin 5 (USB_VBUS_EN); upstream omits the regulator node.
  *
- * Nodes OMITTED:
- *   - LEDs, GPIO buttons, camera/CSI: not in mainline sg2002 dtsi
+ * Nodes omitted:
+ *   - LEDs, GPIO buttons, camera/CSI: not in the mainline sg2002 dtsi.
  *
- * CPU (thead,c906, rv64imafdc, sv39) comes from cv180x-cpus.dtsi via sg2002.dtsi.
+ * The CPU (thead,c906, rv64imafdc, sv39) comes from cv180x-cpus.dtsi via
+ * sg2002.dtsi.
  */
 
 /dts-v1/;
@@ -36,25 +32,25 @@
 #include <dt-bindings/gpio/gpio.h>
 
 /*
- * PIN IDS AND THE PIN CONTROLLER
+ * Pin IDs and the pin controller.
  *
  * The Duo S carries an SG2000 die, not the SG2002 that sg2002.dtsi assumes.
- * The two packages have different pin tables and they are NOT interchangeable:
+ * The two packages have different pin tables and are not interchangeable:
  *
- *   pinctrl-sg2002.h   65 QFN pins, flat indices,   NO VIVO pads
- *   pinctrl-sg2000.h  110 BGA pins, row/col coords, HAS VIVO pads
+ *   pinctrl-sg2002.h   65 QFN pins, flat indices,   no VIVO pads
+ *   pinctrl-sg2000.h  110 BGA pins, row/col coords, has VIVO pads
  *
  * For example UART0_TX is 18 on SG2002 but PINPOS('M', 5) on SG2000.
  *
- * We drive the WS2812 LED ring from SPI3, and the SPI3 pads are VIVO_D5..D8,
- * which the SG2002 table cannot name at all. So we bind the pin controller to
- * the SG2000 driver (see the &pinctrl compatible override below) and give
- * EVERY pinmux an SG2000 coordinate. These are the same identifiers the ARM
- * DTS already uses, so both cores now name the pads the same way.
+ * SPI3 drives the WS2812 LED ring. The SPI3 pads are VIVO_D5..D8, which the
+ * SG2002 table cannot name. Bind the pin controller to the SG2000 driver (see
+ * the &pinctrl compatible override below) and give every pinmux an SG2000
+ * coordinate. These identifiers match the ARM DTS, so both cores name the pads
+ * the same way.
  *
- * We define the pads by hand rather than include pinctrl-sg2000.h, because
- * sg2002.dtsi already pulled in pinctrl-sg2002.h and the two headers define
- * the same PIN_* names with different values.
+ * Define the pads here rather than include pinctrl-sg2000.h. sg2002.dtsi
+ * already includes pinctrl-sg2002.h, and the two headers define the same PIN_*
+ * names with different values.
  */
 #define PINPOS(row, col)	((((row) - 'A' + 1) << 8) + ((col) - 1))
 
@@ -90,8 +86,8 @@
 		serial0 = &uart0;
 		/* The SPI core sets bus_num from of_alias_get_id(node, "spi")
 		 * and falls back to dynamic numbering when no alias matches
-		 * (drivers/spi/spi.c). Without this the only enabled controller
-		 * takes bus 0 and spidev appears as /dev/spidev0.0. */
+		 * (drivers/spi/spi.c). Without this alias the only enabled
+		 * controller takes bus 0 and spidev appears as /dev/spidev0.0. */
 		spi3 = &spi3;
 	};
 
@@ -99,7 +95,7 @@
 		stdout-path = "serial0:115200n8";
 	};
 
-	/* Override sg2002.dtsi 256MB with 512MB to match Duo S firmware memmap */
+	/* Override the sg2002.dtsi 256MB with 512MB to match the firmware memmap. */
 	memory@80000000 {
 		device_type = "memory";
 		reg = <0x80000000 0x20000000>;
@@ -107,29 +103,23 @@
 
 	/*
 	 * OpenSBI stays resident in M-mode at 0x80000000 and PMP-protects its
-	 * own memory from S-mode. Its boot banner states the exact regions:
+	 * own memory from S-mode. Its boot banner states the regions:
 	 *
 	 *   Domain0 Region01 : 0x80000000-0x8003ffff M: (F,R,X) S/U: ()
 	 *   Domain0 Region00 : 0x80040000-0x8005ffff M: (F,R,W) S/U: ()
 	 *
-	 * so 0x80000000..0x8005ffff (384 KB) is unreachable from Linux.
+	 * So 0x80000000..0x8005ffff (384 KB) is unreachable from Linux.
 	 *
 	 * OpenSBI normally patches an mmode_resv node into the device tree it
-	 * hands onward, but our chain is OpenSBI -> U-Boot -> a DTB loaded
+	 * hands onward. The boot chain is OpenSBI -> U-Boot -> a DTB loaded
 	 * fresh from the FAT boot partition, so that fixup never reaches the
-	 * DTB that Linux actually gets. Without this node the kernel treats
-	 * the firmware as free RAM, hands out the page at physical
-	 * 0x80000000, and dies the moment it zeroes it:
+	 * DTB that Linux receives. Without this node the kernel treats the
+	 * firmware memory as free RAM, hands out the page at 0x80000000, and
+	 * faults when it zeroes that page (physical 0x80000000 maps to
+	 * PAGE_OFFSET_L3, the base of the sv39 linear map).
 	 *
-	 *   Oops - store (or AMO) access fault
-	 *   epc : __memset      ra : kernel_init_pages
-	 *   badaddr : ffffffd600000000    cause : 0x7
-	 *
-	 * badaddr is PAGE_OFFSET_L3 (arch/riscv/include/asm/page.h), the base
-	 * of the sv39 linear map, so it is physical 0x80000000 exactly.
-	 *
-	 * We reserve 512 KB, which is the measured 384 KB rounded up, to give
-	 * an OpenSBI version bump some room before this breaks again.
+	 * Reserve 512 KB, the 384 KB rounded up, to allow room for an OpenSBI
+	 * version bump.
 	 */
 	reserved-memory {
 		#address-cells = <1>;
@@ -148,9 +138,9 @@
 };
 
 /* Rebind the pin controller to the SG2000 driver so the VIVO pads exist. The
- * node itself (pinctrl@3001000) comes from sg2002.dtsi, which declares it as
- * "sophgo,sg2002-pinctrl". Same register block either way, different pin
- * table. CONFIG_PINCTRL_SOPHGO_SG2000 is already y on this kernel. */
+ * node (pinctrl@3001000) comes from sg2002.dtsi as "sophgo,sg2002-pinctrl".
+ * Both drivers use the same register block but a different pin table.
+ * CONFIG_PINCTRL_SOPHGO_SG2000 must be enabled in the kernel. */
 &pinctrl {
 	compatible = "sophgo,sg2000-pinctrl";
 
@@ -197,10 +187,9 @@
 		};
 	};
 
-	/* SPI3 for the WS2812 ring, mux 5 on the VIVO pads. No bias-disable and
-	 * no omitted power-source: the mainline sophgo pinctrl rejects a pinmux
-	 * subnode without power-source, and it would fail pinctrl_bind_pins
-	 * before dw_spi_mmio_probe ever runs. Same reasoning as the ARM DTS. */
+	/* SPI3 for the WS2812 ring, mux 5 on the VIVO pads. Each subnode needs
+	 * power-source: the mainline sophgo pinctrl rejects a pinmux subnode
+	 * without it and fails pinctrl_bind_pins before dw_spi_mmio_probe runs. */
 	spi3_cfg: spi3-cfg {
 		spi3-sck-pins {
 			pinmux = <PINMUX(DUOS_VIVO_D6, 5)>;
@@ -220,10 +209,10 @@
 			power-source = <3300>;
 		};
 
-		/* CS is a GPIO here, not SPI3_CS. Mux 3 is XGPIOB_16, mux 5
-		 * would be SPI3_CS. The badge gates LED_DIN with CS through the
-		 * U10 AND gate and needs it ACTIVE HIGH, which the native DW CS
-		 * cannot do. See the cs-gpios comment on &spi3. */
+		/* CS is a GPIO here, not SPI3_CS. Mux 3 is XGPIOB_16; mux 5
+		 * would be SPI3_CS. U10 gates LED_DIN with CS through an AND
+		 * gate and needs CS active-high, which the native DW CS cannot
+		 * do. See the cs-gpios comment on &spi3. */
 		spi3-cs-pins {
 			pinmux = <PINMUX(DUOS_VIVO_D5, 3)>;
 			drive-strength-microamp = <10800>;
@@ -232,29 +221,26 @@
 	};
 };
 
-/* SPI3 drives the WS2812 LED ring through spidev. Unlike the ARM side we do
- * NOT have to declare the controller: cv180x.dtsi already has spi@41b0000
- * with its clocks, interrupt and RST_SPI3 reset, it is only disabled. */
+/* SPI3 drives the WS2812 LED ring through spidev. cv180x.dtsi already declares
+ * the controller (spi@41b0000) with its clocks, interrupt and RST_SPI3 reset;
+ * it is only disabled. Enable it below. */
 &spi3 {
 	num-cs = <1>;
-	/* NO DMA. The mainline dw-axi-dmac cannot do slave DMA on this SoC:
+	/* No DMA. The mainline dw-axi-dmac cannot do slave DMA on this SoC.
 	 * dw_axi_dma_set_hw_channel() programs the handshake number through a
-	 * second register window it calls apb_regs, mapped only for compatibles
-	 * carrying AXI_DMA_FLAG_HAS_APB_REGS. snps,axi-dma-1.01a has no such flag,
-	 * and on the SG2000 the handshake selection lives in the dmamux instead.
-	 * Adding dmas = <&dmamux 23 1>, <&dmamux 22 1> made EVERY slave prepare
-	 * fail with "apb_regs not initialized", which dw_spi retried per frame at
-	 * 30 fps, flooding the console and starving the SD probe. The IDs are
-	 * right (SPI3_TX 23, SPI3_RX 22, cpu 0 = CA53 / 1 = C906B); the driver
-	 * support is not. PIO stalls a little, which beats not booting. */
-	/* GPIO chip select, ACTIVE HIGH. The badge wires LED_DIN = CS AND SDO
-	 * through U10, so the AND gate only passes data while CS is high.
+	 * second register window (apb_regs), mapped only for compatibles with
+	 * AXI_DMA_FLAG_HAS_APB_REGS. snps,axi-dma-1.01a has no such flag, and on
+	 * the SG2000 the handshake selection lives in the dmamux instead. With
+	 * dmas = <&dmamux 23 1>, <&dmamux 22 1> every slave prepare fails with
+	 * "apb_regs not initialized". The IDs are correct (SPI3_TX 23, SPI3_RX
+	 * 22, cpu 0 = CA53 / 1 = C906B); the driver support is not. Use PIO. */
+	/* GPIO chip select, active-high. U10 wires LED_DIN = CS AND SDO, so the
+	 * AND gate passes data only while CS is high.
 	 *
-	 * The native DW CS cannot do this: dw_spi_set_cs only decides whether
-	 * to set the Slave Enable bit, and its own comment says SER is set "no
-	 * matter whether the SPI core is configured to support active-high or
-	 * active-low CS level", so the pad stays active-low and SPI_CS_HIGH has
-	 * no effect on it. A gpiod CS does honour polarity, and dw_spi sets
+	 * The native DW CS cannot do this. dw_spi_set_cs only decides whether to
+	 * set the Slave Enable bit; SER is set regardless of active-high or
+	 * active-low CS level, so the pad stays active-low and SPI_CS_HIGH has
+	 * no effect. A gpiod CS honours polarity, and dw_spi sets
 	 * SPI_CONTROLLER_GPIO_SS so SER is still raised and data still flows.
 	 *
 	 * VIVO_D5 is XGPIOB_16 at mux 3, hence the GPIO mux in &spi3_cfg. */
@@ -263,37 +249,34 @@
 	pinctrl-names = "default";
 	status = "okay";
 
-	/* spidev binds known compatibles only, and rohm,dh2228fv is in
-	 * spidev_dt_ids. Gives /dev/spidev3.0. */
+	/* spidev binds known compatibles only. rohm,dh2228fv is in
+	 * spidev_dt_ids and gives /dev/spidev3.0. */
 	spidev@0 {
 		compatible = "rohm,dh2228fv";
 		reg = <0>;
 		spi-max-frequency = <10000000>;
-		/* REQUIRED for the U10 AND gate. The GPIO_ACTIVE_HIGH flag on
-		 * cs-gpios is NOT what decides polarity: gpiolib-of.c has a
-		 * quirk that forces every SPI cs-gpio active low unless the
-		 * CHILD node carries "spi-cs-high" ("SPI children have active
-		 * low chip selects by default"). Without this the line came up
-		 * as
-		 *   line 16: output active-low consumer="spi3 CS0"
-		 * so CS went LOW during transfers, the AND gate emitted zero,
-		 * and the LEDs saw nothing. */
+		/* Required for the U10 AND gate. The GPIO_ACTIVE_HIGH flag on
+		 * cs-gpios does not decide polarity: gpiolib-of.c forces every
+		 * SPI cs-gpio active-low unless the child node carries
+		 * "spi-cs-high" (SPI children default to active-low chip
+		 * selects). Without this the line comes up active-low, so CS
+		 * goes low during transfers, the AND gate emits zero, and the
+		 * LEDs receive nothing. */
 		spi-cs-high;
 	};
 };
 
 /*
- * Badge GPIO line names, so gpioinfo reads as a wiring diagram instead of a
- * list of numbers. Transcribed from the Nix Badge board device tree.
+ * GPIO line names, so gpioinfo reads as a wiring diagram instead of a list of
+ * numbers.
  *
  * Names only. This sets no direction, no pull and no pad mux, so it cannot
- * change how the board behaves. Every consumer still has to claim its line.
+ * change board behaviour. Every consumer still claims its own line.
  *
- * porta and portb are XGPIOA and XGPIOB. The badge also uses a porte
+ * porta and portb are XGPIOA and XGPIOB. The board also uses a porte
  * (PWR_GPIO, the RTC domain block at 0x05021000) for the USER button and the
- * HDMI I2C pads, but mainline has no such controller node and
- * pinctrl-sg2000.h names only PWR_GPIO0..2, so those lines are not
- * representable here yet.
+ * HDMI I2C pads. Mainline has no such controller node and pinctrl-sg2000.h
+ * names only PWR_GPIO0..2, so those lines are not representable here.
  */
 &porta {
 	gpio-line-names =
@@ -363,16 +346,12 @@
 	status = "okay";
 };
 
-/* On-chip 10/100 Ethernet: SG2000 internal EPHY straight to the RJ45 magnetics
- * (no external PHY - confirmed from the Duo S schematic). The dtsi defaults
- * phy-handle=<&internal_ephy> and phy-mode="internal"; just enable the MAC + MDIO.
- * Mirrors mainline cv1812h-huashan-pi.dts. */
-/* On-chip 10/100 Ethernet: SG2000 internal EPHY straight to the RJ45 magnetics
- * (no external PHY - confirmed from the Duo S schematic). phy-mode set
- * explicitly to "internal" with the internal EPHY handle. Mirrors mainline
- * cv1812h-huashan-pi.dts. NOTE: mainline 7.0.x has no driver to power/init the
- * internal EPHY, so eth0 registers but will not link until the EPHY is
- * initialized (e.g. in U-Boot) or a kernel driver lands. DT is ready for that. */
+/* On-chip 10/100 Ethernet: SG2000 internal EPHY to the RJ45 magnetics, no
+ * external PHY. Set phy-mode = "internal" with the internal EPHY handle and
+ * enable the MAC and MDIO. Mirrors mainline cv1812h-huashan-pi.dts.
+ * Note: mainline 7.0.x has no driver to power or init the internal EPHY, so
+ * eth0 registers but does not link until the EPHY is initialized (in U-Boot or
+ * a kernel driver). The DT is ready for that. */
 &gmac0 {
 	status = "okay";
 	phy-mode = "internal";
@@ -384,10 +363,10 @@
 };
 
 /*
- * USB: SG2002/SG2000 DWC2 OTG core driving the Duo S USB-A host port.
- * dr_mode forced "host" (SDK says otg; the carrier exposes a USB-A host port).
- * VBUS to the USB-A port is gated by USB_VBUS_EN = GPIO portb pin 5, modelled
- * as a fixed regulator so the port powers bus-powered devices.
+ * USB: SG2002/SG2000 DWC2 OTG core driving the USB-A host port.
+ * dr_mode = "host" for the USB-A host port. USB_VBUS_EN = GPIO portb pin 5
+ * gates VBUS, modelled as a fixed regulator so the port powers bus-powered
+ * devices.
  */
 / {
 	usb_vbus: regulator-usb-vbus {
@@ -409,42 +388,50 @@
 
 /*
  * Onboard WiFi: AICSemi AIC8800 on the SDIO bus mmc@4320000 (label sdhci1).
- * mmc@4310000=SD card (sdhci0), mmc@4300000=eMMC. The AIC8800 is powered by
- * GPIO PORTA pin 15 (WL_REG_ON, active-high), driven via mmc-pwrseq so the
- * chip powers up before the SDIO scan and enumerates on the bus (vid 0xC8A1).
- * (First-gate config; the out-of-tree aic8800 driver + firmware are separate.)
+ * mmc@4310000 = SD card (sdhci0), mmc@4300000 = eMMC. GPIO PORTA pin 15
+ * (WL_REG_ON, active-high) powers the AIC8800. The &sdhci1 poweron-gpios
+ * raises it before the SDIO scan so the chip enumerates on the bus (vid
+ * 0xC8A1). The out-of-tree aic8800 driver and firmware are separate.
  */
 / {
-	wifi_pwrseq: wifi-pwrseq {
-		compatible = "mmc-pwrseq-simple";
-		/* WL_REG_ON = PORTA15, active-high: ACTIVE_LOW here so the pwrseq's
-		 * deassert (power-up) drives it high. Give the AIC8800 time to come
-		 * out of power-on before the SDIO scan. */
-		reset-gpios = <&porta 15 GPIO_ACTIVE_LOW>;
-		post-power-on-delay-ms = <50>;
+	/* A single consumer drives WL_REG_ON (porta15). Do not add a separate
+	 * wifi_pwrseq: two consumers of porta15 route through gpio-shared-proxy
+	 * (can_sleep), and aicbsp then drives WL_REG_ON with a non-sleeping
+	 * gpiod_set_value. */
+
+	/* Core VDD 3.3V OCR window. cv18xx-vsw takes bus I/O to 1.8V physically
+	 * under NO_1_8_V, so there is no 1.8V vqmmc regulator. */
+	wifi_vdd: regulator-wifi-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "aic8800-vdd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
 	};
 };
 
 /*
  * WiFi SDIO bus pads. The mmc@4320000 controller uses the SD1 pads
  * (DUOS_SD1_*, mux 0 = SDIO1, same scheme as the SD0 pads for the card).
- * Without this mux the controller toggles pads stuck on their default
- * function and the AIC8800 never answers the SDIO probe.
+ * Without this mux the pads stay on their default function and the AIC8800
+ * never answers the SDIO probe.
  */
 &pinctrl {
 	sdhci1_cfg: sdhci1-cfg {
+		/* 1.8V pads. The AIC8800 VIO is fixed 1.8V; cv18xx-vsw drives the rail. */
 		sdhci1-clk-pins {
 			pinmux = <PINMUX(DUOS_SD1_CLK, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <16100>;
-			power-source = <3300>;
+			power-source = <1800>;
 		};
 
 		sdhci1-cmd-pins {
 			pinmux = <PINMUX(DUOS_SD1_CMD, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <10800>;
-			power-source = <3300>;
+			power-source = <1800>;
 		};
 
 		sdhci1-data-pins {
@@ -454,32 +441,38 @@
 				 <PINMUX(DUOS_SD1_D3, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <10800>;
-			power-source = <3300>;
+			power-source = <1800>;
 		};
 	};
 };
 
 &sdhci1 {
+	/* Vendor SDHCI: bind the cvitek cv181x host (cvitek,cv181x-sdio) so the
+	 * AIC8800 fmac gets the vendor SDIO bring-up. clk_wifisd = SD1 functional
+	 * clock (source, set from src-frequency); axi = register-bus clock.
+	 * cv180x.dtsi provides the same CLK_SD1/CLK_AXI4_SD1 macros and &clk label
+	 * as sg2000. */
 	status = "okay";
+	sophgo,sdio-inst1;
+	compatible = "cvitek,cv181x-sdio";
+	clocks = <&clk CLK_SD1>, <&clk CLK_AXI4_SD1>;
+	clock-names = "clk_wifisd", "axi";
 	bus-width = <4>;
 	non-removable;
 	no-mmc;
 	no-sd;
-	/* The wifi SDIO has no 1.8V signaling rail configured in mainline, so the
-	 * mmc core must NOT select UHS modes (SDR50/SDR104/DDR50 all require 1.8V).
-	 * Confirmed on hardware: without this the bus negotiates SDR104 *timing* but
-	 * stays at 3.3V signaling (mmc2/ios: "SDR104" + "3.30 V") - an out-of-spec
-	 * mode that corrupts the large fmac firmware upload in chip RAM, so the
-	 * bootrom's DBG_START_APP (cmd 1037) never confirms ("8800d80 wifi start
-	 * fail"). Force valid 3.3V high-speed (<=50MHz) instead. */
-	no-1-8-v;
-	/* The AIC8800 driver builds CONFIG_OOB=n, so it signals command
-	 * confirmations via the in-band SDIO interrupt (sdio_claim_irq on DAT1).
-	 * Without cap-sdio-irq the host never delivers that card interrupt, the
-	 * busrx thread never wakes, and the first firmware command (cmd 1037)
-	 * times out with "8800d80 wifi start fail". */
 	cap-sdio-irq;
+	keep-power-in-suspend;
+	/* 375MHz SDIO source clock (src-frequency, read by the cvi host). The
+	 * card clock = f_max/4 = 46.875MHz at max-frequency = 187.5MHz;
+	 * get_max_clock returns f_max as the sdhci divider base. */
+	src-frequency = <375000000>;
+	max-frequency = <187500000>;
+	vmmc-supply = <&wifi_vdd>;
 	pinctrl-0 = <&sdhci1_cfg>;
 	pinctrl-names = "default";
-	mmc-pwrseq = <&wifi_pwrseq>;
+	/* The cv181x host drives WL_REG_ON low at probe (card absent). The aic
+	 * CONFIG_PLATFORM_CVITEK path raises it and calls cvi_sdio_rescan() to
+	 * enumerate the fmac in bootrom mode so its message task starts. */
+	poweron-gpios = <&porta 15 GPIO_ACTIVE_HIGH>;
 };

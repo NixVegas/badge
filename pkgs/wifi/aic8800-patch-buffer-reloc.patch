@@ -1,0 +1,28 @@
+Move the patch buffer for new firmware. A firmware version above 0x06090100
+extends past the fixed 0x0016F800 patch base. Read the safe base at
+rd_patch_addr+12 and use it for start_addr and patch_addr.
+
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic8800d80_compat.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic8800d80_compat.c
+@@ -189,6 +189,21 @@
+ 		return ret;
+ 	}
+ 	aic_patch_str_base = rd_patch_addr_cfm.memdata;
++	{
++		u32 badge_ver = 0, badge_buff_base = 0;
++		if (!rwnx_send_dbg_mem_read_req(sdiodev, RAM_FMAC_FW_ADDR + 0x01C, &rd_patch_addr_cfm)) {
++			badge_ver = rd_patch_addr_cfm.memdata;
++			printk("badge rd_version_val=%08X\n", badge_ver);
++			if (badge_ver > 0x06090100) {
++				if (!rwnx_send_dbg_mem_read_req(sdiodev, rd_patch_addr + 12, &rd_patch_addr_cfm)) {
++					badge_buff_base = rd_patch_addr_cfm.memdata;
++					start_addr = badge_buff_base;
++					patch_addr = badge_buff_base;
++					printk("badge patch reloc start_addr=%08X\n", start_addr);
++				}
++			}
++		}
++	}
+ 
+ 	#if (NEW_PATCH_BUFFER_MAP)
+ 	rd_version_addr = RAM_FMAC_FW_ADDR + 0x01C;

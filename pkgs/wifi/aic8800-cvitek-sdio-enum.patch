@@ -1,0 +1,44 @@
+Restore the CVITEK power-on and re-scan that the radxa fork removed. Raise
+WL_REG_ON with the host gpio descriptor, then call cvi_sdio_rescan(). The
+firmware gives TX credits only when the card enumerates under the driver in
+bootrom mode.
+
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aicsdio.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aicsdio.c
+@@ -20,6 +20,7 @@
+ #include "aic_bsp_driver.h"
+ #include <linux/version.h>
+ #include <linux/delay.h>
++#include <linux/gpio/consumer.h>
+ #ifdef CONFIG_PLATFORM_ROCKCHIP
+ #include <linux/rfkill-wlan.h>
+ #endif /* CONFIG_PLATFORM_ROCKCHIP */
+@@ -546,6 +547,16 @@
+ 	int ret = 0;
+ 	struct semaphore aic_chipup_sem;
+ 	sdio_dbg("%s\n", __func__);
++	{
++		/* The host defers its probe, so the descriptor can appear late.
++		 * Wait up to 30 s for it, then raise it. */
++		extern struct gpio_desc *cvi_get_wifi_pwr_on_desc(void);
++		struct gpio_desc *_pd = cvi_get_wifi_pwr_on_desc();
++		int _w = 0;
++		while (!_pd && _w++ < 300) { msleep(100); _pd = cvi_get_wifi_pwr_on_desc(); }
++		printk("badge CVITEK WLAN_POWER on, have_desc=%d waited=%dx100ms\n", !!_pd, _w);
++		if (_pd) { gpiod_set_value(_pd, 1); mdelay(50); }
++	}
+ 
+ #ifdef CONFIG_PLATFORM_ALLWINNER
+ 	if (aicbsp_bus_index < 0)
+@@ -586,6 +597,11 @@
+ 	sunxi_mmc_rescan_card(aicbsp_bus_index);
+ #endif //CONFIG_PLATFORM_ALLWINNER
+ 
++	{
++		extern int cvi_sdio_rescan(void);
++		printk("badge CVITEK cvi_sdio_rescan\n");
++		cvi_sdio_rescan();
++	}
+ 	if (down_timeout(&aic_chipup_sem, msecs_to_jiffies(2000)) == 0) {
+ 		aicbsp_unreg_sdio_notify();
+ 		if(aicbsp_load_fw_in_fdrv){

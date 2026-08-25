@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/reset.h>
 #include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/device.h>
 #include <linux/export.h>
 #include <linux/io.h>
@@ -36,14 +37,14 @@
 #include <linux/dma-mapping.h>
 #include <linux/kernel.h>
 
-/* card.h removed (procfs stats dropped) */
+/* No card.h: the procfs statistics are not built. */
 #include "sdhci-pltfm.h"
 #include "sdhci-cv181x.h"
 
-/* Sophgo added these to their patched sdhci core; define locally for the
- * mainline build. The PHASE_FORWARD quirks are never SET by this driver (only
- * tested), so any non-colliding bit works. ERR_INT_STATUS is the standard SD
- * Error Interrupt Status register (0x32), used only for a debug read. */
+/* These exist in the Sophgo patched sdhci core. Define them locally for the
+ * mainline build. This driver only tests the PHASE_FORWARD quirks, never sets
+ * them, so any non-colliding bit works. ERR_INT_STATUS is the standard SD Error
+ * Interrupt Status register (0x32), read only for debug. */
 #ifndef SDHCI_QUIRK2_RX_PHASE_FORWARD
 #define SDHCI_QUIRK2_RX_PHASE_FORWARD (1u << 28)
 #endif
@@ -131,7 +132,7 @@ static void sdhci_cv181x_sd_setup_pad(struct sdhci_host *host, bool bunplug)
 
 	u8 val = (bunplug) ? 0x3 : 0x0;
 
-	if (0) /* CD stripped */
+	if (0) /* no card detect */
 		writeb(0x3, cvi_host->pinmuxbase + 0x34);
 	else
 		writeb(0x0, cvi_host->pinmuxbase + 0x34);
@@ -360,8 +361,19 @@ static unsigned int sdhci_cvi_general_get_max_clock(struct sdhci_host *host)
 	return host->mmc->f_max;
 }
 
-/* Used for wifi driver due if no SD card detect pin implemented */
+/* The WiFi host has no card-detect pin. Keep its mmc_host for manual rescan. */
 static struct mmc_host *wifi_mmc;
+/* WL_REG_ON GPIO for the WiFi SDIO host. The value comes from the host DT node
+ * (poweron-gpios). The driver drives it low at probe so the card is absent at
+ * boot. The AIC driver later raises it and calls cvi_sdio_rescan() to enumerate
+ * the card in bootrom mode. */
+static struct gpio_desc *wifi_pwr_on_desc;
+
+struct gpio_desc *cvi_get_wifi_pwr_on_desc(void)
+{
+	return wifi_pwr_on_desc;
+}
+EXPORT_SYMBOL_GPL(cvi_get_wifi_pwr_on_desc);
 
 int cvi_sdio_rescan(void)
 {
@@ -897,7 +909,7 @@ static void sdhci_cv181x_sd_dump_vendor_regs(struct sdhci_host *host)
 		   sdhci_readw(host, CVI_CV181X_SDHCI_PHY_DLY_STS));
 	SDHCI_DUMP(": Reg_24C:   0x%08x | unplugg:  0x%08x\n",
 		   sdhci_readl(host, CVI_CV181X_SDHCI_PHY_CONFIG),
-		   0 /* ever_unplugged n/a */);
+		   0 /* unplug state not tracked */);
 
 	PAD_SDIO0_PWR_EN = readb(cvi_host->pinmuxbase + 0x38) & 0x07;
 	PAD_SDIO0_CD  = readb(cvi_host->pinmuxbase + 0x34) & 0x07;
@@ -1131,7 +1143,7 @@ static irqreturn_t sdhci_cvi_cd_handler(int irq, void *dev_id)
 	spin_lock_irqsave(&cvi_host->cd_debounce_lock, flag);
 	cvi_host->pre_gpio_cd = mmc_gpio_get_cd(host);
 	if (!cvi_host->pre_gpio_cd)
-		/* ever_unplugged n/a */;
+		/* unplug state not tracked */;
 	if (!cvi_host->is_debounce_work_running) {
 		cancel_delayed_work(&cvi_host->cd_debounce_work);
 		schedule_delayed_work(&cvi_host->cd_debounce_work, 0);
@@ -1160,6 +1172,48 @@ static int sdhci_cvi_probe(struct platform_device *pdev)
 		return -EINVAL;
 
 	pdata = match->data;
+
+	/* Get WL_REG_ON for the WiFi (cv181x-sdio) host before adding the mmc host.
+	 * Drive it low so the card is absent at boot. This runs before
+	 * sdhci_pltfm_init so an -EPROBE_DEFER (GPIO controller not ready) leaks
+	 * nothing; the kernel re-probes. The AIC driver later raises the line and
+	 * calls cvi_sdio_rescan() to enumerate the card. */
+	if (of_device_is_compatible(pdev->dev.of_node, "cvitek,cv181x-sdio")) {
+		wifi_pwr_on_desc = devm_gpiod_get(&pdev->dev, "poweron", GPIOD_OUT_LOW);
+		if (IS_ERR(wifi_pwr_on_desc)) {
+			ret = PTR_ERR(wifi_pwr_on_desc);
+			wifi_pwr_on_desc = NULL;
+			if (ret == -EPROBE_DEFER)
+				return ret;
+			pr_err("badge: WL_REG_ON get failed (%d)\n", ret);
+		} else {
+			pr_info("badge: WL_REG_ON driven low (fmac card absent at boot)\n");
+		}
+	}
+
+	/* Force the SD1 (WiFi) DATA and CMD pads to bias pull-up in the RTC pinconf
+	 * block (0x05027000). The in-band SDIO CARD_INT is open-drain on DAT1. Without
+	 * a pull-up the line cannot idle high, so CARD_INT never latches and the
+	 * interrupt handshake stalls. The mainline cv18xx pinctrl (pinctrl@3001000)
+	 * writes into the 0x03001000 block, which does not affect these RTC-domain
+	 * pads. Set BIT(2) (pull-up) and clear BIT(3) (pull-down) in the RTC block
+	 * directly. Offsets: D3 D2 D1 D0 CMD. */
+	if (of_device_is_compatible(pdev->dev.of_node, "cvitek,cv181x-sdio")) {
+		void __iomem *cv_rtc = ioremap(0x05027000, 0x1000);
+		if (cv_rtc) {
+			static const u16 cv_pads[] = {0x58, 0x5c, 0x60, 0x64, 0x68};
+			int cv_i;
+			u32 cv_v;
+			for (cv_i = 0; cv_i < 5; cv_i++) {
+				cv_v = readl(cv_rtc + cv_pads[cv_i]);
+				pr_info("badge: sd1 pad[0x%03x]=0x%08x pre (pu=%d pd=%d)\n",
+					cv_pads[cv_i], cv_v, !!(cv_v & BIT(2)), !!(cv_v & BIT(3)));
+				writel((cv_v | BIT(2)) & ~BIT(3), cv_rtc + cv_pads[cv_i]);
+			}
+			iounmap(cv_rtc);
+			pr_info("badge: SD1 DAT/CMD pads forced bias pull-up for CARD_INT\n");
+		}
+	}
 
 	host = sdhci_pltfm_init(pdev, pdata, sizeof(*cvi_host));
 	if (IS_ERR(host))
@@ -1197,13 +1251,31 @@ static int sdhci_cvi_probe(struct platform_device *pdev)
 			cvi_host->clk_sdhci = NULL;
 		}
 
-		if (cvi_host->clk_sdhci && clk_get_rate(cvi_host->clk_sdhci) != host->mmc->f_max)
-			clk_set_rate(cvi_host->clk_sdhci, host->mmc->f_max);
+		/* Set the SDIO functional (source) clock from the DT "src-frequency"
+		 * (375MHz on cv181x wifi-sd), not from f_max. The cv18xx PHY tap and delay
+		 * timing is calibrated for a 375MHz source. A lower source clock skews the
+		 * sample point and stalls AIC8800 fmac init. Prefer src-frequency; fall
+		 * back to f_max. */
+		if (cvi_host->clk_sdhci) {
+			u32 src_freq = 0;
+			if (of_property_read_u32(pdev->dev.of_node, "src-frequency", &src_freq) || !src_freq)
+				src_freq = host->mmc->f_max;
+			if (clk_get_rate(cvi_host->clk_sdhci) != src_freq)
+				clk_set_rate(cvi_host->clk_sdhci, src_freq);
+			/* sdhci_pltfm_init captured clocks[0] (the 300MHz AXI bus clock) as
+			 * host->max_clk, so the sdhci divider yields a 37.5MHz card clock
+			 * instead of 46.875MHz (375MHz/8). The cv18xx PHY tap is a fixed time
+			 * delay, so the sample point then differs. Point max_clk at the
+			 * functional (wifi-sd) clock so the card clock is correct. */
+			host->max_clk = clk_get_rate(cvi_host->clk_sdhci);
+			pr_info("badge: SDIO src clk %s -> %u Hz (f_max=%u max_clk=%lu)\n",
+				clkname, src_freq, host->mmc->f_max,
+				(unsigned long)host->max_clk);
+		}
 
-		/* MAINLINE SHIM: the vendor 5.10 driver never enables its clocks (uboot
-		 * left them on, 5.10 did not gate them). Mainline clk_disable_unused would
-		 * gate CLK_SD1 / CLK_AXI4_SD1 and kill the SDHCI register bus. Enable the
-		 * functional (wifi-sd) clock and the AXI register-bus clock explicitly. */
+		/* Enable the functional (wifi-sd) clock and the AXI register-bus clock
+		 * explicitly. The mainline clk_disable_unused would otherwise gate CLK_SD1
+		 * and CLK_AXI4_SD1 and stop the SDHCI register bus. */
 		clk_prepare_enable(cvi_host->clk_sdhci);
 		{
 			struct clk *axi = devm_clk_get_optional(&pdev->dev, "axi");
@@ -1214,7 +1286,7 @@ static int sdhci_cvi_probe(struct platform_device *pdev)
 
 	sdhci_get_of_property(pdev);
 
-#if 0 /* CD stripped (wifi non-removable) */
+#if 0 /* no card detect: the WiFi card is non-removable */
 	if (pdev->dev.of_node) {
 		gpio_cd = of_get_named_gpio(pdev->dev.of_node, "cvi-cd-gpios", 0);
 	}
@@ -1241,7 +1313,7 @@ static int sdhci_cvi_probe(struct platform_device *pdev)
 			}
 		}
 	}
-#endif /* CD stripped (wifi non-removable) */
+#endif /* no card detect */
 	/*
 	 * extra adma table cnt for cross 128M boundary handling.
 	 */
@@ -1256,7 +1328,13 @@ static int sdhci_cvi_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, cvi_host);
 
-	if (strstr(dev_name(mmc_dev(host->mmc)), "wifi-sd")) {
+	/* Set wifi_mmc for both a DT node named "wifi-sd" and the cv181x-sdio
+	 * compatible. The mmc@4320000 node does not match "wifi-sd" by name, which
+	 * would leave wifi_mmc NULL. Then cvi_sdio_rescan() is a no-op and the rescan
+	 * sysfs file is never created. cvi_sdio_rescan() re-enumerates the SDIO card
+	 * so the AIC fmac can start its message task. */
+	if (strstr(dev_name(mmc_dev(host->mmc)), "wifi-sd") ||
+	    of_device_is_compatible(pdev->dev.of_node, "cvitek,cv181x-sdio")) {
 		wifi_mmc = host->mmc;
 
 		if (device_create_file(&host->mmc->class_dev, &dev_attr_rescan))
@@ -1265,7 +1343,7 @@ static int sdhci_cvi_probe(struct platform_device *pdev)
 		wifi_mmc = NULL;
 
 	/* device proc entry */
-	if (0 && /* proc stripped */
+	if (0 && /* procfs entry not built */
 		(strstr(dev_name(mmc_dev(host->mmc)), "cv-sd"))) {
 		ret = cvi_proc_init(cvi_host);
 		if (ret)
@@ -1285,11 +1363,9 @@ pltfm_free:
 
 static void sdhci_cvi_remove(struct platform_device *pdev)
 {
-	/* probe stores cvi_host as drvdata (the PM ops rely on it), but the old
-	 * remove read it back as a struct sdhci_host * and dereferenced the wrong
-	 * pointer -> Oops on unbind. Read cvi_host correctly, do the cvi cleanup
-	 * while it is valid, then restore drvdata=host so sdhci_pltfm_remove (which
-	 * reads drvdata as the sdhci_host) frees the controller correctly. */
+	/* Probe stores cvi_host as drvdata; the PM ops rely on it. Read cvi_host,
+	 * run the cvi cleanup while it is valid, then set drvdata back to host.
+	 * sdhci_pltfm_remove reads drvdata as the sdhci_host to free the controller. */
 	struct sdhci_cvi_host *cvi_host = platform_get_drvdata(pdev);
 	struct sdhci_host *host = cvi_host->host;
 

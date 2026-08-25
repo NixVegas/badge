@@ -1,0 +1,32 @@
+Send DBG_START_APP_REQ without a wait for its confirm. The loader sends the
+confirm, jumps to the firmware, and clears the interrupt in microseconds; the
+host cannot catch it and command 1037 times out. Wait after the jump so the
+firmware starts before the first fdrv command.
+
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_driver.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_driver.c
+@@ -459,7 +459,7 @@
+ 	start_app_req->boottype = boot_type;
+ 
+ 	/* Send the DBG_START_APP_REQ message to LMAC FW */
+-	return rwnx_send_msg(sdiodev, start_app_req, 1, DBG_START_APP_CFM, start_app_cfm);
++	return rwnx_send_msg(sdiodev, start_app_req, start_app_cfm ? 1 : 0, DBG_START_APP_CFM, start_app_cfm); // no wait when cfm is NULL
+ }
+ 
+ static msg_cb_fct dbg_hdlrs[MSG_I(DBG_MAX)] = {
+@@ -1721,11 +1721,13 @@
+ 	struct dbg_start_app_cfm start_app_cfm;
+ 
+ 	/* fw start */
+-	ret = rwnx_send_dbg_start_app_req(sdiodev, fw_addr, HOST_START_APP_AUTO, &start_app_cfm);
++	ret = rwnx_send_dbg_start_app_req(sdiodev, fw_addr, HOST_START_APP_AUTO, NULL); // no wait for the self-clearing confirm
+ 	if (ret) {
+ 		return -1;
+ 	}
+-	aicbsp_info.hwinfo_r = start_app_cfm.bootstatus & 0xFF;
++	(void)start_app_cfm;
++	msleep(500); // let the firmware start before the first fdrv command
++	printk("badge post-startapp settle 500ms done\n");
+ 
+ 	return 0;
+ }

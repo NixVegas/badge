@@ -1,46 +1,44 @@
-# U-Boot for Milk-V Duo S (Sophgo SG2000, riscv64 S-mode).
-# Builds from sophgo/u-boot-2021.10 branch sg200x-dev commit a955e4df4d034b214416e3913e68b2d90ebce714.
+# U-Boot for the Milk-V Duo S (Sophgo SG2000, riscv64 S-mode).
+# Builds from sophgo/u-boot-2021.10 branch sg200x-dev, commit a955e4df4d034b214416e3913e68b2d90ebce714.
 # Produces $out/u-boot-raw.bin (= u-boot.bin, the LOADER_2ND blob for riscv fip packing).
 #
-# Board glue authored here (not from the SDK build/ tree):
+# The board glue is authored here, not taken from the SDK build/ tree:
 #   configs/cvitek_sg2000_milkv_duos_musl_riscv64_sd_defconfig  (placed via postPatch)
 #   board/cvitek/cvi_board_init.c                                (riscv variant: no prior_stage_fdt_address)
-#   include/cvi_board_memmap.h                                   (memory map for Duo S 512MB)
+#   include/cvi_board_memmap.h                                   (memory map for the Duo S 512 MB)
 #   include/cvipart.h                                            (minimal SD partition defs)
 #
-# Investigation findings:
-#   The vendor tree (a955e4df) does NOT contain arch/riscv/dts/cv181x_cv181xasic.dts or any
-#   cv181x riscv U-Boot control DTS. The riscv dts/Makefile expects arch/riscv/dts/$(CHIP)_$(CVIBOARD).dtb
-#   (= cv181x_cv181xasic.dtb) but no source exists in the tree.
+# The vendor tree (a955e4df) has no arch/riscv/dts/cv181x_cv181xasic.dts or any cv181x riscv
+# U-Boot control DTS. The riscv dts/Makefile expects arch/riscv/dts/$(CHIP)_$(CVIBOARD).dtb
+# (= cv181x_cv181xasic.dtb), but the source does not exist in the tree.
 #
-#   CONFIG_OF_PRIOR_STAGE was the original approach (OpenSBI passes FDT ptr in a1). But in a
-#   clean Nix build nothing writes a valid DTB at 0x80080000, so prior_stage_fdt_address is
-#   garbage and arch/riscv/cpu/generic/dram.c:dram_init() calls fdtdec_setup_mem_size_base()
-#   which reads /memory from an invalid pointer and hangs before U-Boot has any console output.
+# CONFIG_OF_PRIOR_STAGE requires OpenSBI to pass an FDT pointer in a1. A clean Nix build
+# writes no valid DTB at 0x80080000. Then prior_stage_fdt_address is invalid, and
+# arch/riscv/cpu/generic/dram.c:dram_init() calls fdtdec_setup_mem_size_base(), which reads
+# /memory from a bad pointer and hangs before any console output.
 #
-#   Fix: CONFIG_OF_EMBED. We provide a minimal standalone control DTS placed via postPatch at
-#   arch/riscv/dts/cv181x_cv181xasic.dts. U-Boot compiles it and links it in as __dtb_dt_begin,
-#   so gd->fdt_blob is valid from fdtdec_setup() onward without requiring a runtime FDT pointer.
-#   The DTS is self-contained (no SDK header includes) with the minimal nodes needed:
+# The build uses CONFIG_OF_EMBED instead. It provides a minimal standalone control DTS via
+# postPatch at arch/riscv/dts/cv181x_cv181xasic.dts. U-Boot compiles the DTS and links it in
+# as __dtb_dt_begin. Then gd->fdt_blob is valid from fdtdec_setup() onward, with no runtime
+# FDT pointer. The DTS is self-contained (no SDK header includes) with the minimal nodes:
 #     - /memory at 0x80000000 / 512 MB
 #     - RISC-V C906 cpu node with PLIC and CLINT
 #     - uart0 (snps,dw-apb-uart at 0x04140000, console)
 #     - cv-sd@4310000 (cvitek,cv181x-sd) for SD boot
-#   The prior_stage_fdt_address variable is NO LONGER defined when OF_PRIOR_STAGE is removed;
-#   it was only declared in arch/riscv/cpu/cpu.c under that ifdef, so cvi_board_init_riscv.c
-#   stays unchanged.
+# Removal of OF_PRIOR_STAGE removes the prior_stage_fdt_address variable. It was declared only
+# in arch/riscv/cpu/cpu.c under that ifdef, so cvi_board_init_riscv.c stays unchanged.
 #
-# Patches applied:
-#   Patch 1: Add config SYS_TEXT_BASE hex to board/cvitek/cv181x/Kconfig.
-#     Same reason as the ARM build: the vendor Kconfig has no SYS_TEXT_BASE entry,
-#     so the defconfig value is silently dropped and board_f.c / efi_runtime.c get
-#     CONFIG_SYS_TEXT_BASE undeclared. For riscv, arch/riscv/include/asm/boot0.h
-#     also uses CONFIG_SYS_TEXT_BASE directly in assembly (.quad CONFIG_SYS_TEXT_BASE).
+# Patches:
+#   Patch 1: Add a SYS_TEXT_BASE hex symbol to board/cvitek/cv181x/Kconfig.
+#     Same reason as the ARM build. The vendor Kconfig has no SYS_TEXT_BASE entry, so the
+#     defconfig value is dropped and board_f.c / efi_runtime.c get CONFIG_SYS_TEXT_BASE
+#     undeclared. For riscv, arch/riscv/include/asm/boot0.h also uses CONFIG_SYS_TEXT_BASE
+#     directly in assembly (.quad CONFIG_SYS_TEXT_BASE).
 #   Patch 2: Append _zicsr_zifencei to the ARCH_FLAGS in arch/riscv/Makefile.
-#     binutils >= 2.38 (shipped with GCC 15) requires zicsr and zifencei to be
-#     explicitly listed in -march for CSR instructions (csrr, fence.i) to assemble.
-#     The vendor tree targets GCC 12 / binutils 2.35 which accepted them implicitly.
-#     Nixpkgs 26.05 uses GCC 15.2.0 + binutils 2.46 so the patch is required.
+#     binutils >= 2.38 (shipped with GCC 15) requires zicsr and zifencei to be listed
+#     explicitly in -march for CSR instructions (csrr, fence.i) to assemble. The vendor tree
+#     targets GCC 12 / binutils 2.35, which accepted them implicitly. Nixpkgs 26.05 uses
+#     GCC 15.2.0 + binutils 2.46, so the patch is required.
 #
 { pkgs }:
 let
@@ -80,28 +78,28 @@ pkgs.stdenv.mkDerivation {
   ];
 
   postPatch = ''
-    # Place authored defconfig
+    # Place the authored defconfig.
     cp ${defconfig} configs/cvitek_sg2000_milkv_duos_musl_riscv64_sd_defconfig
 
-    # Override the vendor boot flow in cv181x-asic.h: the vendor default env
-    # uses a FIT/hush sdboot. Replace CONFIG_BOOTCOMMAND/EXTRA_ENV with a clean
+    # Override the vendor boot flow in cv181x-asic.h. The vendor default env uses
+    # a FIT/hush sdboot. Replace CONFIG_BOOTCOMMAND/EXTRA_ENV with a clean
     # sysboot/extlinux boot of /extlinux/extlinux.conf on mmc 0:1 (the FAT). Same
-    # override + load map as the ARM build (sysboot reads the _r-suffixed addrs).
+    # override and load map as the ARM build (sysboot reads the _r-suffixed addrs).
     python3 - <<'ENDPY'
 with open("include/configs/cv181x-asic.h", "r") as f:
     src = f.read()
 
 insert = r"""
-/* BadgeOS override: replace vendor FIT/hush boot with NixOS extlinux/sysboot.
+/* Override: replace the vendor FIT/hush boot with NixOS extlinux/sysboot.
  * sysboot mmc 0:1 any <scriptaddr> /riscv/extlinux/extlinux.conf
- * - kernel_addr_r/fdt_addr_r/ramdisk_addr_r: _r suffix required by sysboot
- * - non-overlapping with U-Boot text (0x80200000) and ION reserve (0x9A600000)
+ * - kernel_addr_r/fdt_addr_r/ramdisk_addr_r: sysboot requires the _r suffix
+ * - does not overlap U-Boot text (0x80200000) or ION reserve (0x9A600000)
  *
- * The path is PER CORE (/riscv/, and /arm/ in the ARM U-Boot). Each core boots
- * its own U-Boot out of its own fip-<core>.bin, so each one can look in its own
- * directory. That means switching cores only has to swap fip.bin, and no shared
- * /extlinux/extlinux.conf has to be kept in sync. Swapping only fip.bin used to
- * leave the new core's U-Boot loading the other core's kernel, which stops with
+ * The path is per core (/riscv/, and /arm/ in the ARM U-Boot). Each core boots
+ * its own U-Boot from its own fip-<core>.bin, so each one reads its own
+ * directory. A core switch then swaps only fip.bin, and no shared
+ * /extlinux/extlinux.conf must stay in sync. A per-core path prevents one
+ * core's U-Boot from loading the other core's kernel, which stops with
  * "Bad Linux RISCV Image magic!".
  */
 #undef  CONFIG_BOOTCOMMAND
@@ -126,23 +124,22 @@ with open("include/configs/cv181x-asic.h", "w") as f:
     f.write(src)
 ENDPY
 
-    # Place riscv board init (gitignored in vendor tree; riscv variant omits
-    # prior_stage_fdt_address because arch/riscv/cpu/cpu.c already defines it)
+    # Place the riscv board init. The vendor tree gitignores it. The riscv variant
+    # omits prior_stage_fdt_address because arch/riscv/cpu/cpu.c already defines it.
     cp ${boardInit} board/cvitek/cvi_board_init.c
 
-    # Place memory map header (all CVIMMAP_ defines for Duo S 512MB)
+    # Place the memory map header (all CVIMMAP_ defines for the Duo S 512 MB).
     cp ${memmap} include/cvi_board_memmap.h
 
-    # Place partition definitions header (generated by mkcvipart.py in SDK)
+    # Place the partition definitions header (the SDK generates it via mkcvipart.py).
     cp ${cvipart} include/cvipart.h
 
-    # Patch 1: Add SYS_TEXT_BASE Kconfig symbol to cv181x board Kconfig.
+    # Patch 1: Add a SYS_TEXT_BASE Kconfig symbol to the cv181x board Kconfig.
     # The vendor Kconfig has no config SYS_TEXT_BASE entry, so the defconfig
-    # value is silently dropped and board_f.c / efi_runtime.c get
-    # CONFIG_SYS_TEXT_BASE undeclared. For riscv, arch/riscv/include/asm/boot0.h
-    # also uses CONFIG_SYS_TEXT_BASE in .quad (BOOT0 header generation).
-    # Adding a hex entry here mirrors what other board Kconfigs do and what the
-    # ARM build already does.
+    # value is dropped and board_f.c / efi_runtime.c get CONFIG_SYS_TEXT_BASE
+    # undeclared. For riscv, arch/riscv/include/asm/boot0.h also uses
+    # CONFIG_SYS_TEXT_BASE in .quad (BOOT0 header generation). A hex entry here
+    # mirrors other board Kconfigs and the ARM build.
     cat >> board/cvitek/cv181x/Kconfig <<'EOF'
 
 config SYS_TEXT_BASE
@@ -156,10 +153,10 @@ config SYS_TEXT_BASE
 EOF
 
     # Patch 2: Append _zicsr_zifencei to the riscv ARCH_FLAGS in arch/riscv/Makefile.
-    # binutils >= 2.38 (GCC 15 toolchain in nixpkgs 26.05 uses binutils 2.46) requires
-    # zicsr and zifencei to be listed explicitly in -march for CSR (csrr, csrw) and
-    # fence.i instructions respectively. The vendor tree targets GCC 12 / binutils 2.35
-    # which accepted these instructions without explicit ISA extension listing.
+    # binutils >= 2.38 (nixpkgs 26.05 GCC 15 toolchain uses binutils 2.46) requires
+    # zicsr and zifencei to be listed explicitly in -march for the CSR (csrr, csrw)
+    # and fence.i instructions. The vendor tree targets GCC 12 / binutils 2.35, which
+    # accepted these instructions without an explicit ISA extension listing.
     # drivers/timer/riscv_timer.c and board.c both use csrr via <asm/csr.h>.
     sed -i 's/-march=$(ARCH_BASE)\$(ARCH_A)\$(ARCH_C)/-march=$(ARCH_BASE)$(ARCH_A)$(ARCH_C)_zicsr_zifencei/' arch/riscv/Makefile
 
@@ -171,8 +168,8 @@ EOF
     #   - dram_init (arch/riscv/cpu/generic/dram.c calls fdtdec_setup_mem_size_base)
     #   - driver model serial (snps,dw-apb-uart -> ns16550 DM driver)
     #   - driver model MMC (cvitek,cv181x-sd -> sdhci-mars DM driver)
-    # With CONFIG_OF_EMBED, U-Boot links this DTB in as __dtb_dt_begin so
-    # gd->fdt_blob is valid from startup without any runtime FDT pointer.
+    # With CONFIG_OF_EMBED, U-Boot links this DTB in as __dtb_dt_begin, so
+    # gd->fdt_blob is valid from startup with no runtime FDT pointer.
     cat > arch/riscv/dts/cv181x_cv181xasic.dts <<'ENDDTS'
 /dts-v1/;
 
@@ -185,7 +182,7 @@ EOF
 
 	memory@80000000 {
 		device_type = "memory";
-		/* 512 MB DDR at 0x80000000; first 2 MB reserved for OpenSBI */
+		/* 512 MB DDR at 0x80000000; the first 2 MB is reserved for OpenSBI */
 		reg = <0x00 0x80000000 0x00 0x20000000>;
 	};
 
@@ -297,17 +294,17 @@ ENDDTS
     export CROSS_COMPILE=${crossPrefix}
     export ARCH=riscv
     export PATH=${cc}/bin:${cc.bintools.bintools}/bin:$PATH
-    # SOURCE_DATE_EPOCH=1 tells U-Boot's filechk_timestamp.h rule to use
-    # a fixed epoch date instead of calling date(1) at build time.
-    # This makes U_BOOT_DATE, U_BOOT_TIME, U_BOOT_BUILD_DATE and U_BOOT_EPOCH
-    # constants in include/generated/timestamp_autogenerated.h deterministic.
+    # SOURCE_DATE_EPOCH=1 tells U-Boot's filechk_timestamp.h rule to use a fixed
+    # epoch date instead of calling date(1) at build time. This makes the
+    # U_BOOT_DATE, U_BOOT_TIME, U_BOOT_BUILD_DATE, and U_BOOT_EPOCH constants in
+    # include/generated/timestamp_autogenerated.h deterministic.
     export SOURCE_DATE_EPOCH=1
 
-    # CHIP=cv181x and CVIBOARD=cv181xasic are used by cvitek.mk and the
-    # riscv dts Makefile (arch/riscv/dts/$(CHIP)_$(CVIBOARD).dtb target).
+    # cvitek.mk and the riscv dts Makefile use CHIP=cv181x and CVIBOARD=cv181xasic
+    # (arch/riscv/dts/$(CHIP)_$(CVIBOARD).dtb target).
     # STORAGE_TYPE=sd enables -DCONFIG_SD_BOOT via cvitek.mk.
-    # OF_EMBED=y: arch/riscv/dts/cv181x_cv181xasic.dts is compiled and
-    # linked into the binary; no runtime FDT pointer needed.
+    # OF_EMBED=y: U-Boot compiles arch/riscv/dts/cv181x_cv181xasic.dts and links
+    # it into the binary; no runtime FDT pointer is needed.
     make \
       CHIP=cv181x \
       CVIBOARD=cv181xasic \
@@ -318,8 +315,8 @@ ENDDTS
       -j$NIX_BUILD_CORES \
       cvitek_sg2000_milkv_duos_musl_riscv64_sd_defconfig
 
-    # GCC 15 is stricter than GCC 12 which Sophgo targeted.
-    # -Wno-enum-int-mismatch: cmd_process return type declared as int, defined as enum.
+    # GCC 15 is stricter than the GCC 12 that Sophgo targeted.
+    # -Wno-enum-int-mismatch: cmd_process return type is declared int, defined as enum.
     # -Wno-format: board code uses %d for ulong; harmless on 64-bit.
     # -Wno-error: treat remaining new warnings as warnings, not errors.
     make \
@@ -336,9 +333,9 @@ ENDDTS
 
   installPhase = ''
     mkdir -p $out
-    # u-boot.bin is the raw U-Boot binary (LOADER_2ND for riscv fip packing)
+    # u-boot.bin is the raw U-Boot binary (LOADER_2ND for riscv fip packing).
     cp u-boot.bin $out/u-boot-raw.bin
-    # Keep u-boot ELF and map for debugging
+    # Keep the u-boot ELF and map for debugging.
     cp u-boot $out/u-boot || true
     cp u-boot.map $out/u-boot.map || true
   '';

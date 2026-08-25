@@ -1,8 +1,8 @@
 # fip.bin packer for Sophgo SG2000 / Milk-V Duo S.
 #
-# Supports both boot cores via the `core` parameter:
-#   core = "arm"   (DEFAULT): ARM fip.bin - MONITOR=bl31.bin, fsbl/uboot for aarch64.
-#   core = "riscv":           RISC-V fip.bin - MONITOR=fw_dynamic.bin, fsbl/uboot for riscv64.
+# The `core` parameter selects the boot core:
+#   core = "arm"   (default): ARM fip.bin. MONITOR=bl31.bin, fsbl/uboot for aarch64.
+#   core = "riscv":           RISC-V fip.bin. MONITOR=fw_dynamic.bin, fsbl/uboot for riscv64.
 #
 # The fiptool.py genfip command, run addresses, and all other args are
 # identical for both cores. Only three inputs differ by core:
@@ -12,8 +12,7 @@
 #   LOADER_2ND: arm  = uboot-duos-arm.nix (u-boot-raw.bin, aarch64 S-mode)
 #               riscv = uboot-duos-riscv.nix (u-boot-raw.bin, riscv64 S-mode)
 #
-# The TOC magic (0xAA640001 arm vs 0xC906B001 riscv) flips automatically
-# with the riscv BL2 from fsbl.nix.
+# The TOC magic (0xAA640001 arm vs 0xC906B001 riscv) follows the BL2 from fsbl.nix.
 #
 # Constant values from fip.mk:
 #   BLCP_IMG_RUNADDR=0x05200200  BLCP_PARAM_LOADADDR=0  NAND_INFO=00000000
@@ -29,9 +28,9 @@
 #
 # Output: $out is fip.bin directly.
 #
-# Backward-compatible: import ./fip.nix { inherit pkgs; } gives the ARM fip unchanged.
-# dumpRom = true builds a one-shot debug fip whose BL2 prints the mask ROM over
-# UART (see fsbl.nix). Off by default, so normal fips are unaffected.
+# import ./fip.nix { inherit pkgs; } gives the ARM fip.
+# dumpRom = true builds a fip whose BL2 prints the mask ROM over UART (see
+# fsbl.nix). It is off by default, so normal fips are unaffected.
 { pkgs, core ? "arm", dumpRom ? false }:
 let
   fsblSrc = pkgs.fetchFromGitHub {
@@ -61,7 +60,8 @@ in
 pkgs.runCommand "sg2000-fip-${core}.bin" {
   nativeBuildInputs = [ pkgs.python3 ];
 } ''
-  # fip-all recipe from fsbl/make_helpers/fip.mk (BOOT_CPU=aarch64 / riscv path):
+  # fip-all recipe from fsbl/make_helpers/fip.mk (BOOT_CPU=aarch64 / riscv path).
+  # The genfip call below mirrors these arguments:
   #   fiptool.py -v genfip <output>
   #     --MONITOR_RUNADDR=$MONITOR_RUNADDR     (0x80000000, core-agnostic)
   #     --BLCP_2ND_RUNADDR=$BLCP_2ND_RUNADDR  (0x9FE00000, core-agnostic)

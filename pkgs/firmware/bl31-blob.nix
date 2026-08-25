@@ -1,5 +1,5 @@
-# BL31 (ARM secure monitor) for SG2000. No public source exists; Sophgo ships
-# it only as a prebuilt blob in the fsbl repo. Pinned fixed-output fetch.
+# BL31 (ARM secure monitor) for SG2000. No public source exists. Sophgo ships
+# it only as a prebuilt blob in the fsbl repo. This is a pinned fixed-output fetch.
 { pkgs }:
 pkgs.fetchurl {
   name = "sg2000-bl31.bin";

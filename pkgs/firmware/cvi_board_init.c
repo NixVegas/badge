@@ -1,24 +1,24 @@
 /*
- * cvi_board_init.c - board init for Milk-V Duo S (cv181x, aarch64).
+ * cvi_board_init.c - board init for the Milk-V Duo S (cv181x, aarch64).
  *
- * board/cvitek/cv181x/board.c includes ../cvi_board_init.c directly, so this
- * runs inside board_init() (and shares its mmio.h helpers + uint32_t).
+ * board/cvitek/cv181x/board.c includes this file directly. The code runs inside
+ * board_init() and shares its mmio.h helpers and uint32_t.
  *
- * NOTE: We do NOT define prior_stage_fdt_address here. The build uses
- * CONFIG_OF_EMBED, so U-Boot uses the embedded control DTB from __dtb_dt_begin.
+ * Do not define prior_stage_fdt_address here. The build uses CONFIG_OF_EMBED, so
+ * U-Boot uses the embedded control DTB from __dtb_dt_begin.
  *
- * Ethernet: full internal-EPHY bring-up. The vendor's own init is split across
- * board.c cv181x_ephy_id_init() (power + fake PHY ID, gated CONFIG_PHY_CVITEK)
- * and the PHY driver cvitek.c cv182xa_ephy_init() (analog trim + auto-neg, also
- * gated CONFIG_PHY_CVITEK). We enable neither gate (no U-Boot net stack), and
- * mainline Linux has no cv1800b/sg2000 EPHY driver, so we run the COMPLETE
- * sequence here from U-Boot: power-on, fake PHY ID 0x00435649 ("CVITEK") so
- * Linux genphy binds it, the cv181x ("mars") analog trim, then start auto-neg
- * and force full-duplex. The EPHY lives on the always-on 0x03009xxx region, so
- * this state survives into Linux, which then drives it as phy-mode="internal".
- * Register sequence is the verbatim vendor cv182xa_ephy_init (cv181x branch)
- * from sophgo/u-boot-2021.10 drivers/net/phy/cvitek.c, with the parts it marks
- * "do this in board.c" (shutdown/dig_rst_n and the PHY ID) merged in.
+ * Ethernet: full internal-EPHY bring-up. The vendor init is split across
+ * board.c cv181x_ephy_id_init() (power and fake PHY ID) and the PHY driver
+ * cvitek.c cv182xa_ephy_init() (analog trim and auto-neg). Both are gated on
+ * CONFIG_PHY_CVITEK. This build enables neither gate (no U-Boot net stack), and
+ * mainline Linux has no cv1800b/sg2000 EPHY driver. Therefore U-Boot runs the
+ * complete sequence here: power-on, fake PHY ID 0x00435649 ("CVITEK") so Linux
+ * genphy binds it, the cv181x ("mars") analog trim, then start auto-neg and
+ * force full-duplex. The EPHY is on the always-on 0x03009xxx region, so this
+ * state survives into Linux. Linux then drives it as phy-mode="internal".
+ * The register sequence is the vendor cv182xa_ephy_init (cv181x branch) from
+ * sophgo/u-boot-2021.10 drivers/net/phy/cvitek.c. The parts it marks
+ * "do this in board.c" (shutdown/dig_rst_n and the PHY ID) are merged in.
  */
 
 /* EFUSE bases/flags, from sophgo u-boot drivers/net/phy/cvitek.c */
@@ -198,26 +198,59 @@ static void cvi_ephy_init(void)
 }
 
 /*
- * Route the EPHY LNK/SPD/DPX LED signals to the LED pads (verbatim vendor
- * cv181x_ephy_led_pinmux). On the Duo S the EPHY LEDs are wired to the SD1
- * pads (SD1 is unused; the card slot is SD0). Without this the ethernet LEDs
- * stay stuck in their default pad state.
+ * Route the EPHY LNK/SPD/DPX LED signals to the LED pads, from the vendor
+ * cv181x_ephy_led_pinmux. The vendor reference reuses the SD1 pads for the
+ * ethernet LEDs because SD1 is unused on the reference board. On this board SD1
+ * is the AIC8800 WiFi SDIO bus (mmc@4320000). A 0x11111111 write to the
+ * SD1_CLK/SD1_CMD pad config (RTC pinconf 0x050270b0/b4, the same block as the
+ * DAT1 in-band SDIO interrupt bias) repurposes the wifi pads. The AIC8800 fmac
+ * firmware then cannot complete its init and reports 0 TX credits. Therefore
+ * omit the SD1 pad writes. Keep the LED-pad function selects (0x030010e0/e4,
+ * pinmux base, not SD1) for the ethernet LED pads.
  */
 static void cvi_ephy_led_pinmux(void)
 {
 	mmio_write_32(0x030010e0, 0x05);
 	mmio_write_32(0x030010e4, 0x05);
-	mmio_write_32(0x050270b0, 0x11111111); /* SD1_CLK -> ephy LED */
-	mmio_write_32(0x050270b4, 0x11111111); /* SD1_CMD -> ephy LED */
+	/* SD1_CLK / SD1_CMD writes omitted: those pads are the WiFi SDIO bus here. */
+}
+
+/*
+ * RTC-domain power "Reset Key" write, from the vendor Duo S board init
+ * (duo-buildroot-sdk-v2 .../sg2000_milkv_duos_glibc_arm64_sd/u-boot/
+ * cvi_board_init.c set_rtc_register_for_power).
+ */
+static void set_rtc_register_for_power(void)
+{
+	// Reset Key
+	mmio_write_32(0x050260D0, 0x7);
 }
 
 static void cvi_board_init(void)
 {
 	/*
-	 * SD (SDIO0) and UART0 pinmux are already configured by board_init()
-	 * in board.c. Bring up the internal Ethernet PHY for Linux and route
-	 * its LEDs to the LED pads.
+	 * board_init() in board.c already configures the SD (SDIO0) and UART0
+	 * pinmux. Bring up the internal Ethernet PHY for Linux and route its LEDs
+	 * to the LED pads.
 	 */
 	cvi_ephy_init();
 	cvi_ephy_led_pinmux();
+
+	/*
+	 * WIFI/BT pinmux and RTC power write from the vendor Duo S board init.
+	 * CLK32K must be muxed to the wifi power-domain GPIO. Otherwise the AIC8800
+	 * has no 32.768kHz clock and its fmac firmware cannot finish init, which
+	 * yields 0 TX credits. From duo-buildroot-sdk-v2
+	 * sg2000_milkv_duos_glibc_arm64_sd u-boot/cvi_board_init.c (the WIFI/BT block
+	 * and set_rtc_register_for_power). FSBL SWITCH_32K_XTAL=y (fsbl.nix) enables
+	 * the 32k source; this routes the CLK32K pad.
+	 */
+	// WIFI/BT
+	PINMUX_CONFIG(CLK32K, PWR_GPIO_10);
+	PINMUX_CONFIG(UART2_RX, UART4_RX);
+	PINMUX_CONFIG(UART2_TX, UART4_TX);
+	PINMUX_CONFIG(UART2_CTS, UART4_CTS);
+	PINMUX_CONFIG(UART2_RTS, UART4_RTS);
+
+	set_rtc_register_for_power();
 }
