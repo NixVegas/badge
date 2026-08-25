@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# Adds an SDIO RX polling thread to the AIC8800 bsp driver.
+# Add an SDIO RX polling thread to the AIC8800 bsp driver.
 #
 # The Sophgo cv18xx dwcmshc SDHCI controller (mmc@4320000 on the SG2000) has no
-# enable_sdio_irq support in the mainline sdhci-of-dwcmshc cv18xx ops, so the
-# AIC8800's in-band SDIO "data ready" interrupt never reaches the host. The
-# driver builds CONFIG_OOB=n and waits for that interrupt to deliver firmware
-# command confirmations, so the very first command (cmd 1037) times out with
-# "8800d80 wifi start fail" and the radio never comes up.
+# enable_sdio_irq support in the mainline sdhci-of-dwcmshc cv18xx ops. The
+# AIC8800 in-band SDIO "data ready" interrupt never reaches the host. The driver
+# builds CONFIG_OOB=n and waits for that interrupt to deliver firmware command
+# confirmations. The first command (cmd 1037) then times out with "8800d80 wifi
+# start fail" and the radio never starts.
 #
-# Synchronous SDIO register reads DO work on this controller (the firmware
-# upload over SDIO succeeds), so instead of an interrupt we poll the chip's
-# interrupt-status register on a kthread and drive the exact same RX handler the
-# interrupt would have called. This is applied via string anchors (not a unified
-# diff) so it survives line shifts from the radxa LINUX_VERSION_CODE patch series
-# that also edits aicsdio.c / aicsdio.h.
+# Synchronous SDIO register reads work on this controller (the firmware upload
+# over SDIO succeeds). Instead of an interrupt, poll the chip interrupt-status
+# register on a kthread and drive the same RX handler the interrupt would call.
+# Apply this with string anchors, not a unified diff, so it survives line shifts
+# from the radxa LINUX_VERSION_CODE patch series that also edits aicsdio.c and
+# aicsdio.h.
 import sys
 
 BSP = "src/SDIO/driver_fw/driver/aic8800/aic8800_bsp"
@@ -45,44 +45,43 @@ patch(
     "int aicwf_sdio_busrx_poll_thread(void *data);",
 )
 
-# 2a. A one-bit gate that separates the two phases the poll must treat very
-#     differently. During the firmware DOWNLOAD the bootrom posts every command
-#     confirmation in BLOCK mode via misc_int_status, and the stock RX handler
-#     (aicwf_sdio_hal_irqhandler) reads them fine. If the poll ALSO probes byte
-#     mode and reads a frame off func1 on those ticks it STEALS the block-mode
-#     cfm out from under the handler -> the very first DBG_MEM_BLOCK_WRITE (cmd
-#     1035) times out and the upload dies before it ever reaches START_APP.
-#     Only AFTER DBG_START_APP does the running fmac start posting its cfm in
-#     byte mode while asleep, which is the sole case the byte-mode probe +
-#     force-wake exist for. Gate both on this flag so download behaves exactly
-#     like the (working) pre-force-wake build.
+# 2a. A one-bit gate that separates the two phases the poll must treat
+#     differently. During the firmware download the bootrom posts every command
+#     confirmation in block mode via misc_int_status, and the RX handler
+#     (aicwf_sdio_hal_irqhandler) reads them. If the poll also probes byte mode
+#     and reads a frame off func1 on those ticks, it steals the block-mode cfm
+#     from the handler. The first DBG_MEM_BLOCK_WRITE (cmd 1035) then times out
+#     and the upload fails before START_APP. Only after DBG_START_APP does the
+#     running fmac post its cfm in byte mode while asleep. The byte-mode probe and
+#     force-wake exist only for that case. Gate both on this flag so download
+#     behaves like a build without force-wake.
 patch(
     BSP + "/aicsdio.h",
     "\tu16 chipid;\n\tu32 fw_version_uint;\n",
     "\tu16 chipid;\n\tu32 fw_version_uint;\n\tu8 cv_start_app;\n",
 )
 
-# 2b. Raise the gate the instant DBG_START_APP_REQ is built (just before the
-#     fmac jumps). rwnx_send_dbg_start_app_req takes the sdiodev for every chip,
-#     so this covers the D80 path.
+# 2b. Raise the gate when DBG_START_APP_REQ is built, just before the fmac jumps.
+#     rwnx_send_dbg_start_app_req takes the sdiodev for every chip, so this covers
+#     the D80 path.
 patch(
     BSP + "/aic_bsp_driver.c",
     "\tstruct dbg_start_app_req *start_app_req;\n\n\t/* Build the DBG_START_APP_REQ message */",
     "\tstruct dbg_start_app_req *start_app_req;\n\n"
-    "\t/* cv18xx: download is done, the fmac is about to jump. Let the poll\n"
-    "\t * thread begin force-waking + byte-mode probing for the post-jump\n"
-    "\t * START_APP cfm. Before this it must NOT touch byte mode (it would steal\n"
-    "\t * block-mode download cfms and break the fw upload). */\n"
+    "\t/* cv18xx: the download is done and the fmac is about to jump. Let the poll\n"
+    "\t * thread force-wake and byte-mode probe for the post-jump START_APP cfm.\n"
+    "\t * Before this it must not touch byte mode. That would steal block-mode\n"
+    "\t * download cfms and break the fw upload. */\n"
     "\tsdiodev->cv_start_app = 1;\n\n"
     "\t/* Build the DBG_START_APP_REQ message */",
 )
 
-# 2c. #11 download-integrity check: right after the D80 fmacfw upload, read back
-#     4 scattered words spanning the whole 341KB image via DBG_MEM_READ (which
-#     works in the bootrom phase) and log them. If any differs from the file the
-#     25MHz download silently corrupted -> the fmac would crash on jump (explains
-#     the post-START_APP silence). Expected: 0x120000=0x001a0000,
-#     0x140000=0xdb0f4604, 0x160000=0x1f0af894, 0x173000=0x044001ba.
+# 2c. Download-integrity check. Right after the D80 fmacfw upload, read back
+#     scattered words that span the 341KB image via DBG_MEM_READ (which works in
+#     the bootrom phase) and log them. If any word differs from the file, the
+#     download corrupted the image and the fmac crashes on jump. Expected:
+#     0x120000=0x001a0000, 0x140000=0xdb0f4604, 0x160000=0x1f0af894,
+#     0x173000=0x044001ba.
 patch(
     BSP + "/aic_bsp_driver.c",
     "\t\t\tprintk(\"8800d80 download wifi fw fail\\n\");\n"
@@ -102,8 +101,8 @@ patch(
     "\t\t\t\telse\n"
     "\t\t\t\t\tprintk(\"cv18xx fwverify addr=0x%x READFAIL\\n\", cv_addr[cv_i]);\n"
     "\t\t\t}\n"
-    "\t\t\t/* #12: write-then-read at 0x140000 to prove read+write both work at a\n"
-    "\t\t\t * high address, so the 4-point mismatch = bulk-upload corruption. */\n"
+    "\t\t\t/* Write then read at 0x140000 to confirm read and write both work at a\n"
+    "\t\t\t * high address. A mismatch then means bulk-upload corruption. */\n"
     "\t\t\trwnx_send_dbg_mem_write_req(sdiodev, 0x140000, 0xA5A5A5A5);\n"
     "\t\t\tif (rwnx_send_dbg_mem_read_req(sdiodev, 0x140000, &cv_cfm) == 0)\n"
     "\t\t\t\tprintk(\"cv18xx fwverify WRTEST 0x140000 wrote a5a5a5a5 read 0x%08x\\n\", cv_cfm.memdata);\n"
@@ -128,11 +127,11 @@ patch(
     "\t\tret = -1;\n"
     "\t\tgoto fail;\n"
     "\t}\n\n"
-    "\t/* CARD_INT now fires (kernel forces the DAT1 pull-up) and drives the\n"
-    "\t * bootrom phase cleanly. Keep the poll as a post-jump safety net: the\n"
-    "\t * running fmac's START_APP cfm does not raise CARD_INT, so the poll picks\n"
-    "\t * it up. With the bootrom FIFO already consumed by the real IRQ, the poll\n"
-    "\t * no longer sticks on a stale upload cfm. */\n"
+    "\t/* CARD_INT now fires (the kernel forces the DAT1 pull-up) and drives the\n"
+    "\t * bootrom phase. Keep the poll as a post-jump safety net. The running\n"
+    "\t * fmac START_APP cfm does not raise CARD_INT, so the poll reads it. The\n"
+    "\t * IRQ consumes the bootrom FIFO, so the poll does not stick on a stale\n"
+    "\t * upload cfm. */\n"
     "\tbus_if->busrx_poll_thread = NULL;\n"
     "\tif (1) {\n"
     '\t\tbus_if->busrx_poll_thread = kthread_run(aicwf_sdio_busrx_poll_thread, (void *)bus_if, "aicwf_busrx_poll");\n'
@@ -155,24 +154,24 @@ patch(
     "\tif (rx_priv->sdiodev->bus_if->busrx_thread) {",
 )
 
-# 4b. The D80 RX handler only treats misc_int_status (reg 0x04) as the data-ready
-#     trigger: block-mode count for the bootrom, or the magic 127/120 for byte
+# 4b. The D80 RX handler treats misc_int_status (reg 0x04) as the only data-ready
+#     trigger: a block-mode count for the bootrom, or the value 127/120 for byte
 #     mode. The bootrom posts confirmations in block mode, so the poll delivers
-#     them. But the RUNNING fmac firmware re-inits its SDIO slave and posts its
-#     DBG_START_APP_CFM (cmd 1037 -> cfm 1038) in BYTE mode: it writes the length
-#     to bytemode_len_reg (0x05) without ever setting misc_int_status, so reg 0x04
-#     reads 0 and the handler falls into this "no data" arm and drops the cfm,
-#     hence "8800d80 wifi start fail". When misc_int_status is 0, also probe the
-#     byte-mode length register; if the fmac posted a frame there, read it on the
-#     func2 message path exactly like the intstatus==127 byte-mode case does. The
-#     rate-limited idle log reports the pending register so we can tell, if this
-#     still fails, whether the fmac raised anything the host can see at all.
-#     (Also stops the every-tick "Interrupt but no data" flood on the console.)
+#     them. The running fmac firmware re-inits its SDIO slave and posts its
+#     DBG_START_APP_CFM (cmd 1037 -> cfm 1038) in byte mode. It writes the length
+#     to bytemode_len_reg (0x05) and never sets misc_int_status, so reg 0x04 reads
+#     0. The handler then takes this "no data" path and drops the cfm, which gives
+#     "8800d80 wifi start fail". When misc_int_status is 0, also probe the
+#     byte-mode length register. If the fmac posted a frame there, read it on the
+#     func2 message path like the intstatus==127 byte-mode case does. The
+#     rate-limited idle log reports the pending register, so a later failure shows
+#     whether the fmac raised anything the host can see. This also stops the
+#     per-tick "Interrupt but no data" flood on the console.
 with open(BSP + "/aicsdio.c") as f:
     s = f.read()
-# The D80 occurrence is uniquely indented with 12 spaces (the DC/DW and func2
-# handler occurrences use tab-based indentation), so this anchors only the D80
-# RX handler's "no data" arm.
+# The D80 occurrence has a unique 12-space indent. The DC/DW and func2 handler
+# occurrences use tab indentation. So this anchor matches only the D80 RX
+# handler "no data" path.
 needle = '            sdio_err("Interrupt but no data\\n");'
 if s.count(needle) != 1:
     sys.exit("byte-mode-fallback D80 anchor count != 1 in aicsdio.c")
@@ -180,12 +179,12 @@ fallback = (
     "{\n"
     "            u8 cv_pend = 0, cv_misc = 0;\n"
     "            static unsigned int cv_dbg;\n"
-    "            /* The running fmac sets misc_int_status only BRIEFLY and (post-jump)\n"
-    "             * may not hold the soft irq, so the main handler's single read at\n"
-    "             * the top frequently misses its START_APP cfm. Re-read it right here\n"
-    "             * on every empty tick (the poll runs tight, see usleep below), and\n"
-    "             * also after acking a soft irq, then run the very same block/byte-\n"
-    "             * mode read the main handler would. */\n"
+    "            /* The running fmac sets misc_int_status only briefly and, post-jump,\n"
+    "             * may not hold the soft irq. The main handler single read at the top\n"
+    "             * often misses the START_APP cfm. Re-read misc_int_status here on\n"
+    "             * every empty tick (the poll runs tight, see usleep below) and after\n"
+    "             * an ack of a soft irq. Then run the same block/byte-mode read the\n"
+    "             * main handler would. */\n"
     "            aicwf_sdio_readb(sdiodev, sdiodev->sdio_reg.misc_int_status_reg, &cv_misc);\n"
     "            if (cv_misc == 0) {\n"
     "                aicwf_sdio_readb(sdiodev, sdiodev->sdio_reg.sleep_reg, &cv_pend);\n"
@@ -218,8 +217,8 @@ fallback = (
     "        }"
 )
 s = s.replace(needle, fallback)
-# Silence the remaining occurrences (DC/DW and func2 handlers) so the poll's
-# empty ticks do not flood the serial console.
+# Silence the remaining occurrences (DC/DW and func2 handlers) so the poll empty
+# ticks do not flood the serial console.
 s = s.replace(
     'sdio_err("Interrupt but no data\\n");', "/* poll: empty tick, not an error */;"
 )
@@ -229,13 +228,13 @@ with open(BSP + "/aicsdio.c", "w") as f:
 # 5. the poll thread itself, appended at file scope (after the handler it calls)
 FUNC = r'''
 
-/* cv18xx SDIO interrupt workaround: the Sophgo cv18xx dwcmshc SDHCI controller
- * in mainline implements no enable_sdio_irq, so the AIC8800 in-band SDIO "data
- * ready" interrupt never reaches the host and firmware command confirmations
+/* cv18xx SDIO interrupt workaround. The Sophgo cv18xx dwcmshc SDHCI controller
+ * in mainline implements no enable_sdio_irq. The AIC8800 in-band SDIO "data
+ * ready" interrupt never reaches the host, so firmware command confirmations
  * time out ("8800d80 wifi start fail"). Synchronous SDIO register reads work on
- * this controller, so poll the chip's interrupt-status register and drive the
- * same RX handler the interrupt would have. The host is claimed across the
- * handler call to match the atomicity the real SDIO IRQ path provides. */
+ * this controller. Poll the chip interrupt-status register and drive the same
+ * RX handler the interrupt would. Claim the host across the handler call to
+ * match the atomicity of the real SDIO IRQ path. */
 int aicwf_sdio_busrx_poll_thread(void *data)
 {
 	struct aicwf_bus *bus_if = (struct aicwf_bus *)data;
@@ -249,26 +248,24 @@ int aicwf_sdio_busrx_poll_thread(void *data)
 		if (bus_if->state == BUS_UP_ST && sdiodev->func) {
 			static unsigned int rearm;
 			sdio_claim_host(sdiodev->func);
-			/* THE DECIDER (Morgan's Claude): read the STANDARD SDIO CCCR int
-			 * registers for FN1 -- IntEnable (0x04) and IntPending (0x05) -- via
-			 * func0. If post-jump the card asserts IntPending bit1 (FN1 wants to
-			 * interrupt = it HAS a frame, the 1038) but the host's CARD_INT never
-			 * latches, the bug is host PHY/sampling (0x240/0x24c) and host-grind
-			 * can win. If IntPending stays clear, the chip is truly silent post-
-			 * jump = firmware/bring-up, vendor-5.10-only. Also log misc for ref. */
+			/* Read the standard SDIO CCCR interrupt registers for FN1 via func0:
+			 * IntEnable (0x04) and IntPending (0x05). If post-jump the card sets
+			 * IntPending bit1 (FN1 has a frame, the 1038) but the host CARD_INT
+			 * never latches, the fault is host PHY/sampling (0x240/0x24c). If
+			 * IntPending stays clear, the chip is silent post-jump, which points to
+			 * firmware or bring-up. Also log misc for reference. */
 			{
 				static unsigned int cv_t, cv_l, cv_seen, cv_seen2, cv_seen3;
 				if (sdiodev->cv_start_app) {
-					/* FIX1 tight PASSIVE race probe. After START_APP the loader
-					 * posts the 1038 cfm and JUMPS immediately, so misc(0x04) +
-					 * the CCCR FN1 int-pending line self-clear within microseconds
-					 * as the fmac re-inits its SDIO slave. Sample EVERY tick with
-					 * CMD52 reads only (no FIFO read, no writes here) and latch the
-					 * FIRST nonzero. A RACE-HIT => the loader DID post 1038 and the
-					 * transport briefly carried it (race, reframe TRUE). Never a hit
-					 * across the whole wait => chip is genuinely silent (fmac/bring-
-					 * up, reframe FALSE). The loop delay drops to udelay(2) while
-					 * cv_start_app so this resolves a us-scale window. */
+					/* Passive race probe. After START_APP the loader posts the
+					 * 1038 cfm and jumps at once, so misc(0x04) and the CCCR FN1
+					 * int-pending line self-clear within microseconds as the fmac
+					 * re-inits its SDIO slave. Sample every tick with CMD52 reads
+					 * only (no FIFO read, no writes here) and latch the first
+					 * nonzero. A hit means the loader posted 1038 and the transport
+					 * briefly carried it. No hit across the whole wait means the chip
+					 * is silent. The loop delay drops to udelay(2) while cv_start_app
+					 * to resolve this microsecond-scale window. */
 					int cret = 0;
 					u8 cv_ip = sdio_f0_readb(sdiodev->func, 0x05, &cret);
 					u8 cv_m = 0;
@@ -294,39 +291,37 @@ int aicwf_sdio_busrx_poll_thread(void *data)
 						cv_ien, cv_ip, cv_cfg, cv_pend, cv_m, sdiodev->cv_start_app, bus_if->state);
 				}
 			}
-			/* The running fmac re-inits its SDIO slave after START_APP, which
-			 * can clear the chip-side interrupt-enable (intr_config_reg, written
-			 * 0x07 at bus_start) so the chip stops posting new cfms (the host is
-			 * left re-reading the stale last upload cfm). Periodically re-assert
-			 * it (0x07 is idempotent) so the fmac's START_APP cfm gets posted. */
+			/* The running fmac re-inits its SDIO slave after START_APP. This can
+			 * clear the chip-side interrupt-enable (intr_config_reg, written 0x07
+			 * at bus_start), so the chip stops posting new cfms and the host
+			 * re-reads the stale last upload cfm. Re-assert intr_config_reg
+			 * periodically (0x07 is idempotent) so the fmac posts its START_APP
+			 * cfm. */
 			rearm++;
 			if (!sdiodev->cv_start_app) {
 				if ((rearm & 0xFF) == 0)
 					aicwf_sdio_writeb(sdiodev, sdiodev->sdio_reg.intr_config_reg, 0x07);
 			} else {
-				/* #9 PASSIVE: #8 proved re-arming 0x00=0x07 every tick keeps cfg=0x07
-				 * yet the fmac stays silent (misc/pend=0). So the drop-of-0x00 theory
-				 * is wrong. New theory: my post-jump WRITES (0x00 re-arm, wakeup, and
-				 * the byte-mode func1 READ that consumes frames) disturb the fmac's
-				 * own SDIO-slave re-init right after the jump. Post-START_APP do
-				 * NOTHING but observe (diagnostic + read-driven hal_irqhandler). If
-				 * the undisturbed fmac now posts its cfm, my poking was the bug. */
+				/* Post-jump, only observe (diagnostic reads plus the read-driven
+				 * hal_irqhandler). Post-START_APP writes (the 0x00 re-arm, the
+				 * wakeup, and the byte-mode func1 read that consumes frames) can
+				 * disturb the fmac SDIO-slave re-init right after the jump. Leave the
+				 * fmac undisturbed so it can post its cfm. */
 			}
 			/* Force-wake the post-jump fmac. After START_APP the bootrom jumps to
-			 * the fmac, which re-inits its SDIO slave and sleeps AGAIN, but the
-			 * host state is still SDIO_ACTIVE_ST (set at send time) so the state-
-			 * gated aicwf_sdio_wakeup is a no-op and nothing re-wakes it while the
-			 * host waits for the cfm -> cmd 1037 times out ("8800d80 wifi start
-			 * fail"), misc/bytemode read 0 because the SDIO slave is asleep. Write
-			 * the D80 wake value (0x11) to wakeup_reg directly (~every 16 ticks)
-			 * so the fmac stays awake and posts its START_APP cfm. */
-			/* #10: PROPER vendor wake handshake (mirrors aicwf_sdio_wakeup
-			 * aicsdio.c:817-848). #8's blind write of wakeup_reg=0x11 never set
-			 * sleep_reg bit 0x10 (awake). Here: write 0x11, then tight-poll
-			 * sleep_reg for bit 0x10, retry the write up to 20x. Log whether the
-			 * chip ever confirms awake. Do it ~every 1024 ticks so it repeats a few
-			 * times across the 6s START_APP wait. If bit 0x10 sets, the fmac is
-			 * asleep-but-alive; if it never sets, the fmac is not running. */
+			 * the fmac, which re-inits its SDIO slave and sleeps again. The host
+			 * state is still SDIO_ACTIVE_ST (set at send time), so the state-gated
+			 * aicwf_sdio_wakeup is a no-op and nothing re-wakes the fmac while the
+			 * host waits for the cfm. cmd 1037 then times out ("8800d80 wifi start
+			 * fail"), and misc/bytemode read 0 because the SDIO slave is asleep.
+			 * Write the D80 wake value (0x11) to wakeup_reg directly (about every 16
+			 * ticks) so the fmac stays awake and posts its START_APP cfm. */
+			/* Vendor wake handshake (mirrors aicwf_sdio_wakeup). Write wakeup_reg
+			 * 0x11, then poll sleep_reg for bit 0x10 (awake), and retry the write
+			 * up to 20 times. Log whether the chip confirms awake. Do this about
+			 * every 1024 ticks so it repeats across the START_APP wait. If bit 0x10
+			 * sets, the fmac is asleep but alive. If it never sets, the fmac is not
+			 * running. */
 			if (sdiodev->cv_start_app && (rearm & 0x3FF) == 0) {
 				int wr, rr; u8 sv = 0; int awake = 0;
 				for (wr = 0; wr < 20 && !awake; wr++) {
@@ -339,23 +334,23 @@ int aicwf_sdio_busrx_poll_thread(void *data)
 				}
 				sdio_err("cv18xx wake handshake: sleep_reg=0x%02x awake=%d wr=%d\n", sv, awake, wr);
 			}
-			/* THE post-jump fix: the running fmac posts its START_APP cfm (1038)
-			 * in BYTE mode -- it writes the frame length to bytemode_len_reg and
-			 * does NOT set misc_int_status. The stock handler only reads byte mode
-			 * when misc==127/120, but misc here is stuck on the stale block-mode
-			 * upload cfm (1036), so the byte-mode frame is never read and cmd 1037
-			 * times out. Probe bytemode_len_reg directly every tick; if the fmac
-			 * posted a frame, read it on the func_msg (func2) path and feed it to
-			 * the RX queue exactly as the handler's 127 byte-mode case does. */
+			/* Post-jump fix. The running fmac posts its START_APP cfm (1038) in
+			 * byte mode. It writes the frame length to bytemode_len_reg and does
+			 * not set misc_int_status. The handler reads byte mode only when
+			 * misc==127/120, but misc here is stuck on the stale block-mode upload
+			 * cfm (1036), so the byte-mode frame is never read and cmd 1037 times
+			 * out. Probe bytemode_len_reg every tick. If the fmac posted a frame,
+			 * read it on the func_msg (func2) path and feed it to the RX queue like
+			 * the handler 127 byte-mode case does. */
 			{
 				static unsigned int cv_bm_total, cv_bm_log;
 				u8 cv_bl = 0;
 				if (sdiodev->cv_start_app && cv_bm_total < 4096) {
 					aicwf_sdio_intr_get_len_bytemode(sdiodev, &cv_bl);
 					if (cv_bl > 0 && cv_bl <= 128) {
-						/* func1: the D80 posts the byte-mode cfm on func1 and has NO
-					 * func_msg (readframes(sdiodev,1) would claim a NULL func2 ->
-					 * WARN storm + wrong function). Read on func1. */
+						/* func1: the D80 posts the byte-mode cfm on func1 and has no
+					 * func_msg. readframes(sdiodev,1) would claim a NULL func2 and
+					 * cause a WARN storm on the wrong function. Read on func1. */
 					struct sk_buff *cvpkt = aicwf_sdio_readframes(sdiodev, 0);
 						cv_bm_total++;
 						if (cvpkt) {
@@ -373,9 +368,9 @@ int aicwf_sdio_busrx_poll_thread(void *data)
 				aicwf_sdio_hal_irqhandler(sdiodev->func);
 			sdio_release_host(sdiodev->func);
 		}
-		/* FIX1: sample the post-jump window ~10-30x finer than the IRQ chain.
-		 * Gated on BUS_UP so the loop stops busy-spinning once the cmd times out
-		 * and the bus goes down. */
+		/* Sample the post-jump window finer than the IRQ chain. Gate on BUS_UP
+		 * so the loop stops busy-spinning once the cmd times out and the bus
+		 * goes down. */
 		if (bus_if->state == BUS_UP_ST && sdiodev->func && sdiodev->cv_start_app)
 			udelay(2);
 		else
@@ -391,16 +386,17 @@ with open(BSP + "/aicsdio.c", "a") as f:
 
 print("aic8800 cv18xx SDIO poll patch applied")
 
-# ===== FDRV POST-JUMP DRAIN (2026-07-04) =====
-# The bsp poll cannot catch the post-jump cfm: with Fix6 the bsp returns right
-# after START_APP and releases the SDIO, so fdrv's rwnx_ic_system_init chip_id
-# read (DBG_MEM_READ) times out in the FDRV module. The fmac IS alive (sleep_reg
-# 0x10) and posts its cfm via INTR_PENDING(0x01) soft-irq (observed pend=0x11,
-# misc=0x01) but asserts NO CARD_INT. So make the fdrv busrx thread POLL + call
-# its own hal_irqhandler, and add a soft-irq/byte-mode fallback to that handler.
+# ===== FDRV post-jump drain =====
+# The bsp poll cannot catch the post-jump cfm. The bsp returns right after
+# START_APP and releases the SDIO, so the fdrv rwnx_ic_system_init chip_id read
+# (DBG_MEM_READ) times out in the FDRV module. The fmac is alive (sleep_reg 0x10)
+# and posts its cfm via the INTR_PENDING (0x01) soft-irq (pend=0x11, misc=0x01),
+# but asserts no CARD_INT. So make the fdrv busrx thread poll and call its own
+# hal_irqhandler, and add a soft-irq/byte-mode fallback to that handler.
 FDRV = "src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv"
 
-# A) fdrv busrx thread: block-on-CARD_INT -> poll(2ms) + claim + call handler.
+# A) fdrv busrx thread: replace block-on-CARD_INT with poll (2ms), claim, and
+#    call the handler.
 patch(
     FDRV + "/aicwf_sdio.c",
     "        if (!wait_for_completion_interruptible(&bus_if->busrx_trgg)) {\n\n            if (bus_if->state == BUS_DOWN_ST)",
@@ -421,9 +417,9 @@ patch(
     "            if ((_fdt++ & 0x3FF) == 0)\n"
     "                sdio_err(\"FDRV pj: misc=%02x pend=%02x cfg=%02x fc=%02x be=%02x blksz=%02x%02x ien=%02x ip=%02x\\n\", _fm, _fp, _ic, _fc, _be, _b1, _b0, _ien, _ip);\n"
     "            /* Anti-storm: when the bus reads dead (0xff = -110 bus error) skip the\n"
-    "             * re-arm + handler so a wedged AIC can't saturate the serial console. */\n"
+    "             * re-arm and handler so a wedged AIC cannot saturate the serial console. */\n"
     "            if (_fm != 0xff) {\n"
-    "                /* Lead 1: re-arm CCCR FN0 int-enable IEN2 (bit2) + dev intr_config every tick */\n"
+    "                /* Re-arm CCCR FN0 int-enable IEN2 (bit2) and dev intr_config every tick */\n"
     "                sdio_f0_writeb(_fs->func, 0x07, 0x04, &_rr);\n"
     "                aicwf_sdio_writeb(_fs, _fs->sdio_reg.intr_config_reg, 0x07);\n"
     "                aicwf_sdio_hal_irqhandler(_fs->func);\n"
@@ -433,8 +429,8 @@ patch(
     "        if (1) {\n\n            if (bus_if->state == BUS_DOWN_ST)",
 )
 
-# B) fdrv hal_irqhandler D80: when misc==0 but the fmac set INTR_PENDING soft-irq,
-# read the byte-mode cfm frame directly (the fmac's post-jump cfm path).
+# B) fdrv hal_irqhandler D80: when misc==0 but the fmac set the INTR_PENDING
+#    soft-irq, read the byte-mode cfm frame directly (the fmac post-jump cfm path).
 patch(
     FDRV + "/aicwf_sdio.c",
     "        if (intstatus & SDIO_OTHER_INTERRUPT) {\n"
@@ -458,11 +454,12 @@ patch(
 )
 print("aic8800 FDRV post-jump drain patch applied")
 
-# C) Skip fdrv's post-jump chip_id DBG_MEM_READ. The running fmac does NOT service
-# the bootrom DBG_MEM_* protocol (proven: fmac awake pend=0x10 but never posts a
-# cfm for cmd 1024), so the read times out + crashes the cmd queue before MM_RESET
-# is ever sent. Hardcode chip_id (D80) and let fdrv proceed to rwnx_send_reset
-# (MM_RESET, the fmac's NATIVE cmd) which the fdrv poll drain can then deliver.
+# C) Skip the fdrv post-jump chip_id DBG_MEM_READ. The running fmac does not
+# service the bootrom DBG_MEM_* protocol (the fmac is awake, pend=0x10, but never
+# posts a cfm for cmd 1024), so the read times out and crashes the cmd queue
+# before MM_RESET is sent. Hardcode chip_id (D80) and let fdrv proceed to
+# rwnx_send_reset (MM_RESET, the fmac native cmd), which the fdrv poll drain
+# delivers.
 patch(
     FDRV + "/rwnx_main.c",
     "\tif (rwnx_send_dbg_mem_read_req(rwnx_hw, mem_addr, &rd_mem_addr_cfm)){\n"
@@ -474,18 +471,16 @@ patch(
     "        return -1;\n"
     "    }\n"
     "    chip_sub_id = (u8)(rd_mem_addr_cfm.memdata);",
-    "\tchip_id = 3; chip_sub_id = 0; /* badge: skip post-jump DBG_MEM_READ, use native MM_RESET */",
+    "\tchip_id = 3; chip_sub_id = 0; /* skip post-jump DBG_MEM_READ, use native MM_RESET */",
 )
 print("aic8800 FDRV chip_id-bypass patch applied")
 
-# D) FLOW-CONTROL CREDIT BYPASS (2026-07-05) - top research lead for "awake fmac
-# answers no command". aicwf_sdio_flow_ctrl_msg gates every command send on the
-# chip's advertised msg-credit reg (flow_ctrl_reg 0x03); if the post-jump fmac
-# reports 0 credits (command RX buffers not set up) the command is never written
-# -> cmd_mgr times out -> looks like "fmac dead to messages". AIC ALREADY bypass
-# this for D80N/D80WN (hardcode `return 4`). Do the same for plain D80: log the
-# real credit value, and force >=4 so commands go out regardless. Low risk (worst
-# case = same as now, dropped). If commands now get cfms -> credits were the wall.
+# D) Flow-control credit bypass. aicwf_sdio_flow_ctrl_msg gates every command send
+# on the chip advertised msg-credit reg (flow_ctrl_reg 0x03). If the post-jump
+# fmac reports 0 credits (command RX buffers not set up), the command is never
+# written and cmd_mgr times out, which looks like the fmac ignores messages. The
+# vendor already bypasses this for D80N/D80WN (hardcode return 4). Do the same for
+# plain D80: log the real credit value and force >=4 so commands go out.
 patch(
     FDRV + "/aicwf_sdio.c",
     "\tif (sdiodev->chipid == PRODUCT_ID_AIC8800D80N ||\n"
@@ -502,7 +497,7 @@ patch(
     "\t\taicwf_sdio_readb(sdiodev, sdiodev->sdio_reg.flow_ctrl_reg, &_fcv);\n"
     "\t\tif ((_fcl++ & 0x3F) == 0)\n"
     "\t\t\tsdio_err(\"FDRV msg flowctrl reg=0x%02x\\n\", _fcv);\n"
-    "\t\treturn (_fcv > 0) ? _fcv : 4; /* badge: force >=4 msg credits post-jump */\n"
+    "\t\treturn (_fcv > 0) ? _fcv : 4; /* force >=4 msg credits post-jump */\n"
     "\t}\n"
     "\n"
     "    while (true) {\n"
@@ -510,32 +505,28 @@ patch(
 )
 print("aic8800 FDRV msg flow-control credit bypass applied")
 
-# E) RE-ENUMERATION FIX (2026-07-05) - the decisive fix for fc=0x00 (fmac firmware
-# message task never starts post-jump). The vendor forces a full SDIO re-enum
-# between the bsp download and fdrv stages (CMD5/CMD3/CMD7/CIS re-run on the chip),
-# which kicks the fmac firmware into completing its boot + starting its message
-# task; our func-reuse path skips it (rescan calls all behind ALLWINNER/ROCKCHIP/
-# NANOPI ifdefs). mmc_sw_reset does a CMD52 I/O-reset (CCCR 0x06=0x08 RES) +
-# mmc_sdio_reinit_card WITHOUT a power cycle (firmware in chip RAM survives), then
-# func_init's existing set_block_size/enable_func/arming re-arms the slave. Inject
-# right after `host = ...` and BEFORE sdio_claim_host (mmc_sw_reset claims the host
-# itself, so no nested claim). Confirm via the FDRV pj poll: fc should go NONZERO.
-# DISABLED 2026-07-05: mmc_sw_reset returned -110 (CMD5 dies post-jump), a dead
-# end. Removed to isolate the CCCR-IEN2 (Lead 1) experiment in patch A.
+# E) Re-enumeration fix (disabled). Aims at fc=0x00 (the fmac firmware message
+# task does not start post-jump). The vendor forces a full SDIO re-enum between
+# the bsp download and fdrv stages (re-run CMD5/CMD3/CMD7/CIS on the chip), which
+# makes the fmac firmware finish its boot and start its message task. The
+# func-reuse path skips it (rescan calls are behind ALLWINNER/ROCKCHIP/NANOPI
+# ifdefs). mmc_sw_reset does a CMD52 I/O-reset (CCCR 0x06=0x08 RES) and
+# mmc_sdio_reinit_card without a power cycle (firmware in chip RAM survives). Then
+# func_init set_block_size/enable_func/arming re-arms the slave. Inject right after
+# `host = ...` and before sdio_claim_host (mmc_sw_reset claims the host itself, so
+# no nested claim).
+# Disabled: mmc_sw_reset returned -110 (CMD5 fails post-jump).
 print("aic8800 FDRV mmc_sw_reset re-enum DISABLED")
 
-# F) PRE-DOWNLOAD POWER-CYCLE (2026-07-05) - replicate the vendor CVITEK path's
-# fresh WL_REG_ON power-cycle tightly before the fmac download. Our DTS mmc-pwrseq
-# raises WL_REG_ON once at boot (~t40); the driver downloads ~t158, so the fmac
-# boots from a ~150s-stale power state, vs the vendor's ms-fresh power-then-rescan.
-# mmc_hw_reset drives the pwrseq (WL_REG_ON off/on) + re-enumerates via the mmc
-# core; then we re-arm (aicwf_sdiov3_func_init) and the existing download+jump run
-# on a freshly-powered chip. Hypothesis: the fmac message task (fc nonzero) only
-# starts from a fresh power-cycle. Watch: BADGE pre-dl mmc_hw_reset=0, download
-# still completes (rd_version), and the FDRV pj poll shows fc going NONZERO.
-# DISABLED 2026-07-05: mmc_hw_reset mid-bring-up HUNG the SDHCI host permanently
-# (insmod + busrx_pol blocked >240s, needed a power-cycle). Synchronous
-# power-cycle+re-enum from inside the driver's own probe wedges the cv18xx host.
-# The vendor does it non-blocking (WL_REG_ON gpio toggle + async cvi_sdio_rescan),
-# which is the correct re-implementation. Kept the hypothesis, dropped this primitive.
+# F) Pre-download power-cycle (disabled). Aims to copy the vendor CVITEK fresh
+# WL_REG_ON power-cycle just before the fmac download. The DTS mmc-pwrseq raises
+# WL_REG_ON once at boot, and the driver downloads much later, so the fmac boots
+# from a stale power state, not a fresh power-then-rescan. mmc_hw_reset drives the
+# pwrseq (WL_REG_ON off/on) and re-enumerates via the mmc core. Then re-arm
+# (aicwf_sdiov3_func_init) and the existing download and jump run on a
+# freshly-powered chip.
+# Disabled: mmc_hw_reset mid-bring-up hung the SDHCI host permanently. A
+# synchronous power-cycle and re-enum from inside the driver probe wedges the
+# cv18xx host. The vendor does it non-blocking (WL_REG_ON gpio toggle plus async
+# cvi_sdio_rescan), which is the correct approach.
 print("aic8800 BSP pre-download mmc_hw_reset power-cycle DISABLED (hung the host)")

@@ -2,16 +2,16 @@
 # Add the Sophgo cv18xx (SG2000/cv181x) SDIO 1.8V signal-voltage switch to the
 # mainline sdhci-of-dwcmshc driver.
 #
-# Mainline cv18xx ops have no .voltage_switch, so when the mmc core requests the
-# 1.8V UHS switch it sets SDHCI_CTRL_VDD_180, calls the (missing) callback, then
-# finds the controller did not establish 1.8V and the switch never completes -
-# the bus runs SDR104 timing at 3.30V signalling (mmc2/ios), which the AIC8800D80
-# fmac firmware cannot survive (DBG_START_APP / cmd 1037 times out). The stock
-# Debian image works because the vendor sdhci-cv18xx driver HAS this callback.
+# Mainline cv18xx ops have no .voltage_switch. When the mmc core requests the
+# 1.8V UHS switch it sets SDHCI_CTRL_VDD_180 and calls the missing callback. The
+# controller never establishes 1.8V, so the switch does not complete. The bus
+# then runs SDR104 timing at 3.30V signalling. The AIC8800D80 fmac firmware
+# cannot run at that level, so DBG_START_APP (cmd 1037) times out. The vendor
+# sdhci-cv18xx driver has this callback.
 #
-# Register sequence ported verbatim from the vendor SDK
+# The register sequence is from the vendor SDK function
 # drivers/mmc/host/cvitek/sdhci-cv181x.c sdhci_cv181x_sd_voltage_switch():
-#   TOP_BASE 0x03000000 + 0x1f4 power-switch: low nibble 0xb=1.8V (auto/vsel/en).
+#   TOP_BASE 0x03000000 + 0x1f4 power-switch: low nibble 0xb = 1.8V (auto/vsel/en).
 #   PINMUX_BASE 0x03001000 + 0xa00 SDIO0 CLK pad: set drive-strength bits 7:5.
 import sys
 
@@ -56,8 +56,8 @@ patch(
     "\tvoid __iomem *pinmuxbase;\n"
     "};\n"
     "\n"
-    "/* Port of vendor sdhci_cv181x_sd_voltage_switch(): drive the SoC pad rail to\n"
-    " * 1.8V so the generic 1.8V switch actually completes on cv18xx. */\n"
+    "/* Port of vendor sdhci_cv181x_sd_voltage_switch(). Drive the SoC pad rail to\n"
+    " * 1.8V so the generic 1.8V switch completes on cv18xx. */\n"
     "static void cv18xx_sdhci_voltage_switch(struct sdhci_host *host)\n"
     "{\n"
     "\tstruct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);\n"
@@ -90,12 +90,12 @@ patch(
     "\tcv->pinmuxbase = devm_ioremap(dev, CV18XX_PINMUX_BASE, SZ_4K);\n"
     "\tif (!cv->topbase || !cv->pinmuxbase)\n"
     "\t\treturn -ENOMEM;\n"
-    "\t/* Force the SD1 (SDIO1/wifi) data + CMD pads to bias pull-up. The in-band\n"
-    "\t * SDIO card interrupt is open-drain on DAT1: without a pull-up the line\n"
-    "\t * cannot idle high so CARD_INT never latches and the driver must poll. The\n"
-    "\t * bias bits live in the RTC pinconf block (base 0x05027000) which the\n"
-    "\t * pinctrl driver claims, so devmem cannot reach them; do it here via a\n"
-    "\t * non-exclusive ioremap. BIT(2)=pull-up enable, BIT(3)=pull-down enable.\n"
+    "\t/* Force the SD1 (SDIO1/wifi) data and CMD pads to bias pull-up. The in-band\n"
+    "\t * SDIO card interrupt is open-drain on DAT1. Without a pull-up the line\n"
+    "\t * cannot idle high, so CARD_INT never latches and the driver must poll. The\n"
+    "\t * bias bits live in the RTC pinconf block (base 0x05027000). The pinctrl\n"
+    "\t * driver claims that block, so devmem cannot reach it. Use a non-exclusive\n"
+    "\t * ioremap. BIT(2) = pull-up enable, BIT(3) = pull-down enable.\n"
     "\t * Offsets: D3=0x58 D2=0x5c D1=0x60 D0=0x64 CMD=0x68 (sg2000 pin table). */\n"
     "\t{\n"
     "\t\tvoid __iomem *cv_rtc = devm_ioremap(dev, 0x05027000, SZ_4K);\n"
@@ -109,14 +109,14 @@ patch(
     "\t\t\t}\n"
     "\t\t}\n"
     "\t}\n"
-    "\t/* The wifi controller is the SD1/SDIO instance; its reset must set the\n"
+    "\t/* The wifi controller is the SD1/SDIO instance. Its reset must set the\n"
     "\t * reg_0x200[16] instance-select bit (vendor sdhci_cv181x_sdio_reset). */\n"
     "\tif (device_property_read_bool(dev, \"sophgo,sdio-inst1\")) {\n"
     "\t\tdwc_priv->flags |= FLAG_CV18XX_SD1;\n"
-    "\t\t/* The wifi pad rail is hard-wired 1.8V (chip VIO + power-source=1800),\n"
-    "\t\t * so force 1.8V signalling: dwcmshc_set_uhs_signaling then sets\n"
-    "\t\t * SDHCI_CTRL_VDD_180 for SDR104, giving true 1.8V instead of the\n"
-    "\t\t * out-of-spec SDR104-at-3.3V the generic CMD11 switch leaves behind. */\n"
+    "\t\t/* The wifi pad rail is hard-wired 1.8V (chip VIO + power-source=1800).\n"
+    "\t\t * Force 1.8V signalling. dwcmshc_set_uhs_signaling then sets\n"
+    "\t\t * SDHCI_CTRL_VDD_180 for SDR104. This gives true 1.8V instead of the\n"
+    "\t\t * out-of-spec SDR104-at-3.3V that the generic CMD11 switch leaves. */\n"
     "\t\tdwc_priv->flags |= FLAG_IO_FIXED_1V8;\n"
     "\t}\n"
     "\tdwc_priv->priv = cv;\n"
@@ -125,11 +125,11 @@ patch(
     "\n"
     "static void cv18xx_postinit(struct sdhci_host *host, struct dwcmshc_priv *priv)\n"
     "{\n"
-    "\t/* Force a low-speed UHS mode for the wifi SDIO. The mainline cv18xx SDR104/\n"
-    "\t * SDR50 PHY support is incomplete (tuning timing), so drop those caps after\n"
-    "\t * setup_host; the card then negotiates SDR25/SDR12 (1.8V, NO tuning), which\n"
-    "\t * is robust enough to bring the AIC8800 fmac up. Higher modes can come once\n"
-    "\t * the host SDR104 PHY path is finished. */\n"
+    "\t/* Force a low-speed UHS mode for the wifi SDIO. The mainline cv18xx SDR104\n"
+    "\t * and SDR50 PHY support is incomplete (tuning timing). Drop those caps after\n"
+    "\t * setup_host. The card then negotiates SDR25/SDR12 (1.8V, no tuning), which\n"
+    "\t * is robust enough to bring the AIC8800 fmac up. Higher modes need a\n"
+    "\t * complete host SDR104 PHY path. */\n"
     "\tif (priv->flags & FLAG_CV18XX_SD1)\n"
     "\t\thost->mmc->caps &= ~(MMC_CAP_UHS_SDR104 | MMC_CAP_UHS_SDR50 |\n"
     "\t\t\t\t     MMC_CAP_UHS_DDR50);\n"
@@ -181,12 +181,11 @@ patch(
     "};\n",
 )
 
-# 5. Finish SDIO SDR104-at-1.8V (mainline upstreamed cv18xx with only SD-card +
-#    no-1.8V tested). Core bug: cv18xx_sdhci_reset unconditionally reverts the PHY
-#    to DS/HS, so the SDR104 tuned tap is clobbered on the first error-recovery /
-#    RESET_ALL and every 200MHz transfer afterwards fails (slow bootrom works, fast
-#    fmac runtime dies). Make reset timing-aware (restore SDR104 PHY + tuned tap),
-#    set the SD1/SDIO instance bit reg_0x200[16], and persist the tuned tap.
+# 5. Finish SDIO SDR104-at-1.8V. Mainline supports cv18xx for SD-card only, with
+#    no 1.8V path. cv18xx_sdhci_reset always reverts the PHY to DS/HS, so a reset
+#    clobbers the SDR104 tuned tap and every later 200MHz transfer fails. Make the
+#    reset timing-aware: restore the SDR104 PHY and tuned tap, set the SD1/SDIO
+#    instance bit reg_0x200[16], and persist the tuned tap.
 
 # 5a. SD1 instance-select bit (MSHC_CTRL reg_0x200[16], vendor sdio_reset)
 patch(
@@ -259,20 +258,19 @@ patch(
     "\t\tval |= CV18XX_EMMC_FUNC_EN;\n"
     "\tif (priv->flags & FLAG_CV18XX_SD1) {\n"
     "\t\tval |= CV18XX_SD1_INST_EN;\n"
-    "\t\t/* THE structural bit mainline misses: the vendor sdhci-cv181x parks\n"
-    "\t\t * MSHC_CTRL[8]|[9] high+enabled at probe for SD/SDIO (its eMMC hw-reset\n"
-    "\t\t * routine toggles BIT(8) as the controller reset-out line). Mainline\n"
-    "\t\t * leaves them 0, so the AIC8800 never gets its reset/enable line driven\n"
-    "\t\t * and the fmac stays silent post-jump. Drive them for the SD1 (wifi)\n"
-    "\t\t * instance, matching the vendor host. */\n"
+    "\t\t/* The vendor sdhci-cv181x parks MSHC_CTRL[8] and [9] high and enabled at\n"
+    "\t\t * probe for SD/SDIO (its eMMC hw-reset routine toggles BIT(8) as the\n"
+    "\t\t * controller reset-out line). Mainline leaves them 0, so the AIC8800\n"
+    "\t\t * reset/enable line is never driven and the fmac stays silent post-jump.\n"
+    "\t\t * Drive them for the SD1 (wifi) instance to match the vendor host. */\n"
     "\t\tval |= CV18XX_RST_OUT_HIGH | CV18XX_RST_OUT_EN;\n"
     "\t}\n"
     "\n"
     "\tctrl_2 = sdhci_readw(host, SDHCI_HOST_CONTROL2) & SDHCI_CTRL_UHS_MASK;\n"
     "\n"
     "\tif (ctrl_2 == SDHCI_CTRL_UHS_SDR104) {\n"
-    "\t\t/* SDR104: restore the tuned PHY (matches cv18xx_sdhci_set_tap). Mainline\n"
-    "\t\t * used to always revert to DS/HS here, clobbering the tuned tap. */\n"
+    "\t\t/* SDR104: restore the tuned PHY (matches cv18xx_sdhci_set_tap). Do not\n"
+    "\t\t * revert to DS/HS here, which would clobber the tuned tap. */\n"
     "\t\tval &= ~CV18XX_LATANCY_1T;\n"
     "\t\tsdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_MSHC_CTRL);\n"
     "\n"
