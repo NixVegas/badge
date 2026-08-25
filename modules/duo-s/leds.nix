@@ -60,6 +60,18 @@ let
       # not spin on that.
       Restart = "on-failure";
       RestartSec = 1;
+      # SPI3 has no working slave DMA on this SoC, so each WS2812 frame is clocked
+      # out by a PIO FIFO-fill loop (see the spi3 node in the DTS). If the scheduler
+      # preempts that loop mid-frame the TX FIFO underruns, the SPI clock stalls past
+      # the WS2812 ~50us latch window, and a partial frame latches -> the ring
+      # flickers under I/O load. Paint at real-time priority (SCHED_FIFO) so other
+      # runnable work does not preempt the loop between FIFO writes. The painter
+      # sleeps ~33ms between 30fps frames, so it cannot starve the system, and RT
+      # throttling (95% default) is a further backstop. realtime I/O keeps its config
+      # re-read off the normal I/O queue.
+      CPUSchedulingPolicy = "fifo";
+      CPUSchedulingPriority = 50;
+      IOSchedulingClass = "realtime";
     };
   };
 in
