@@ -24,8 +24,8 @@
 #     - ARM Cortex-A53 cpu node with GIC interrupt controller
 #     - uart0 (snps,dw-apb-uart at 0x04140000, console)
 #     - cv-sd@4310000 (cvitek,cv181x-sd) for SD boot
-# Removal of OF_PRIOR_STAGE removes the prior_stage_fdt_address variable. The arm variant of
-# cvi_board_init.c matches the riscv variant and omits that definition.
+# Removal of OF_PRIOR_STAGE removes the prior_stage_fdt_address variable. Neither core defines
+# it, so both u-boot builds share the one common cvi_board_init.c.
 #
 # Patches:
 #   Patch 1: Add a SYS_TEXT_BASE hex symbol to board/cvitek/cv181x/Kconfig.

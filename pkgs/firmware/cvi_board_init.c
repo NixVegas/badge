@@ -1,5 +1,6 @@
 /*
- * cvi_board_init.c - board init for the Milk-V Duo S (cv181x, aarch64).
+ * cvi_board_init.c - board init for the Milk-V Duo S (cv181x). Common to both
+ * the arm and riscv u-boot builds: this is SoC-pad-level pinmux, not core-specific.
  *
  * board/cvitek/cv181x/board.c includes this file directly. The code runs inside
  * board_init() and shares its mmio.h helpers and uint32_t.
@@ -251,6 +252,18 @@ static void cvi_board_init(void)
 	PINMUX_CONFIG(UART2_TX, UART4_TX);
 	PINMUX_CONFIG(UART2_CTS, UART4_CTS);
 	PINMUX_CONFIG(UART2_RTS, UART4_RTS);
+
+	/*
+	 * CPU JTAG for the CH347 debug header (J1). TCK/TMS/TRST default to JTAG, but
+	 * 4-wire TDI/TDO share the IIC0 pads, which default to func 3 (GPIO). Unmuxed,
+	 * the target never drives TDO and a scan reads all-ones. Mux all five to their
+	 * JTAG function (func-sel 0): TDI = IIC0_SCL/CR_4WTDI, TDO = IIC0_SDA/CR_4WTDO.
+	 */
+	PINMUX_CONFIG(JTAG_CPU_TCK, CV_2WTCK_CR_4WTCK);
+	PINMUX_CONFIG(JTAG_CPU_TMS, CV_2WTMS_CR_4WTMS);
+	PINMUX_CONFIG(JTAG_CPU_TRST, JTAG_CPU_TRST);
+	PINMUX_CONFIG(IIC0_SCL, CV_SCL0__CR_4WTDI);
+	PINMUX_CONFIG(IIC0_SDA, CV_SDA0__CR_4WTDO);
 
 	set_rtc_register_for_power();
 }

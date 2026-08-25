@@ -26,7 +26,8 @@
 #     - uart0 (snps,dw-apb-uart at 0x04140000, console)
 #     - cv-sd@4310000 (cvitek,cv181x-sd) for SD boot
 # Removal of OF_PRIOR_STAGE removes the prior_stage_fdt_address variable. It was declared only
-# in arch/riscv/cpu/cpu.c under that ifdef, so cvi_board_init_riscv.c stays unchanged.
+# in arch/riscv/cpu/cpu.c under that ifdef, and neither core defines it, so both cores share the
+# one common cvi_board_init.c (SoC-pad-level pinmux: ethernet, WiFi/BT, JTAG, RTC power).
 #
 # Patches:
 #   Patch 1: Add a SYS_TEXT_BASE hex symbol to board/cvitek/cv181x/Kconfig.
@@ -53,7 +54,7 @@ let
   crossPrefix = cc.targetPrefix;
 
   defconfig  = ./cvitek_sg2000_milkv_duos_musl_riscv64_sd_defconfig;
-  boardInit  = ./cvi_board_init_riscv.c;
+  boardInit  = ./cvi_board_init.c;
   memmap     = ./duos-riscv-uboot-memmap.h;
   cvipart    = ./cvipart.h;
 in
