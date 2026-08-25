@@ -124,3 +124,18 @@
 		line-name = "sao-power-en";
 	};
 };
+
+/*
+ * SARADC for the battery + VBUS/VSEL voltage meter. The cv1800b-adc IIO driver
+ * exposes in_voltage0/1/2 (scale 3300/4096 mV per LSB). On this carrier each of
+ * the three channels is fed through a 2.2M/1M divider (x3.2), so a reading is
+ * raw * scale * 3.2. Channel map:
+ *   in_voltage0 = VSEL  (system rail, = VBUS through the TPS2116 mux; R16/R19)
+ *   in_voltage1 = VBAT  (battery; R15 2.2M / R18 1M)
+ *   in_voltage2 = J6    (external test point)
+ * See modules/duo-s/power.nix (badge-voltages) for the userspace meter. The base
+ * node (cv180x.dtsi) is status="disabled" with channel@0..2 already declared.
+ */
+&saradc {
+	status = "okay";
+};
