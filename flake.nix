@@ -9,6 +9,10 @@
     flake-parts.url = "github:hercules-ci/flake-parts";
     flake-compat.url = "https://flakehub.com/f/edolstra/flake-compat/1.tar.gz";
     flakever.url = "github:numinit/flakever";
+    # deploy-rs: push a closure + activate it on the badge over SSH. Follows the
+    # badge's nixpkgs so the target-arch activate wrapper matches the systems.
+    deploy-rs.url = "github:serokell/deploy-rs";
+    deploy-rs.inputs.nixpkgs.follows = "nixpkgs-2605";
   };
 
   outputs =
@@ -18,6 +22,7 @@
       flakever,
       nixpkgs-esp-dev,
       nixpkgs-2605,
+      deploy-rs,
       ...
     }:
     let
@@ -60,6 +65,7 @@
             ./modules/duo-s/base.nix
             ./modules/duo-s/wifi.nix
             ./modules/duo-s/leds.nix
+            ./modules/duo-s/deploy.nix
             ./modules/duo-s/core-${core}.nix
           ];
         };
@@ -144,6 +150,39 @@
 
         # badgeOS NixOS systems (built against nixpkgs 26.05).
         nixosConfigurations = duosNixosConfigurations;
+
+        # deploy-rs: two nodes, one per core, both reaching the same badge (only
+        # one core is booted at a time). Deploy the node matching the CURRENTLY
+        # booted core, e.g. `nix run github:serokell/deploy-rs -- .#nixbadge-duos-arm`
+        # (or -riscv). Each node activates ONLY its own /boot/<core> subtree and
+        # never rewrites fip.bin, so a deploy cannot switch cores -- use
+        # `nix-badge core <arch>` + reboot for that. The cross (-x86_64) systems
+        # build on an x86_64 dev host; see modules/duo-s/deploy.nix for the
+        # dual-core installer and the passwordless-sudo requirement.
+        deploy.nodes =
+          let
+            # deploy-rs only ships lib.<system> for its flake-utils systems
+            # (x86_64/aarch64/darwin -- no riscv64). Its lib is just its overlay
+            # applied to a nixpkgs, so build the per-target lib ourselves against
+            # nixpkgs-2605; this gives a working riscv64 node too. The activate
+            # wrapper is the target-arch deploy-rs binary and builds at deploy time.
+            deployLibFor =
+              system:
+              (import nixpkgs-2605 {
+                inherit system;
+                overlays = [ deploy-rs.overlays.default ];
+              }).deploy-rs.lib;
+            mkNode = system: nixosCfg: {
+              hostname = "10.8.3.128"; # current DHCP address; override with --hostname
+              sshUser = "badge";
+              user = "root";
+              profiles.system.path = (deployLibFor system).activate.nixos nixosCfg;
+            };
+          in
+          {
+            nixbadge-duos-arm = mkNode "aarch64-linux" self.nixosConfigurations."duo-s-arm-x86_64";
+            nixbadge-duos-riscv = mkNode "riscv64-linux" self.nixosConfigurations."duo-s-riscv-x86_64";
+          };
       };
 
       systems = [
