@@ -190,6 +190,8 @@
           packages = {
             default = pkgs.duo-s-sdcard;
             v1 = pkgs.nixbadge-v1;
+            # OpenOCD with the CH347 driver, for JTAG over the badge's J1 port.
+            openocd-ch347 = import ./pkgs/openocd-ch347.nix { inherit pkgs; };
           };
 
           devShells = {
