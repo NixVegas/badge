@@ -311,6 +311,14 @@
 		"sd-fault-n",        /* 22 U8 /FAULT */
 		"core-sel-strap",    /* 23 readback: 1=RISC-V, 0=ARM */
 		"", "", "", "", "", "", "", "";
+
+	/* Enable the SAO connector power (U13 EN + U12 OE) at boot. */
+	sao-power-en-hog {
+		gpio-hog;
+		gpios = <21 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "sao-power-en";
+	};
 };
 
 /* Console UART */
