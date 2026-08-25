@@ -80,6 +80,17 @@
     initialPassword = "nixbadge";
   };
 
+  # Give root a password so the systemd emergency/rescue shell (sulogin) can open
+  # on the serial console. Without it root is locked and a bad boot prints
+  # "Cannot open access to console, the root account is locked", leaving no way to
+  # recover over serial. Root still cannot log in over ssh (PermitRootLogin = no),
+  # so this only matters for local serial/console access.
+  users.users.root.initialPassword = "nixbadge";
+  # Allow a passwordless root shell in the stage-1 (initrd) systemd emergency
+  # target, so an initrd failure (e.g. the root device or NixOS closure not found)
+  # is recoverable over serial too.
+  boot.initrd.systemd.emergencyAccess = true;
+
   services.openssh = {
     enable = true;
     settings.PermitRootLogin = "no";
