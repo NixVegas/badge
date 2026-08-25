@@ -30,6 +30,7 @@
 /dts-v1/;
 #include "sg2002.dtsi"
 #include <dt-bindings/gpio/gpio.h>
+#include "sg2000-milkv-duo-s-common.dtsi"
 
 /*
  * Pin IDs and the pin controller.
@@ -325,14 +326,6 @@
 		"sd-fault-n",        /* 22 U8 /FAULT */
 		"core-sel-strap",    /* 23 readback: 1=RISC-V, 0=ARM */
 		"", "", "", "", "", "", "", "";
-
-	/* Enable the SAO connector power (U13 EN + U12 OE) at boot. */
-	sao-power-en-hog {
-		gpio-hog;
-		gpios = <21 GPIO_ACTIVE_HIGH>;
-		output-high;
-		line-name = "sao-power-en";
-	};
 };
 
 /* Console UART */
@@ -395,31 +388,6 @@
 };
 
 /*
- * Onboard WiFi: AICSemi AIC8800 on the SDIO bus mmc@4320000 (label sdhci1).
- * mmc@4310000 = SD card (sdhci0), mmc@4300000 = eMMC. GPIO PORTA pin 15
- * (WL_REG_ON, active-high) powers the AIC8800. The &sdhci1 poweron-gpios
- * raises it before the SDIO scan so the chip enumerates on the bus (vid
- * 0xC8A1). The out-of-tree aic8800 driver and firmware are separate.
- */
-/ {
-	/* A single consumer drives WL_REG_ON (porta15). Do not add a separate
-	 * wifi_pwrseq: two consumers of porta15 route through gpio-shared-proxy
-	 * (can_sleep), and aicbsp then drives WL_REG_ON with a non-sleeping
-	 * gpiod_set_value. */
-
-	/* Core VDD 3.3V OCR window. cv18xx-vsw takes bus I/O to 1.8V physically
-	 * under NO_1_8_V, so there is no 1.8V vqmmc regulator. */
-	wifi_vdd: regulator-wifi-vdd {
-		compatible = "regulator-fixed";
-		regulator-name = "aic8800-vdd";
-		regulator-min-microvolt = <3300000>;
-		regulator-max-microvolt = <3300000>;
-		regulator-always-on;
-		regulator-boot-on;
-	};
-};
-
-/*
  * WiFi SDIO bus pads. The mmc@4320000 controller uses the SD1 pads
  * (DUOS_SD1_*, mux 0 = SDIO1, same scheme as the SD0 pads for the card).
  * Without this mux the pads stay on their default function and the AIC8800
@@ -452,35 +420,4 @@
 			power-source = <1800>;
 		};
 	};
-};
-
-&sdhci1 {
-	/* Vendor SDHCI: bind the cvitek cv181x host (cvitek,cv181x-sdio) so the
-	 * AIC8800 fmac gets the vendor SDIO bring-up. clk_wifisd = SD1 functional
-	 * clock (source, set from src-frequency); axi = register-bus clock.
-	 * cv180x.dtsi provides the same CLK_SD1/CLK_AXI4_SD1 macros and &clk label
-	 * as sg2000. */
-	status = "okay";
-	sophgo,sdio-inst1;
-	compatible = "cvitek,cv181x-sdio";
-	clocks = <&clk CLK_SD1>, <&clk CLK_AXI4_SD1>;
-	clock-names = "clk_wifisd", "axi";
-	bus-width = <4>;
-	non-removable;
-	no-mmc;
-	no-sd;
-	cap-sdio-irq;
-	keep-power-in-suspend;
-	/* 375MHz SDIO source clock (src-frequency, read by the cvi host). The
-	 * card clock = f_max/4 = 46.875MHz at max-frequency = 187.5MHz;
-	 * get_max_clock returns f_max as the sdhci divider base. */
-	src-frequency = <375000000>;
-	max-frequency = <187500000>;
-	vmmc-supply = <&wifi_vdd>;
-	pinctrl-0 = <&sdhci1_cfg>;
-	pinctrl-names = "default";
-	/* The cv181x host drives WL_REG_ON low at probe (card absent). The aic
-	 * CONFIG_PLATFORM_CVITEK path raises it and calls cvi_sdio_rescan() to
-	 * enumerate the fmac in bootrom mode so its message task starts. */
-	poweron-gpios = <&porta 15 GPIO_ACTIVE_HIGH>;
 };

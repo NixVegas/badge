@@ -17,7 +17,8 @@
 # -> hardware.deviceTree.name = "sophgo/sg2000-milkv-duo-s.dtb"
 { pkgs, kernel }:
 let
-  dts = ./dts/sg2000-milkv-duo-s.dts;
+  dtsDir = ./dts;
+  dts = "${dtsDir}/sg2000-milkv-duo-s.dts";
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "duos-arm-dtb";
@@ -60,6 +61,7 @@ pkgs.stdenvNoCC.mkDerivation {
       -nostdinc \
       -I "$INCDIR" \
       -I "$SOPHGO_DIR" \
+      -I "${dtsDir}" \
       -undef -D__DTS__ \
       -x assembler-with-cpp \
       ${dts} \
