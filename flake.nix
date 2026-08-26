@@ -166,12 +166,31 @@
             # applied to a nixpkgs, so build the per-target lib ourselves against
             # nixpkgs-2605; this gives a working riscv64 node too. The activate
             # wrapper is the target-arch deploy-rs binary and builds at deploy time.
+            #
+            # CROSS, not native: deploy from an x86_64 dev host. If we imported
+            # nixpkgs with `system = <target>` (native aarch64/riscv64), the
+            # deploy-rs Rust binary + the activatable-nixos-system wrapper would
+            # be native target-arch builds and, with no target remote builder,
+            # nix falls back to qemu user emulation (a `qemu-aarch64 rustc` grind
+            # that made the first deploy crawl). Instead we take the x86_64 pkgs
+            # set's `pkgsCross.<target>` (buildPlatform=x86_64 / hostPlatform=
+            # target) and apply the deploy-rs overlay on top -- the overlay
+            # propagates into pkgsCross, so `deploy-rs.deploy-rs` and the wrapper
+            # build ON x86_64 with a gcc/rust cross toolchain. The RUNTIME output
+            # is byte-for-byte a target-arch package (aarch64/riscv64 activate
+            # binary + shebangs), just cross-produced instead of emulated.
+            #
+            # crossName maps our deploy node system -> nixpkgs pkgsCross attr.
+            crossName = {
+              "aarch64-linux" = "aarch64-multiplatform";
+              "riscv64-linux" = "riscv64";
+            };
             deployLibFor =
               system:
               (import nixpkgs-2605 {
-                inherit system;
+                system = "x86_64-linux";
                 overlays = [ deploy-rs.overlays.default ];
-              }).deploy-rs.lib;
+              }).pkgsCross.${crossName.${system}}.deploy-rs.lib;
             mkNode = system: nixosCfg: {
               hostname = "10.8.3.128"; # current DHCP address; override with --hostname
               sshUser = "badge";
