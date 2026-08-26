@@ -33,22 +33,30 @@
           name = "enable-spidev-for-leds";
           patch = null;
           # The Kconfig symbol is SPI_SPIDEV, not SPIDEV. The module file is
-          # spidev.c, which makes the short name look right.
-          # SPI3 runs in PIO, without DMA. PIO stalls a little (a 417 byte LED
-          # frame took 1481 us against 1067 us of real bit time) and makes fast
-          # animations flicker. Do not enable SPI3 DMA: the mainline dw-axi-dmac
-          # programs its handshake number through an apb_regs window that exists
-          # only for compatibles with AXI_DMA_FLAG_HAS_APB_REGS. snps,axi-dma-1.01a
-          # is not such a compatible, so every slave transfer fails with
-          # "apb_regs not initialized". dw_spi then retries per frame, floods the
-          # console, and starves the SD probe until the board does not boot.
-          # See the NO DMA comment on spi3 in the device trees.
+          # spidev.c, which makes the short name look right. SPI3 drives the
+          # WS2812 ring via slave DMA through the cv1800b dmamux (see the spi3
+          # dmas / &dmac in the device trees); build the DesignWare SPI glue and
+          # spidev in (=y) so /dev/spidev3.0 exists from the initrd, where the LED
+          # service starts.
           extraConfig = ''
             SPI y
             SPI_DESIGNWARE y
             SPI_DW_MMIO y
             SPI_SPIDEV y
           '';
+        }
+        {
+          # SPI3 slave DMA works through the cv1800b dmamux, but the dw-axi-dmac
+          # driver still calls dw_axi_dma_set_hw_channel() on every transfer, and
+          # on this SoC chip->apb_regs is NULL (the dmamux does the request
+          # routing, so the DMAC's own apb_regs handshake is unused). That path is
+          # a void no-op, but it logs dev_err("apb_regs not initialized") every
+          # frame. With the LED painter running from the initrd that floods the
+          # slow serial console and, at RT priority, starved the AIC8800 wifi
+          # bring-up so the board came up with no network. Demote the message to
+          # dev_dbg; the DMA transfer itself is unaffected.
+          name = "dw-axi-dmac-apb-regs-quiet";
+          patch = ../../pkgs/firmware/dw-axi-dmac-apb-regs-quiet.patch;
         }
       ];
     }

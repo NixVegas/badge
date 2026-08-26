@@ -1,0 +1,11 @@
+--- a/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
++++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
+@@ -574,7 +574,7 @@
+ 	unsigned long reg_value, val;
+ 
+ 	if (!chip->apb_regs) {
+-		dev_err(chip->dev, "apb_regs not initialized\n");
++		dev_dbg(chip->dev, "apb_regs not initialized\n");
+ 		return;
+ 	}
+ 

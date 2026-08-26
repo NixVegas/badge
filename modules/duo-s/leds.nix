@@ -60,19 +60,15 @@ let
       # not spin on that.
       Restart = "on-failure";
       RestartSec = 1;
-      # The WS2812 flicker under load came from PIO SPI: a hardirq preempting the
-      # FIFO-fill loop mid-frame let the TX FIFO underrun, the SPI clock stalled
-      # past the ~50us WS2812 latch window, and a partial frame latched. The DTS
-      # now feeds the FIFO by DMA (see the spi3 dmas / &dmac), which is the real
-      # fix -- the CPU no longer refills the FIFO, so preemption cannot underrun it,
-      # and offloading the transfer visibly frees the CPU under LED load. These RT
-      # knobs stay as a cheap backstop and to keep the ~33ms/frame painter and its
-      # config re-read off the normal scheduler/I/O queues; the painter sleeps
-      # between 30fps frames so it cannot starve the system (RT throttling at 95%
-      # is a further guard).
-      CPUSchedulingPolicy = "fifo";
-      CPUSchedulingPriority = 50;
-      IOSchedulingClass = "realtime";
+      # No real-time priority. The WS2812 flicker under load came from PIO SPI
+      # underrunning the TX FIFO; the DTS now feeds the FIFO by DMA (see the spi3
+      # dmas / &dmac), so the CPU no longer clocks out frames and the painter's
+      # scheduling no longer affects the waveform. It once ran SCHED_FIFO to keep
+      # the PIO loop from being preempted, but that was actively harmful with DMA:
+      # the dw-axi-dmac set_hw_channel path logs once per frame, and at RT priority
+      # that printk to the slow serial console starved the AIC8800 wifi bring-up on
+      # a fresh boot. Run at normal priority; the painter sleeps between 30fps
+      # frames and does nothing timing-critical on the CPU anymore.
     };
   };
 in
