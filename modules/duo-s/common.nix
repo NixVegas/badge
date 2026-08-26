@@ -47,6 +47,10 @@
     options = [ "nofail" ];
   };
 
+  # 2 GB swapfile at /swap on the root filesystem. NixOS creates and mkswaps it;
+  # change `size` (MiB) to resize.
+  swapDevices = [ { device = "/swap"; size = 2048; } ];
+
   # 24 WS2812 LEDs on the SPI3 MOSI line (40-pin header pin 19). The service
   # starts in the initrd and keeps running after switch_root, so the ring shows
   # life from very early boot. See modules/duo-s/leds.nix for the option set and
