@@ -3,6 +3,7 @@
 # One binary for the badge-specific functions:
 #   nix-badge leds ...   the WS2812 chain on SPI3
 #   nix-badge core ...   the ARM/RISC-V select latch (U2 74AUP1G175)
+#   nix-badge power      rail voltages (SARADC/IIO) + VBUS-detect and fault GPIOs
 #
 # The LED half runs as a service from the initrd onwards, so the binary must
 # keep running across switch_root. It links against nothing outside its own

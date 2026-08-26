@@ -1279,6 +1279,115 @@ static int cmd_core(int argc, char **argv)
 	return 0;
 }
 
+// ================================================================== power ===
+//
+// Rail voltages from the cv1800b SARADC (read over IIO sysfs) plus the USB
+// VBUS-detect and per-supply fault GPIOs. Each ADC channel is fed through a
+// 2.2M/1M divider (x3.2), and the driver reports in_voltage_scale in mV per LSB,
+// so a rail is raw * scale * 3.2. Channel map (see the shared dtsi &saradc):
+//   in_voltage0 = VSEL  (system rail, = VBUS through the TPS2116 mux on USB power)
+//   in_voltage1 = VBAT  (battery)
+//   in_voltage2 = J6    (external test point)
+// VBUS-detect and the active-low *-fault-n lines are read by name via the same
+// GPIO uAPI helper the core latch uses (gpio_read_line).
+
+#define SARADC_DIVIDER 3.2
+
+// Locate the SARADC IIO device directory (its driver name contains "adc").
+static int saradc_dir(char *dir, size_t dirlen)
+{
+	for (int i = 0; i < 16; i++) {
+		char base[64], namepath[96], name[64];
+		snprintf(base, sizeof(base),
+			 "/sys/bus/iio/devices/iio:device%d", i);
+		snprintf(namepath, sizeof(namepath), "%s/name", base);
+		FILE *f = fopen(namepath, "r");
+		if (!f)
+			continue;
+		int ok = fgets(name, sizeof(name), f) && strstr(name, "adc");
+		fclose(f);
+		if (ok) {
+			snprintf(dir, dirlen, "%s", base);
+			return 0;
+		}
+	}
+	return -1;
+}
+
+// Read a sysfs file as a double. Returns 0 on success.
+static int read_sysfs_double(const char *path, double *out)
+{
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return -1;
+	int ok = fscanf(f, "%lf", out) == 1;
+	fclose(f);
+	return ok ? 0 : -1;
+}
+
+static int cmd_power(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+
+	char dir[64];
+	if (saradc_dir(dir, sizeof(dir)) == 0) {
+		char sp[96];
+		double scale;
+		snprintf(sp, sizeof(sp), "%s/in_voltage_scale", dir);
+		if (read_sysfs_double(sp, &scale) == 0) {
+			static const struct {
+				int ch;
+				const char *label;
+			} rails[] = {
+				{ 0, "VSEL (system / VBUS):" },
+				{ 1, "VBAT (battery):      " },
+				{ 2, "J6   (ext ADC):      " },
+			};
+			for (size_t i = 0; i < 3; i++) {
+				char rp[96];
+				double raw;
+				snprintf(rp, sizeof(rp), "%s/in_voltage%d_raw",
+					 dir, rails[i].ch);
+				if (read_sysfs_double(rp, &raw) == 0)
+					printf("%s %.3f V\n", rails[i].label,
+					       raw * scale * SARADC_DIVIDER /
+						       1000.0);
+				else
+					printf("%s (read error)\n",
+					       rails[i].label);
+			}
+		} else {
+			fprintf(stderr, "power: cannot read %s\n", sp);
+		}
+	} else {
+		fprintf(stderr, "power: no SARADC IIO device "
+				"(is &saradc enabled and booted?)\n");
+	}
+
+	int vbus = gpio_read_line("usb-vbus-det");
+	printf("USB VBUS present:     %s\n",
+	       vbus < 0 ? "unknown" : (vbus ? "yes" : "no"));
+
+	// Active-low fault lines (TPS2553 open-drain /FAULT): low means asserted.
+	static const struct {
+		const char *label;
+		const char *line;
+	} faults[] = {
+		{ "usb-5v:", "usb-5v-fault-n" },
+		{ "hdmi-5v:", "hdmi-5v-fault-n" },
+		{ "sd:", "sd-fault-n" },
+		{ "sao:", "sao-fault-n" },
+	};
+	printf("Faults:\n");
+	for (size_t i = 0; i < 4; i++) {
+		int v = gpio_read_line(faults[i].line);
+		printf("  %-8s %s\n", faults[i].label,
+		       v < 0 ? "unknown" : (v ? "ok" : "FAULT"));
+	}
+	return 0;
+}
+
 // =================================================================== main ===
 
 static void usage(void)
@@ -1291,6 +1400,7 @@ static void usage(void)
 		"        [--color '#rrggbb' ...]\n"
 		"  nix-badge leds show\n"
 		"  nix-badge core <arm|riscv|status>\n"
+		"  nix-badge power\n"
 		"\n"
 		"patterns: off solid pulse rainbow chase\n");
 }
@@ -1321,6 +1431,8 @@ int main(int argc, char **argv)
 		return cmd_leds(argc - 2, argv + 2);
 	if (strcmp(argv[1], "core") == 0)
 		return cmd_core(argc - 2, argv + 2);
+	if (strcmp(argv[1], "power") == 0)
+		return cmd_power(argc - 2, argv + 2);
 	usage();
 	return 2;
 }

@@ -66,7 +66,6 @@
             ./modules/duo-s/wifi.nix
             ./modules/duo-s/leds.nix
             ./modules/duo-s/deploy.nix
-            ./modules/duo-s/power.nix
             ./modules/duo-s/core-${core}.nix
           ];
         };
