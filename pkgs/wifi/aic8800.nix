@@ -78,6 +78,22 @@ pkgs.stdenv.mkDerivation {
     substituteInPlace ${driverSubdir}/aic8800_bsp/aic_bsp_main.c \
       --replace-fail '"fmacfw_8800d80_u02.bin"' '"fmacfwbt_8800d80_u02.bin"'
 
+    # kernel 7.2 dropped strncpy, which aic8800_fdrv still calls in always-compiled
+    # paths (rwnx_send_dbg_trigger_req, rwnx_platform.c parse copies). GCC 15 errors
+    # on the implicit declaration. Force-include a compat strncpy into the fdrv build
+    # through its Makefile's ccflags-y -- a make-arg KCFLAGS gets word-split on the
+    # space and mangles the kernel's flags, and kbuild 7.2 ignores the deprecated
+    # EXTRA_CFLAGS.
+    echo "ccflags-y += -include ${./strncpy-compat.h}" \
+      >> ${driverSubdir}/aic8800_fdrv/Makefile
+
+    # kernel 7.2 cfg80211 API changes past the radxa series' 7.1 ceiling. The driver
+    # ignores the new args; just widen the callback signatures to match the ops:
+    #   remain_on_channel() gained a trailing "const u8 *rx_addr".
+    substituteInPlace ${driverSubdir}/aic8800_fdrv/rwnx_main.c \
+      --replace-fail 'unsigned int duration, u64 *cookie)' \
+                     'unsigned int duration, u64 *cookie, const u8 *rx_addr)'
+
     # Add the mmc headers and the CVITEK enumeration.
     patch -p1 --binary -i ${./aic8800-mmc-sdio-headers.patch}
     patch -p1 --binary -i ${./aic8800-cvitek-sdio-enum.patch}
