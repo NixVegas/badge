@@ -24,6 +24,30 @@
 let
   # Baked per system: the arm closure installs into /arm, the riscv one into /riscv.
   core = if pkgs.stdenv.hostPlatform.isAarch64 then "arm" else "riscv";
+
+  # config.boot.loader.generic-extlinux-compatible.populateCmd is built against
+  # pkgs.buildPackages (the BUILD arch) because upstream means it to run at
+  # image-build time on the build host. Our installer below runs at ACTIVATION
+  # time ON THE BADGE, and these systems cross-compile on an x86_64 host, so
+  # populateCmd's x86_64 coreutils/gnused die there with "cannot execute binary
+  # file: Exec format error" and leave the boot tree half-written. Rebuild the
+  # very same extlinux-conf-builder against the TARGET pkgs so it runs on the
+  # badge, and mirror nixpkgs' own builderArgs (module default.nix) so the output
+  # matches the stock installer exactly.
+  blCfg = config.boot.loader;
+  dtCfg = config.hardware.deviceTree;
+  efg = blCfg.generic-extlinux-compatible;
+  timeoutStr = if blCfg.timeout == null then "-1" else toString blCfg.timeout;
+  targetBuilder =
+    import "${pkgs.path}/nixos/modules/system/boot/loader/generic-extlinux-compatible/extlinux-conf-builder.nix"
+      {
+        inherit lib pkgs;
+      };
+  builderArgs =
+    "-g ${toString efg.configurationLimit} -t ${timeoutStr}"
+    + lib.optionalString (dtCfg.name != null) " -n ${dtCfg.name}"
+    + lib.optionalString (!efg.useGenerationDeviceTree) " -r";
+  targetPopulateCmd = "${targetBuilder} ${builderArgs}";
 in
 {
   # The 416 MB FAT is shared by both cores, and each generation is ~40 MB
@@ -41,7 +65,7 @@ in
       dir="/boot/${core}"
       # Populate the running core's subtree: adds this generation, prunes to the
       # configurationLimit. Leaves fip.bin, fip-*.bin, and the other core alone.
-      ${config.boot.loader.generic-extlinux-compatible.populateCmd} -c "$toplevel" -d "$dir"
+      ${targetPopulateCmd} -c "$toplevel" -d "$dir"
       # U-Boot resolves LABEL paths from the FAT root, so rewrite the builder's
       # relative ../nixos/ to absolute /${core}/nixos/ (as make-boot-dir.nix does).
       ${pkgs.gnused}/bin/sed -i 's|\.\./nixos/|/${core}/nixos/|g' "$dir/extlinux/extlinux.conf"
