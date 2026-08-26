@@ -1291,7 +1291,15 @@ static int cmd_core(int argc, char **argv)
 // VBUS-detect and the active-low *-fault-n lines are read by name via the same
 // GPIO uAPI helper the core latch uses (gpio_read_line).
 
-#define SARADC_DIVIDER 3.2
+// The 2.2M/1M dividers present a ~688k source, far too high for the cv1800b
+// SARADC's ~640 ns sample window to settle, so every reading is attenuated by a
+// roughly fixed fraction (the cap charges to ~1/6). The correction is therefore an
+// empirically calibrated factor, not the ideal x3.2. Calibrated 2026-08-26 against
+// a multimeter: VSEL = 4.980 V at a median raw of 320 (scale 0.805664 mV/LSB) ->
+// 4980 / (320 * 0.805664) = 19.3. VSEL and VBAT share the divider, so they share
+// the factor. This constant is per-badge (divider tolerance + ADC sample cap); a
+// kernel patch slowing the ADC clock (CLKDIV) would make it board-independent.
+#define SARADC_FACTOR 19.3
 
 // Locate the SARADC IIO device directory (its driver name contains "adc").
 static int saradc_dir(char *dir, size_t dirlen)
@@ -1325,6 +1333,32 @@ static int read_sysfs_double(const char *path, double *out)
 	return ok ? 0 : -1;
 }
 
+static int cmp_int(const void *a, const void *b)
+{
+	int x = *(const int *)a, y = *(const int *)b;
+	return (x > y) - (x < y);
+}
+
+// Read one SARADC channel N times and return the median raw count. The high-Z
+// divider makes single reads jitter by tens of counts and occasionally return a
+// badly-undersettled sample; the median rejects those.
+static int saradc_median_raw(const char *dir, int ch)
+{
+	enum { NSAMP = 25 };
+	int s[NSAMP], n = 0;
+	char rp[96];
+	snprintf(rp, sizeof(rp), "%s/in_voltage%d_raw", dir, ch);
+	for (int i = 0; i < NSAMP; i++) {
+		double v;
+		if (read_sysfs_double(rp, &v) == 0)
+			s[n++] = (int)v;
+	}
+	if (n == 0)
+		return -1;
+	qsort(s, n, sizeof(s[0]), cmp_int);
+	return s[n / 2];
+}
+
 static int cmd_power(int argc, char **argv)
 {
 	(void)argc;
@@ -1345,13 +1379,10 @@ static int cmd_power(int argc, char **argv)
 				{ 2, "J6   (ext ADC):      " },
 			};
 			for (size_t i = 0; i < 3; i++) {
-				char rp[96];
-				double raw;
-				snprintf(rp, sizeof(rp), "%s/in_voltage%d_raw",
-					 dir, rails[i].ch);
-				if (read_sysfs_double(rp, &raw) == 0)
+				int raw = saradc_median_raw(dir, rails[i].ch);
+				if (raw >= 0)
 					printf("%s %.3f V\n", rails[i].label,
-					       raw * scale * SARADC_DIVIDER /
+					       raw * scale * SARADC_FACTOR /
 						       1000.0);
 				else
 					printf("%s (read error)\n",
