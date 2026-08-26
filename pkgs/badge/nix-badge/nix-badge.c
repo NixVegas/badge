@@ -1299,7 +1299,13 @@ static int cmd_core(int argc, char **argv)
 // 4980 / (320 * 0.805664) = 19.3. VSEL and VBAT share the divider, so they share
 // the factor. This constant is per-badge (divider tolerance + ADC sample cap); a
 // kernel patch slowing the ADC clock (CLKDIV) would make it board-independent.
+//
+// Overridable at build time (-DSARADC_FACTOR=...) through saradcFactor in
+// nix-badge.nix, so re-calibrating after a kernel ADC-sampling change (e.g. a
+// slower CLKDIV that lets the divider settle) is a nix one-liner, not a C edit.
+#ifndef SARADC_FACTOR
 #define SARADC_FACTOR 19.3
+#endif
 
 // Locate the SARADC IIO device directory (its driver name contains "adc").
 static int saradc_dir(char *dir, size_t dirlen)

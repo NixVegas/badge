@@ -10,7 +10,14 @@
 # closure and uses no wrapper script: makeInitrdNG puts store paths at their
 # real /nix/store location inside the initramfs, so the interpreter and libc
 # resolve the same before and after switch_root.
-{ pkgs }:
+{
+  pkgs,
+  # SARADC voltage factor for `nix-badge power`. The 2.2M/1M dividers are ideally
+  # x3.2, but the high-Z source undersettles the fast SARADC, so the effective
+  # factor is an empirically-calibrated ~19.3. Bump this after a kernel ADC change
+  # (e.g. a slower CLKDIV) rather than editing the C source.
+  saradcFactor ? "19.3",
+}:
 pkgs.stdenv.mkDerivation {
   pname = "nix-badge";
   version = "0.1";
@@ -26,7 +33,7 @@ pkgs.stdenv.mkDerivation {
   # either.
   buildPhase = ''
     runHook preBuild
-    $CC -O2 -Wall -Wextra -std=c11 -o nix-badge nix-badge.c
+    $CC -O2 -Wall -Wextra -std=c11 -DSARADC_FACTOR=${saradcFactor} -o nix-badge nix-badge.c
     runHook postBuild
   '';
 
