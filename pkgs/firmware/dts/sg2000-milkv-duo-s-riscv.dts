@@ -227,14 +227,16 @@
  * it is only disabled. Enable it below. */
 &spi3 {
 	num-cs = <1>;
-	/* No DMA. The mainline dw-axi-dmac cannot do slave DMA on this SoC.
-	 * dw_axi_dma_set_hw_channel() programs the handshake number through a
-	 * second register window (apb_regs), mapped only for compatibles with
-	 * AXI_DMA_FLAG_HAS_APB_REGS. snps,axi-dma-1.01a has no such flag, and on
-	 * the SG2000 the handshake selection lives in the dmamux instead. With
-	 * dmas = <&dmamux 23 1>, <&dmamux 22 1> every slave prepare fails with
-	 * "apb_regs not initialized". The IDs are correct (SPI3_TX 23, SPI3_RX
-	 * 22, cpu 0 = CA53 / 1 = C906B); the driver support is not. Use PIO. */
+	/* Slave DMA via the cv1800b dmamux, so the CPU no longer hand-refills the
+	 * SPI TX FIFO. In PIO the FIFO underruns when a hardirq preempts the refill
+	 * mid-frame, the SPI clock stalls, and the WS2812 chain glitches under load;
+	 * DMA feeds the FIFO from memory instead. Cells: SPI3_TX = req 23, SPI3_RX =
+	 * req 22; the 2nd dmamux cell is the CPU (1 = C906 on this riscv core, vs
+	 * 0 = CA53 on arm). &dmac must use sophgo,cv1800b-axi-dma (ARG0_AS_CHAN) so
+	 * of_xlate takes the mux-allocated channel, not the apb_regs handshake path
+	 * this SoC lacks. */
+	dmas = <&dmamux 23 1>, <&dmamux 22 1>;
+	dma-names = "tx", "rx";
 	/* GPIO chip select, active-high. U10 wires LED_DIN = CS AND SDO, so the
 	 * AND gate passes data only while CS is high.
 	 *
@@ -265,6 +267,19 @@
 		 * LEDs receive nothing. */
 		spi-cs-high;
 	};
+};
+
+/*
+ * DMA controller for SPI3 slave DMA (see the &spi3 dmas above). The base
+ * cv180x.dtsi gives it the generic snps,axi-dma-1.01a compatible, which lacks
+ * ARG0_AS_CHAN, so dw_axi_dma_of_xlate would take the apb_regs handshake path
+ * this SoC never wires up ("apb_regs not initialized"). sophgo,cv1800b-axi-dma
+ * sets ARG0_AS_CHAN, so of_xlate uses the channel the dmamux allocated. The
+ * dmamux (dma-router@154) lives in the always-on top syscon and is already live.
+ */
+&dmac {
+	compatible = "sophgo,cv1800b-axi-dma";
+	status = "okay";
 };
 
 /*

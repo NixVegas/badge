@@ -60,15 +60,16 @@ let
       # not spin on that.
       Restart = "on-failure";
       RestartSec = 1;
-      # SPI3 has no working slave DMA on this SoC, so each WS2812 frame is clocked
-      # out by a PIO FIFO-fill loop (see the spi3 node in the DTS). If the scheduler
-      # preempts that loop mid-frame the TX FIFO underruns, the SPI clock stalls past
-      # the WS2812 ~50us latch window, and a partial frame latches -> the ring
-      # flickers under I/O load. Paint at real-time priority (SCHED_FIFO) so other
-      # runnable work does not preempt the loop between FIFO writes. The painter
-      # sleeps ~33ms between 30fps frames, so it cannot starve the system, and RT
-      # throttling (95% default) is a further backstop. realtime I/O keeps its config
-      # re-read off the normal I/O queue.
+      # The WS2812 flicker under load came from PIO SPI: a hardirq preempting the
+      # FIFO-fill loop mid-frame let the TX FIFO underrun, the SPI clock stalled
+      # past the ~50us WS2812 latch window, and a partial frame latched. The DTS
+      # now feeds the FIFO by DMA (see the spi3 dmas / &dmac), which is the real
+      # fix -- the CPU no longer refills the FIFO, so preemption cannot underrun it,
+      # and offloading the transfer visibly frees the CPU under LED load. These RT
+      # knobs stay as a cheap backstop and to keep the ~33ms/frame painter and its
+      # config re-read off the normal scheduler/I/O queues; the painter sleeps
+      # between 30fps frames so it cannot starve the system (RT throttling at 95%
+      # is a further guard).
       CPUSchedulingPolicy = "fifo";
       CPUSchedulingPriority = 50;
       IOSchedulingClass = "realtime";
@@ -213,6 +214,17 @@ in
       "${pkg}/bin/nix-badge"
       configFile
     ];
+
+    # spi-dw-mmio and spidev are built into the kernel, but the DTS routes SPI3
+    # through the cv1800b dmamux for slave DMA, so dw_spi defers its probe until
+    # the DMA controller and the dmamux are present. Both are modules
+    # (CONFIG_DW_AXI_DMAC=m, CONFIG_SOPHGO_CV1800B_DMAMUX=m) that otherwise
+    # autoload only at ~t=94s -- long after this service's spidev wait -- so
+    # /dev/spidev3.0 would not exist in the initrd and the ring would stay dark
+    # until a manual restart. Force them into the initrd so dw_spi probes with DMA
+    # early: the ring lights from the initrd on, and the DMA offload keeps the
+    # whole system responsive under LED load.
+    boot.initrd.kernelModules = [ "dw_axi_dmac_platform" "cv1800b_dmamux" ];
 
     boot.initrd.systemd.services.nixbadge-leds = unit [ "initrd.target" ];
     systemd.services.nixbadge-leds = unit [ "sysinit.target" ];
