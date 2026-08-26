@@ -55,4 +55,10 @@ in
   # pubkey to users.users.badge.openssh.authorizedKeys) rather than relying on the
   # weak console password over the network.
   security.sudo.wheelNeedsPassword = false;
+
+  # deploy-rs pushes the closure with `nix copy` as the SSH user (badge), whose
+  # nix-daemon otherwise rejects the locally-built, unsigned paths with "lacks a
+  # signature by a trusted key". Trust the wheel group so the copy is accepted
+  # without needing the dev host's paths signed.
+  nix.settings.trusted-users = [ "@wheel" ];
 }
