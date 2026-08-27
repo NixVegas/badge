@@ -126,15 +126,15 @@
 };
 
 /*
- * SARADC for the battery + VBUS/VSEL voltage meter. The cv1800b-adc IIO driver
- * exposes in_voltage0/1/2 (scale 3300/4096 mV per LSB). On this carrier each of
- * the three channels is fed through a 2.2M/1M divider (x3.2), so a reading is
- * raw * scale * 3.2. Channel map:
- *   in_voltage0 = VSEL  (system rail, = VBUS through the TPS2116 mux; R16/R19)
- *   in_voltage1 = VBAT  (battery; R15 2.2M / R18 1M)
- *   in_voltage2 = J6    (external test point)
- * See modules/duo-s/power.nix (badge-voltages) for the userspace meter. The base
- * node (cv180x.dtsi) is status="disabled" with channel@0..2 already declared.
+ * SARADC for the battery + rail voltage meters. The cv1800b-adc IIO driver
+ * exposes in_voltage0/1/2 (scale 3300/4096 = ~0.8057 mV per LSB). Channel map:
+ *   in_voltage0 = VSEL  (system rail, = VBUS through the TPS2116 mux; R16/R19),
+ *                       2.2M/1M divider -> read via the vsel-divider rescale
+ *   in_voltage1 = VBAT  (battery; R15 2.2M / R18 1M), divider -> vbat-divider
+ *   in_voltage2 = J6    (user ADC test point, NO divider) -> read the base
+ *                       channel directly: in_voltage2_raw * in_voltage_scale
+ * VSEL/VBAT need the divider because they exceed the 3.3V input; J6 does not.
+ * The base node (cv180x.dtsi) is status="disabled" with channel@0..2 declared.
  */
 &saradc {
 	status = "okay";
@@ -156,12 +156,31 @@
  * CONFIG_GENERIC_ADC_BATTERY are =m).
  */
 / {
+	/* VSEL and VBAT exceed the ADC's 3.3V input range, so each goes through a
+	 * 2.2M/1M divider; an iio-rescale presents the true rail voltage in sysfs
+	 * (raw*scale = real mV, effective ~19.24 after the leaky ADC input) so
+	 * userspace needs no hardcoded factor. `label` surfaces at
+	 * /sys/bus/iio/devices/iio:deviceN/label. VBAT additionally feeds an
+	 * adc-battery below for the power_supply %/status interface; VSEL is the
+	 * system rail (VBUS through the TPS2116 mux). J6 is a direct user ADC input
+	 * with NO divider -- read it straight from SARADC channel 2 (in_voltage2_raw
+	 * * in_voltage_scale), no rescale. */
+	vsel_scaled: vsel-divider {
+		compatible = "voltage-divider";
+		io-channels = <&saradc 0>; /* VSEL = SARADC channel 0 */
+		#io-channel-cells = <1>;
+		output-ohms = <1000>;
+		full-ohms = <19240>;
+		label = "vsel";
+	};
+
 	vbat_scaled: vbat-divider {
 		compatible = "voltage-divider";
 		io-channels = <&saradc 1>; /* VBAT = SARADC channel 1 */
 		#io-channel-cells = <1>;
 		output-ohms = <1000>;
 		full-ohms = <19240>; /* 19240/1000 = 19.24 effective factor */
+		label = "vbat";
 	};
 
 	badge_battery: badge-battery {
