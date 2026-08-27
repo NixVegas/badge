@@ -123,9 +123,11 @@ pub fn readUptimeS() u64 {
 /// The battery view: VBAT big (from the power_supply node), a 3.0..4.2 V bar with
 /// the kernel percent, and a USB tag.
 pub fn battery(panel: *Panel, ctx: *const Context) u32 {
+    const w: i32 = panel.width;
+    const h: i32 = panel.height;
     panel.clear();
     panel.drawText(0, 0, "BATT");
-    if (ctx.on_usb == 1) panel.drawText(oled.width - 3 * glyph_w, 0, "USB");
+    if (ctx.on_usb == 1) panel.drawText(w - 3 * glyph_w, 0, "USB");
 
     var big_buf: [16]u8 = undefined;
     if (ctx.battery_mv) |mv| {
@@ -149,15 +151,16 @@ pub fn battery(panel: *Panel, ctx: *const Context) u32 {
         pct = @intFromFloat(frac * 100.0 + 0.5);
     }
 
-    panel.drawHbar(.{ .x = 0, .y = oled.height - 7, .w = oled.width - 24, .h = 7 }, frac);
+    panel.drawHbar(.{ .x = 0, .y = h - 7, .w = w - 24, .h = 7 }, frac);
     var pct_buf: [8]u8 = undefined;
     const pct_s = std.fmt.bufPrint(&pct_buf, "{d: >3}%", .{pct}) catch "  0%";
-    panel.drawText(oled.width - 22, oled.height - 7, pct_s);
+    panel.drawText(w - 22, h - 7, pct_s);
     return 500; // a slow meter; 2 Hz is plenty and light on I2C
 }
 
 /// The load view: 1/5-min loadavg, a CPU% bar, and a mem% bar.
 pub fn load(panel: *Panel, ctx: *const Context) u32 {
+    const w: i32 = panel.width;
     panel.clear();
 
     var l1: f64 = 0;
@@ -174,7 +177,7 @@ pub fn load(panel: *Panel, ctx: *const Context) u32 {
         std.fmt.bufPrint(&ut_buf, "{d}h", .{hours}) catch "0h"
     else
         std.fmt.bufPrint(&ut_buf, "{d}m", .{mins}) catch "0m";
-    const utx = oled.width - @as(i32, @intCast(ut.len)) * glyph_w;
+    const utx = w - @as(i32, @intCast(ut.len)) * glyph_w;
     panel.drawText(@max(utx, 0), 0, ut);
 
     const cpu_frac = @as(f64, @floatFromInt(ctx.cpu_pct)) / 100.0;
@@ -182,19 +185,19 @@ pub fn load(panel: *Panel, ctx: *const Context) u32 {
 
     // The two gauges share geometry: left of the label, right of the "NNN%" tag.
     const bar_x = 4 * glyph_w;
-    const bar_w = oled.width - 4 * glyph_w - 26;
+    const bar_w = w - 4 * glyph_w - 26;
 
     panel.drawText(0, 11, "CPU");
     panel.drawHbar(.{ .x = bar_x, .y = 10, .w = bar_w, .h = 8 }, cpu_frac);
     var cp_buf: [8]u8 = undefined;
     const cp = std.fmt.bufPrint(&cp_buf, "{d: >3}%", .{ctx.cpu_pct}) catch "  0%";
-    panel.drawText(oled.width - 22, 11, cp);
+    panel.drawText(w - 22, 11, cp);
 
     panel.drawText(0, 22, "MEM");
     panel.drawHbar(.{ .x = bar_x, .y = 21, .w = bar_w, .h = 8 }, mem_frac);
     var mp_buf: [8]u8 = undefined;
     const mp = std.fmt.bufPrint(&mp_buf, "{d: >3}%", .{ctx.mem_pct}) catch "  0%";
-    panel.drawText(oled.width - 22, 22, mp);
+    panel.drawText(w - 22, 22, mp);
     return 500;
 }
 
@@ -265,6 +268,8 @@ pub fn clock(panel: *Panel, ctx: *const Context) u32 {
     panel.drawText2x(0, 12, big);
 
     const secs_frac = @as(f64, @floatFromInt(s % 60)) / 60.0;
-    panel.drawHbar(.{ .x = 0, .y = oled.height - 5, .w = oled.width, .h = 5 }, secs_frac);
+    const w: i32 = panel.width;
+    const h: i32 = panel.height;
+    panel.drawHbar(.{ .x = 0, .y = h - 5, .w = w, .h = 5 }, secs_frac);
     return 250; // four blink samples a second
 }

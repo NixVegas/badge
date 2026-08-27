@@ -1,4 +1,4 @@
-# OLED "bling engine": the nix-badge `bling` daemon drives the SAO SSD1306 with
+# OLED "bling engine": the nix-badge `bling` daemon drives the SAO OLED with
 # Bad Apple (the default wake screen) plus battery/load/power/clock screens, and
 # cycles LED patterns on the USER button / SIGUSR1, OLED screens on a long press /
 # SIGUSR2.
@@ -8,8 +8,15 @@
 # flicker-free early-boot path) -- bling only rewrites /var/lib/nix-badge/leds.conf
 # to change the ring's pattern, and the painter hot-reloads it. So this service
 # does NOT touch spidev and cannot disturb the ring's boot animation.
-{ pkgs, lib, ... }:
+#
+# The panel is an OPTIONAL component with a configurable size (see the options
+# below): nixbadge.oled.enable gates the whole daemon (off = no OLED, no Bad
+# Apple blob in the closure; the ring still animates from leds.nix), and
+# width/height are passed to the runtime so a differently-sized 1-bit panel (a
+# Sharp Memory display, a 128x64 OLED) works without a code change.
+{ pkgs, lib, config, ... }:
 let
+  cfg = config.nixbadge.oled;
   nixBadge = import ../../pkgs/badge/nix-badge.nix { inherit pkgs; };
   # The Bad Apple blob is arch-independent DATA (a packed 1-bit frame file), but
   # producing it runs ffmpeg + a tiny C packer. Build those on the build host
@@ -19,26 +26,57 @@ let
   badApple = import ../../pkgs/badge/badapple { pkgs = pkgs.buildPackages; };
 in
 {
-  systemd.services.nixbadge-bling = {
-    description = "nixbadge OLED bling engine (Bad Apple + screens)";
-    wantedBy = [ "multi-user.target" ];
-    # The i2c-1 bus, the SARADC IIO device and /dev/gpiochip* (the USER button)
-    # are all up via udev well before multi-user; no explicit ordering needed
-    # beyond the default basic.target.
-    serviceConfig = {
-      # Runs as root: opens /dev/i2c-1 (0x3c), reads the SARADC sysfs for the
-      # battery/rail screens, reads /dev/gpiochip* for the USER button, and
-      # rewrites /var/lib/nix-badge/leds.conf to cycle the ring's pattern.
-      ExecStart = "${nixBadge}/bin/nix-badge bling --badapple ${badApple}/badapple.bin";
-      # bling exits 0 when the panel is absent (a core that does not mux the SAO
-      # i2c, so /dev/i2c-1 has nothing at 0x3c): that is a clean no-op, not a
-      # failure, so Restart=on-failure will not spin on such a core. A real fault
-      # (mid-run i2c error) exits nonzero and we retry.
-      Restart = "on-failure";
-      RestartSec = 2;
-      # Shared with the leds painter + the SARADC calibrate service; ensures
-      # /var/lib/nix-badge exists for the leds.conf rewrite.
-      StateDirectory = "nix-badge";
+  options.nixbadge.oled = {
+    enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Run the bling engine on the optional SAO OLED. When false the daemon is
+        not started and the Bad Apple frame blob is not built into the closure
+        (a badge assembled without the panel); the WS2812 ring still animates
+        from the leds.nix painter.
+      '';
+    };
+    width = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 128;
+      description = "OLED width in pixels (128 for the SSD1306).";
+    };
+    height = lib.mkOption {
+      # The SSD1306 driver's init parameterises multiplex + COM-pins for 32 or
+      # 64 rows only; a Sharp/other panel would extend this.
+      type = lib.types.enum [ 32 64 ];
+      default = 32;
+      description = "OLED height in pixels (32 or 64 rows).";
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    systemd.services.nixbadge-bling = {
+      description = "nixbadge OLED bling engine (Bad Apple + screens)";
+      wantedBy = [ "multi-user.target" ];
+      # The i2c-1 bus, the SARADC IIO device and the USER button are all up via
+      # udev well before multi-user; no ordering beyond basic.target is needed.
+      serviceConfig = {
+        # Runs as root: opens /dev/i2c-1 (0x3c), medians the SARADC sysfs for the
+        # battery/rail screens, reads the USER button, and rewrites
+        # /var/lib/nix-badge/leds.conf to cycle the ring's pattern.
+        ExecStart = lib.concatStringsSep " " [
+          "${nixBadge}/bin/nix-badge bling"
+          "--oled-width ${toString cfg.width}"
+          "--oled-height ${toString cfg.height}"
+          "--badapple ${badApple}/badapple.bin"
+        ];
+        # bling exits 0 when the panel is absent (a core that does not mux the SAO
+        # i2c, so /dev/i2c-1 has nothing at 0x3c): a clean no-op, not a failure,
+        # so Restart=on-failure will not spin on such a core. A real fault
+        # (mid-run i2c error) exits nonzero and we retry.
+        Restart = "on-failure";
+        RestartSec = 2;
+        # Shared with the leds painter; ensures /var/lib/nix-badge exists for the
+        # leds.conf rewrite.
+        StateDirectory = "nix-badge";
+      };
     };
   };
 }

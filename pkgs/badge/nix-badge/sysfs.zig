@@ -15,6 +15,33 @@ pub fn readU64(path: [*:0]const u8) ?u64 {
     return std.fmt.parseInt(u64, t, 10) catch null;
 }
 
+/// Insert `value` into the sorted prefix `buf[0..count]`, keeping it ascending.
+/// The caller passes `count` as the current filled length; the return value is the
+/// new length. A tiny insertion sort: N is fixed and small, so no allocator and no
+/// O(N log N) machinery is warranted (IronStyle: reach for std only when it fits —
+/// here the in-place insert into a running-sorted buffer is the simplest form).
+fn insertSorted(comptime T: type, buf: []T, count: usize, value: T) usize {
+    var j = count;
+    while (j > 0 and buf[j - 1] > value) : (j -= 1) buf[j] = buf[j - 1];
+    buf[j] = value;
+    return count + 1;
+}
+
+/// Median of `median_samples` reads of an unsigned sysfs integer. Same rationale
+/// as `medianRaw`: the value ultimately comes off the leaky SARADC (here through
+/// the kernel power_supply rescale), so single reads spike. Allocation-free, with
+/// a fixed stack buffer sorted by insertion. Returns null if nothing read.
+pub fn medianU64(path: [*:0]const u8) ?u64 {
+    var samples: [median_samples]u64 = undefined;
+    var count: usize = 0;
+    for (0..median_samples) |_| {
+        const v = readU64(path) orelse continue;
+        count = insertSorted(u64, &samples, count, v);
+    }
+    if (count == 0) return null;
+    return samples[count / 2];
+}
+
 /// Read a small sysfs file as a float (e.g. in_voltage_scale in mV/LSB).
 pub fn readF64(path: [*:0]const u8) ?f64 {
     var buf: [64]u8 = undefined;
@@ -223,6 +250,35 @@ pub fn readStrap() ?Core {
 const iio_root = "/sys/bus/iio/devices";
 const base_adc_name = "sophgo-cv1800b-adc";
 
+// The SARADC feeds every rail through a high-Z, leaky 2.2M/1M divider whose source
+// impedance the ADC's short sample window cannot fully settle, so a single-shot raw
+// read spikes badly (VSEL momentarily read 9 V on a ~5 V rail). We reject those the
+// way the original C tool did: read the channel many times and take the MEDIAN raw
+// count, which discards the occasional under-settled outlier while an average would
+// be dragged by it. N = 33: odd (a clean median at index N/2), well past the 25 the
+// C found marginal, and cheap — each read is a few us of sysfs I/O, so ~33 of them
+// is tens of us, negligible for the one-shot `power` CLI and the ~1-2 Hz meters.
+const median_samples = 33;
+
+/// Read `<dir>/in_voltage<ch>_raw` `median_samples` times and return the median
+/// raw count, or null when not one sample could be read. Allocation-free: the
+/// samples live in a fixed stack buffer, sorted in place with an insertion sort
+/// (N is tiny, so O(N^2) is fine and needs no allocator).
+fn medianRaw(dir: []const u8, channel: u32) ?i64 {
+    var path_buf: [96]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}/in_voltage{d}_raw", .{ dir, channel }) catch
+        return null;
+
+    var samples: [median_samples]i64 = undefined;
+    var count: usize = 0;
+    for (0..median_samples) |_| {
+        const raw = readF64(path) orelse continue;
+        count = insertSorted(i64, &samples, count, @intFromFloat(raw));
+    }
+    if (count == 0) return null;
+    return samples[count / 2];
+}
+
 /// Find the iio:deviceN directory whose `attr` file (name or label) contains
 /// `needle`, writing the directory path into `out`. Returns the slice or null.
 fn findIioDir(out: []u8, attr: []const u8, needle: []const u8) ?[]const u8 {
@@ -245,20 +301,17 @@ fn findIioDir(out: []u8, attr: []const u8, needle: []const u8) ?[]const u8 {
     return null;
 }
 
-/// millivolts = raw * scale, reading `<dir>/in_voltage<ch>_raw` and the scale
-/// file named `scale_attr` (per-channel for rescale devices, shared for the base
-/// SARADC). Returns volts, or null on any read fault.
+/// volts = median_raw * scale / 1000, taking the MEDIAN of `median_samples` raw
+/// reads (the leaky divider spikes single reads) and the scale from `scale_attr`
+/// (single read: it is a constant). Returns null on any read fault.
 fn channelVolts(dir: []const u8, channel: u32, scale_attr: []const u8) ?f64 {
-    var raw_buf: [96]u8 = undefined;
-    const raw_path = std.fmt.bufPrintZ(&raw_buf, "{s}/in_voltage{d}_raw", .{ dir, channel }) catch
-        return null;
+    const raw = medianRaw(dir, channel) orelse return null;
+    if (raw < 0) return null;
     var scale_buf: [96]u8 = undefined;
     const scale_path = std.fmt.bufPrintZ(&scale_buf, "{s}/{s}", .{ dir, scale_attr }) catch
         return null;
-    const raw = readF64(raw_path) orelse return null;
     const scale = readF64(scale_path) orelse return null;
-    if (raw < 0) return null;
-    return raw * scale / 1000.0;
+    return @as(f64, @floatFromInt(raw)) * scale / 1000.0;
 }
 
 /// The VSEL system rail in volts, via the vsel iio-rescale voltmeter, or null.
@@ -302,7 +355,9 @@ pub const Battery = struct {
 pub fn readBattery() Battery {
     var b: Battery = .{ .millivolts = null, .percent = null };
 
-    if (readU64(psu_dir ++ "/voltage_now")) |uv| {
+    // voltage_now (microvolts) rides the leaky SARADC through the kernel rescale,
+    // so median it; capacity/status are kernel-smoothed, so a single read is fine.
+    if (medianU64(psu_dir ++ "/voltage_now")) |uv| {
         b.millivolts = @intCast(uv / 1000);
     }
     if (readU64(psu_dir ++ "/capacity")) |cap| {
@@ -316,6 +371,29 @@ pub fn readBattery() Battery {
         b.status_len = n;
     }
     return b;
+}
+
+test "insertSorted keeps the buffer ascending as values arrive out of order" {
+    var buf: [8]i64 = undefined;
+    var count: usize = 0;
+    for ([_]i64{ 5, 1, 9, 3, 7 }) |v| count = insertSorted(i64, &buf, count, v);
+    try std.testing.expectEqual(@as(usize, 5), count);
+    try std.testing.expectEqualSlices(i64, &[_]i64{ 1, 3, 5, 7, 9 }, buf[0..count]);
+    // The median (middle element) is the settled value...
+    try std.testing.expectEqual(@as(i64, 5), buf[count / 2]);
+}
+
+test "median rejects a lone spike the way the leaky SARADC needs" {
+    // Simulate the failure mode: many ~320-count reads and one 640-count spike (a
+    // VSEL read jumping to ~2x). The median must stay at the settled value; a mean
+    // would be dragged upward by the outlier.
+    var buf: [median_samples]i64 = undefined;
+    var count: usize = 0;
+    for (0..median_samples) |i| {
+        const v: i64 = if (i == 3) 640 else 320; // one under-settled spike
+        count = insertSorted(i64, &buf, count, v);
+    }
+    try std.testing.expectEqual(@as(i64, 320), buf[count / 2]);
 }
 
 test "readBattery reports null millivolts when the node is absent" {

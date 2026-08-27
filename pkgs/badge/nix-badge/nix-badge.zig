@@ -95,7 +95,7 @@ const usage_text =
     \\  nix-badge leds show
     \\  nix-badge core <arm|riscv|status>
     \\  nix-badge power
-    \\  nix-badge bling [--badapple PATH]
+    \\  nix-badge bling [--badapple PATH] [--oled-width W] [--oled-height H]
     \\  nix-badge mmio <read ADDR | write ADDR VALUE>
     \\
     \\patterns: off solid pulse rainbow chase
@@ -858,29 +858,64 @@ fn blingWait(want_ms: u32, button: ?sysfs.Button, press: *PressState) void {
     }
 }
 
-fn cmdBling(args: []const []const u8) CmdError!void {
+fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     var badapple_path: ?[]const u8 = null;
+    var oled_width: u16 = oled.default_width;
+    var oled_height: u16 = oled.default_height;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (optArg(args, &i, "--badapple")) |v| {
             badapple_path = v;
+        } else if (optArg(args, &i, "--oled-width")) |v| {
+            oled_width = std.fmt.parseInt(u16, v, 10) catch {
+                std.log.err("bling: bad --oled-width '{s}'", .{v});
+                return error.Usage;
+            };
+        } else if (optArg(args, &i, "--oled-height")) |v| {
+            oled_height = std.fmt.parseInt(u16, v, 10) catch {
+                std.log.err("bling: bad --oled-height '{s}'", .{v});
+                return error.Usage;
+            };
         } else {
             std.log.err("bling: unknown argument '{s}'", .{args[i]});
             return error.Usage;
         }
     }
 
-    // Load the clip first so badapple can lead the registry. An invalid or missing
-    // asset just leaves it out; the badge still works.
+    // The panel is optional hardware; open it first so its geometry is known before
+    // we decide whether a baked clip fits. A missing bus / bad size / OOM all mean
+    // "no panel" and we exit 0 (like the C) so systemd does not respin us.
+    var panel = oled.Panel.open(gpa, oled_width, oled_height) orelse {
+        std.log.warn("bling: no OLED panel, nothing to do", .{});
+        return;
+    };
+    defer panel.close();
+    panel.init() catch {
+        std.log.err("bling: SSD1306 init failed", .{});
+        return;
+    };
+
+    // Load the clip and check it matches the panel geometry; badapple leads the
+    // registry only when it loads AND its baked size equals the panel's, since a
+    // differently-sized frame would blit the wrong number of bytes. A mismatch or a
+    // bad asset just leaves it out; the meters still run.
     var clip: ?badapple.Clip = null;
     if (badapple_path) |path| {
         var path_buf: [512]u8 = undefined;
         if (std.fmt.bufPrintZ(&path_buf, "{s}", .{path})) |zpath| {
             if (badapple.load(zpath)) |c| {
-                clip = c;
-                std.log.info("badapple: {s}, {d}x{d}, {d} fps, {d} frames", .{
-                    path, c.width, c.height, c.fps, c.frames,
-                });
+                if (c.width == panel.width and c.height == panel.height) {
+                    clip = c;
+                    std.log.info("badapple: {s}, {d}x{d}, {d} fps, {d} frames", .{
+                        path, c.width, c.height, c.fps, c.frames,
+                    });
+                } else {
+                    std.log.warn("badapple: {s} is {d}x{d} but panel is {d}x{d}; skipping", .{
+                        path, c.width, c.height, panel.width, panel.height,
+                    });
+                    var mismatched = c; // release the mapping we will not play
+                    mismatched.deinit();
+                }
             } else |err| {
                 std.log.warn("badapple: {s}: {s}", .{ path, @errorName(err) });
             }
@@ -904,16 +939,6 @@ fn cmdBling(args: []const []const u8) CmdError!void {
     registry[n] = .{ .name = "clock", .render = screens.clock };
     n += 1;
     const active_screens = registry[0..n];
-
-    var panel = oled.Panel.open() orelse {
-        std.log.warn("bling: no OLED panel, nothing to do", .{});
-        return; // non-fatal, like the C: exit 0 so systemd does not respin
-    };
-    defer panel.close();
-    panel.init() catch {
-        std.log.err("bling: SSD1306 init failed", .{});
-        return;
-    };
 
     installHandler(.TERM, onStop);
     installHandler(.INT, onStop);
@@ -998,7 +1023,7 @@ pub fn main(init: std.process.Init) !void {
     else if (std.mem.eql(u8, cmd, "power"))
         cmdPower(&out)
     else if (std.mem.eql(u8, cmd, "bling"))
-        cmdBling(rest)
+        cmdBling(gpa, rest)
     else if (std.mem.eql(u8, cmd, "mmio"))
         cmdMmio(&out, rest)
     else
