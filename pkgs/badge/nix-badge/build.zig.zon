@@ -1,0 +1,20 @@
+.{
+    .name = .nix_badge,
+    .version = "0.1.0",
+    .fingerprint = 0xa7816e666915eda4,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "nix-badge.zig",
+        "linux.zig",
+        "ws2812.zig",
+        "config.zig",
+        "oled.zig",
+        "oled/font.zig",
+        "sysfs.zig",
+        "badapple.zig",
+        "screens.zig",
+    },
+    .dependencies = .{},
+}

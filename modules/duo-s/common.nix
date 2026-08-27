@@ -2,10 +2,6 @@
 # Everything here is identical whether the ARM (aarch64) or RISC-V (riscv64)
 # large core boots. Nothing arch-specific belongs in this file.
 { pkgs, lib, ... }:
-let
-  # The badge control tool, reused here for the on-boot SARADC auto-calibration.
-  nixBadge = import ../../pkgs/badge/nix-badge.nix { inherit pkgs; };
-in
 {
   networking.hostName = "nixbadge-duos";
 
@@ -67,22 +63,11 @@ in
     wants = [ "systemd-growfs-root.service" ];
   };
 
-  # Auto-calibrate the SARADC rail factor against the ~5V USB VBUS on boot. When
-  # power is plugged, VSEL is the known 5V rail (through the TPS2116 mux), so
-  # nix-badge derives this badge's factor from it -- absorbing divider tolerance
-  # and ADC leakage without a per-badge DMM step. A no-op on battery (VBUS
-  # absent), which keeps the last USB-calibrated factor. The rail read is a leaky,
-  # noisy ADC (see nix-badge saradc_calibrate), so this is a software correction.
-  systemd.services.nixbadge-saradc-calibrate = {
-    wantedBy = [ "multi-user.target" ];
-    after = [ "systemd-tmpfiles-setup.service" ];
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      ExecStart = "${nixBadge}/bin/nix-badge power calibrate";
-      SuccessExitStatus = "0 1"; # 1 = VBUS absent (battery boot), a normal no-op
-    };
-  };
+  # (The SARADC auto-calibration service was removed with the Zig rewrite: the
+  # tool no longer does userspace calibration -- it reads battery + rails straight
+  # from the kernel sysfs power_supply + iio-rescale meters (VSEL/VBAT dividers,
+  # J6 direct), which are kernel-scaled, so there is no per-badge factor to
+  # calibrate. See pkgs/badge/nix-badge/ and the &saradc dtsi nodes.)
 
   # /dev/gpiochip* default to root-only (crw------- root), so nix-badge power's
   # VBUS-present + fault reads via the GPIO uAPI only work as root. The boot
