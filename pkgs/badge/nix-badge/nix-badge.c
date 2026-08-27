@@ -2294,6 +2294,531 @@ static int cmd_oled(int argc, char **argv)
 	return 2;
 }
 
+// ================================================================== bling ===
+//
+// The "bling engine" is a second OLED runtime that supersedes `oled run`. It
+// keeps ONE render model: a screen is a pure function of a snapshot context
+// (struct badge_ctx) that the loop gathers once per frame. A screen paints
+// oled_fb (via oled_clear + the draw_* helpers, or a raw memcpy for baked
+// frames) and RETURNS the number of ms until it wants to run again -- its own
+// frame-rate hint. That lets a static meter idle at 2 Hz while Bad Apple runs
+// at its baked fps, all under one loop.
+//
+// Controls are shared with the LED painter: the USER button and SIGUSR1/2 both
+// advance either the OLED screen or the LED pattern, and the LED change is made
+// by rewriting RUNTIME_CONF so the running `leds run` service hot-reloads it.
+// So one button on the badge cycles both the panel and the ring.
+
+// Snapshot the loop hands each screen. Gathered once per frame so a screen is a
+// pure function of it -- no screen re-scans /proc or the ADC mid-render unless
+// it chooses to (the folded-in views still do, which is fine at these rates).
+struct badge_ctx {
+	uint64_t now_ms; // CLOCK_MONOTONIC in ms, the animation time base
+	int battery_mv; // -1 if unavailable
+	int battery_pct; // 0..100, -1 if unknown
+	int on_usb; // 1 if VBUS present, 0 if not, -1 unknown
+	double load1; // 1-min loadavg
+	int cpu_pct; // 0..100, diff of two /proc/stat samples across frames
+	int mem_pct; // 0..100
+	uint64_t uptime_s;
+};
+
+// A screen renders into oled_fb and returns its own desired ms-until-next-call.
+typedef uint32_t (*screen_fn)(const struct badge_ctx *ctx);
+struct screen {
+	const char *name;
+	screen_fn render;
+};
+
+// -------------------------------------------------------- bling: bad apple ---
+//
+// A baked frame blob. The header is little-endian: magic 'BADA', u16 width, u16
+// height, u16 fps, u16 flags, u32 frame_count, then frame_count * 512-byte
+// frames in the SAME SSD1306 page-major layout as oled_fb, so a frame streams
+// to the panel with a plain memcpy. Loaded via mmap so a long clip costs no
+// heap and pages in on demand. When no valid blob is supplied the screen is not
+// registered at all, so the badge still works without the asset.
+#define BADAPPLE_MAGIC "BADA"
+#define BADAPPLE_HDR_LEN 16
+static const uint8_t *badapple_base; // mmap of the whole file, or NULL
+static size_t badapple_maplen;
+static uint32_t badapple_fps;
+static uint32_t badapple_frames;
+
+// Read a little-endian u16/u32 from a byte pointer without assuming host
+// endianness or alignment.
+static uint16_t rd_le16(const uint8_t *p)
+{
+	return (uint16_t)(p[0] | (p[1] << 8));
+}
+static uint32_t rd_le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+	       ((uint32_t)p[3] << 24);
+}
+
+// Open, validate and mmap a Bad Apple blob. Returns 0 and populates the
+// badapple_* globals on success; -1 (with a message) on any problem, in which
+// case the screen stays unregistered. Validation is strict: bad magic, a
+// truncated header, zero frames, or a file too short for its claimed frame
+// count all disqualify it, because a partial memcpy would smear the panel.
+static int badapple_load(const char *path)
+{
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "nix-badge: badapple: cannot open %s: %s\n", path,
+			strerror(errno));
+		return -1;
+	}
+	struct stat st;
+	if (fstat(fd, &st) != 0 || (size_t)st.st_size < BADAPPLE_HDR_LEN) {
+		fprintf(stderr, "nix-badge: badapple: %s too small for a header\n",
+			path);
+		close(fd);
+		return -1;
+	}
+	size_t len = (size_t)st.st_size;
+	const uint8_t *base = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd); // the mapping keeps the file alive; the fd is no longer needed
+	if (base == MAP_FAILED) {
+		fprintf(stderr, "nix-badge: badapple: mmap %s: %s\n", path,
+			strerror(errno));
+		return -1;
+	}
+	if (memcmp(base, BADAPPLE_MAGIC, 4) != 0) {
+		fprintf(stderr, "nix-badge: badapple: %s has no BADA magic\n", path);
+		munmap((void *)base, len);
+		return -1;
+	}
+	uint32_t fps = rd_le16(base + 8);
+	uint32_t frames = rd_le32(base + 12);
+	// Every frame is exactly OLED_FBLEN bytes; reject a file that cannot hold
+	// the frame count it claims, so the render memcpy can never run off the end.
+	if (fps == 0 || frames == 0 ||
+	    len < (size_t)BADAPPLE_HDR_LEN + (size_t)frames * OLED_FBLEN) {
+		fprintf(stderr,
+			"nix-badge: badapple: %s header inconsistent (fps %u, "
+			"frames %u, %zu bytes)\n",
+			path, fps, frames, len);
+		munmap((void *)base, len);
+		return -1;
+	}
+	badapple_base = base;
+	badapple_maplen = len;
+	badapple_fps = fps;
+	badapple_frames = frames;
+	fprintf(stderr, "nix-badge: badapple: %s, %ux%u, %u fps, %u frames\n", path,
+		rd_le16(base + 4), rd_le16(base + 6), fps, frames);
+	return 0;
+}
+
+// Play the baked blob on the animation clock: pick the frame the current time
+// lands on and blit it straight to oled_fb. Returns the per-frame period so the
+// loop paces it at the baked fps.
+static uint32_t screen_badapple(const struct badge_ctx *ctx)
+{
+	uint32_t idx = (uint32_t)((ctx->now_ms * badapple_fps / 1000) %
+				  badapple_frames);
+	memcpy(oled_fb, badapple_base + BADAPPLE_HDR_LEN + (size_t)idx * OLED_FBLEN,
+	       OLED_FBLEN);
+	uint32_t ms = 1000u / badapple_fps;
+	return ms ? ms : 1u; // never return 0, that would busy-spin the loop
+}
+
+// ---------------------------------------------------------- bling: screens ---
+//
+// The meter screens fold in the existing oled_view_* painters so their look and
+// self-calibration match `oled run` and `power` exactly. load needs the CPU
+// delta, which the loop tracks in ctx, so it hands ctx->cpu_pct through rather
+// than recomputing it here.
+
+static uint32_t screen_battery(const struct badge_ctx *ctx)
+{
+	(void)ctx; // the view re-reads VBAT/VBUS itself, same as `oled run`
+	oled_view_battery();
+	return 500; // a slow meter; 2 Hz is plenty and light on I2C
+}
+
+static uint32_t screen_load(const struct badge_ctx *ctx)
+{
+	// Reuse the loop's rolling CPU delta (a single sample is meaningless), and
+	// read mem fresh -- it is instantaneous. mem_pct is also in ctx but the
+	// view takes a fraction, so pass the same number back as a fraction.
+	oled_view_load(ctx->cpu_pct / 100.0, ctx->mem_pct / 100.0);
+	return 500;
+}
+
+static uint32_t screen_power(const struct badge_ctx *ctx)
+{
+	(void)ctx; // the view re-reads the rails/faults itself
+	oled_view_power();
+	return 750; // rails move slowly; a slower refresh keeps the ADC quiet
+}
+
+// Uptime clock: Dd HH:MM:SS drawn big, with the colon blinking at 1 Hz off the
+// animation clock so the panel visibly ticks. Returns 250 ms so the blink has
+// four samples a second and never looks stuttery.
+static uint32_t screen_clock(const struct badge_ctx *ctx)
+{
+	oled_clear();
+	oled_draw_text(0, 0, "UPTIME");
+
+	uint64_t s = ctx->uptime_s;
+	// Clamp days to 3 digits so the big string is bounded (the panel only fits
+	// so much anyway); a bogus /proc/uptime cannot overrun the buffer.
+	unsigned days = (unsigned)(s / 86400);
+	if (days > 999)
+		days = 999;
+	unsigned hh = (unsigned)((s % 86400) / 3600);
+	unsigned mm = (unsigned)((s % 3600) / 60);
+	unsigned ss = (unsigned)(s % 60);
+
+	// Blink the colons: on for the first half of each second, off for the
+	// second half. now_ms % 1000 < 500 is the 1 Hz square wave.
+	int colon = (ctx->now_ms % 1000) < 500;
+	char sep = colon ? ':' : ' ';
+
+	char big[24];
+	if (days > 0)
+		snprintf(big, sizeof(big), "%ud%02u%c%02u", days, hh, sep, mm);
+	else
+		snprintf(big, sizeof(big), "%02u%c%02u%c%02u", hh, sep, mm, sep,
+			 ss);
+	oled_draw_text_2x(0, 12, big);
+
+	// A seconds progress bar along the bottom, a second read on the tick.
+	oled_draw_hbar(0, OLED_H - 5, OLED_W, 5, (s % 60) / 60.0);
+	return 250;
+}
+
+// The registry. badapple is registered FIRST (and so is the default screen)
+// only when a valid blob loaded; otherwise the meters lead. Order here is the
+// cycle order the button/SIGUSR2 walk.
+static struct screen screens[8];
+static int n_screens;
+
+// Build the screen table, putting badapple first when it is available so it is
+// the default. Kept out of cmd_bling so the ordering rule lives in one place.
+static void screens_init(void)
+{
+	n_screens = 0;
+	if (badapple_base)
+		screens[n_screens++] =
+			(struct screen){ "badapple", screen_badapple };
+	screens[n_screens++] = (struct screen){ "battery", screen_battery };
+	screens[n_screens++] = (struct screen){ "load", screen_load };
+	screens[n_screens++] = (struct screen){ "power", screen_power };
+	screens[n_screens++] = (struct screen){ "clock", screen_clock };
+}
+
+// ------------------------------------------------------- bling: leds.conf ---
+//
+// "Next LED pattern" advances the `pattern =` value in RUNTIME_CONF and leaves
+// every other line untouched, so the running `leds run` service hot-reloads
+// just the pattern on its next tick. We skip index 0 ("off") when cycling so a
+// button press never blanks the ring -- to turn the LEDs off you use
+// `leds set --pattern off` on purpose, the same as before.
+
+// Read the current pattern name from RUNTIME_CONF, or the first non-off pattern
+// when the file or key is absent. Returns an index into pattern_names[].
+static int leds_current_pattern(void)
+{
+	struct config c;
+	config_defaults(&c);
+	// config_load applies `pattern =` through apply_kv, so this reuses the
+	// exact same parse the service uses; a missing file just keeps the default.
+	if (config_load(&c, RUNTIME_CONF, 0) != 0)
+		return PAT_SOLID; // no runtime file yet: start at the first non-off
+	return (int)c.pattern;
+}
+
+// Advance RUNTIME_CONF's pattern to the next name in pattern_names[], wrapping
+// and skipping index 0 ("off"). All other keys/lines are preserved by copying
+// the file line by line and rewriting only the pattern line (appending one if
+// none exists). Creates the file with just the pattern when it is absent.
+static void leds_next_pattern(void)
+{
+	// Count the real (non-NULL) pattern names once.
+	int npat = 0;
+	while (pattern_names[npat])
+		npat++;
+
+	int cur = leds_current_pattern();
+	int next = cur + 1;
+	if (next >= npat)
+		next = 0;
+	if (next == PAT_OFF) // skip "off" so cycling never lands on a dark ring
+		next = PAT_OFF + 1;
+	const char *want = pattern_names[next];
+
+	if (mkdir(RUNTIME_DIR, 0755) != 0 && errno != EEXIST) {
+		fprintf(stderr, "nix-badge: bling: cannot create %s: %s\n",
+			RUNTIME_DIR, strerror(errno));
+		return;
+	}
+
+	// Copy the existing file into memory, replacing the pattern line, so all
+	// other keys survive. A modest cap is fine: this file is a handful of
+	// short key = value lines.
+	char lines[64][256];
+	int nlines = 0, replaced = 0;
+	FILE *in = fopen(RUNTIME_CONF, "r");
+	if (in) {
+		char line[256];
+		while (nlines < 64 && fgets(line, sizeof(line), in)) {
+			// Detect a "pattern =" line the same loose way apply_kv keys
+			// are matched: skip leading blanks, compare the trimmed key.
+			char *p = line;
+			while (*p == ' ' || *p == '\t')
+				p++;
+			int is_pattern = 0;
+			if (strncmp(p, "pattern", 7) == 0) {
+				const char *q = p + 7;
+				while (*q == ' ' || *q == '\t')
+					q++;
+				if (*q == '=')
+					is_pattern = 1;
+			}
+			if (is_pattern) {
+				snprintf(lines[nlines], sizeof(lines[nlines]),
+					 "pattern = %s\n", want);
+				replaced = 1;
+			} else {
+				snprintf(lines[nlines], sizeof(lines[nlines]), "%s",
+					 line);
+			}
+			nlines++;
+		}
+		fclose(in);
+	}
+
+	FILE *out = fopen(RUNTIME_CONF, "w");
+	if (!out) {
+		fprintf(stderr, "nix-badge: bling: cannot write %s: %s\n",
+			RUNTIME_CONF, strerror(errno));
+		return;
+	}
+	if (nlines == 0) {
+		// Fresh file: just the pattern, which is a valid minimal config.
+		fprintf(out, "pattern = %s\n", want);
+	} else {
+		for (int i = 0; i < nlines; i++)
+			fputs(lines[i], out);
+		if (!replaced) // no pattern line existed: append one, keep the rest
+			fprintf(out, "pattern = %s\n", want);
+	}
+	fclose(out);
+	fprintf(stderr, "nix-badge: bling: LED pattern -> %s\n", want);
+}
+
+// --------------------------------------------------------- bling: signals ---
+//
+// SIGUSR1 = next LED pattern, SIGUSR2 = next OLED screen. The handlers only set
+// atomic flags; the loop acts on them between frames AND the wait polls them, so
+// a signal breaks the frame sleep and the change feels instant. SIGTERM/SIGINT
+// reuse the shared on_signal/stop_requested path so a clean exit blanks the
+// panel like `oled run`.
+static volatile sig_atomic_t want_next_pattern;
+static volatile sig_atomic_t want_next_screen;
+
+static void on_bling_signal(int sig)
+{
+	if (sig == SIGUSR1)
+		want_next_pattern = 1;
+	else if (sig == SIGUSR2)
+		want_next_screen = 1;
+}
+
+// ------------------------------------------------------------- bling: loop ---
+
+// Gather the per-frame context: the animation clock, battery/USB off the SARADC
+// + VBUS GPIO (mirroring cmd_power/oled_view_battery, with the same opportunistic
+// self-calibration), and cpu/mem/load/uptime off the /proc readers. cpu_pct is a
+// delta, so the previous jiffy sample is passed in and updated.
+static void bling_gather(struct badge_ctx *ctx, unsigned long long *busy_prev,
+			 unsigned long long *idle_prev)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	ctx->now_ms = (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
+
+	// Self-calibrate off VBUS the same way the meters do: idempotent no-op once
+	// a factor is stored or on battery, so it is safe to call every frame.
+	saradc_calibrate(0, 1);
+
+	ctx->on_usb = gpio_read_line("usb-vbus-det");
+
+	// Battery voltage in mV and a rough linear %; -1 when the ADC is absent.
+	ctx->battery_mv = -1;
+	ctx->battery_pct = -1;
+	char dir[64];
+	double scale;
+	if (oled_adc_setup(dir, sizeof(dir), &scale) == 0) {
+		double v = oled_rail_volts(dir, scale, 1); // VBAT is channel 1
+		if (v >= 0.0) {
+			ctx->battery_mv = (int)(v * 1000.0 + 0.5);
+			// Rough Li-ion map: 3.0 V empty .. 4.2 V full, clamped. Not a
+			// real fuel gauge, just a HUD hint, same as oled_view_battery.
+			double frac = (v - 3.0) / (4.2 - 3.0);
+			if (frac < 0.0)
+				frac = 0.0;
+			if (frac > 1.0)
+				frac = 1.0;
+			ctx->battery_pct = (int)(frac * 100.0 + 0.5);
+		}
+	}
+
+	// CPU utilisation is a delta between two /proc/stat samples across frames.
+	unsigned long long busy = 0, idle = 0;
+	read_cpu_jiffies(&busy, &idle);
+	unsigned long long dbusy = busy - *busy_prev;
+	unsigned long long dtot = dbusy + (idle - *idle_prev);
+	ctx->cpu_pct = dtot ? (int)(dbusy * 100 / dtot) : 0;
+	*busy_prev = busy;
+	*idle_prev = idle;
+
+	double l1 = 0, l5 = 0, l15 = 0;
+	read_loadavg(&l1, &l5, &l15);
+	ctx->load1 = l1;
+	ctx->mem_pct = (int)(read_mem_used_frac() * 100.0 + 0.5);
+	ctx->uptime_s = read_uptime_s();
+}
+
+// Sleep up to want_ms, but wake early on a pending stop/pattern/screen signal
+// flag or a fresh USER-button press, so screen and pattern switches feel
+// instant. We poll in ~20 ms slices: each slice checks the flags, then debounces
+// the button, measuring a press-hold so short vs long presses can be told apart
+// on release. Short (<400 ms) advances the LED pattern, long (>=400 ms) the OLED
+// screen. Sets the same want_next_* flags the signal handlers use, so the caller
+// has one place to act on a change.
+#define BLING_POLL_MS 20
+#define BLING_LONGPRESS_MS 400
+static void bling_wait(uint32_t want_ms, int *btn_prev, uint64_t *press_start_ms)
+{
+	uint64_t waited = 0;
+	while (waited < want_ms) {
+		if (stop_requested || want_next_pattern || want_next_screen)
+			return; // a change is pending; act on it now, do not sleep on
+
+		int btn = gpio_read_line("btn-boot-n"); // active-low: 0 = pressed
+		struct timespec t;
+		clock_gettime(CLOCK_MONOTONIC, &t);
+		uint64_t now_ms =
+			(uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
+
+		if (btn == 0 && *btn_prev == 1) {
+			// Falling edge: press began. Record when, decide on release.
+			*press_start_ms = now_ms;
+		} else if (btn == 1 && *btn_prev == 0) {
+			// Rising edge: released. Hold duration picks the action.
+			uint64_t held = now_ms - *press_start_ms;
+			if (held >= BLING_LONGPRESS_MS)
+				want_next_screen = 1;
+			else
+				want_next_pattern = 1;
+		}
+		if (btn >= 0)
+			*btn_prev = btn;
+
+		uint32_t slice = (uint32_t)(want_ms - waited);
+		if (slice > BLING_POLL_MS)
+			slice = BLING_POLL_MS;
+		struct timespec ts = { .tv_sec = 0,
+				       .tv_nsec = (long)slice * 1000000L };
+		nanosleep(&ts, NULL);
+		waited += slice;
+	}
+}
+
+static int cmd_bling(int argc, char **argv)
+{
+	const char *badapple_path = NULL;
+	for (int i = 0; i < argc; i++) {
+		if (strcmp(argv[i], "--badapple") == 0 && i + 1 < argc)
+			badapple_path = argv[++i];
+		else
+			die("bling: unknown argument '%s'", argv[i]);
+	}
+
+	// Try the blob first so badapple can be the default screen. An invalid or
+	// missing asset just leaves the screen unregistered; the badge still works.
+	if (badapple_path)
+		badapple_load(badapple_path);
+	screens_init();
+
+	int fd = oled_open();
+	if (fd < 0) {
+		// A core without the SAO mux has no panel. Non-fatal, exactly like
+		// cmd_oled_run's caller expects: exit 0 so systemd does not respin.
+		fprintf(stderr, "nix-badge: bling: no OLED panel, nothing to do\n");
+		return 0;
+	}
+	if (oled_init(fd) != 0) {
+		fprintf(stderr, "nix-badge: bling: SSD1306 init failed: %s\n",
+			strerror(errno));
+		close(fd);
+		return 0;
+	}
+
+	// SIGTERM/SIGINT stop (shared on_signal/stop_requested); SIGUSR1/2 request
+	// the next pattern/screen. All installed with an empty mask so a handler is
+	// not itself interrupted mid-flag-set.
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = on_signal;
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGINT, &sa, NULL);
+	sa.sa_handler = on_bling_signal;
+	sigaction(SIGUSR1, &sa, NULL);
+	sigaction(SIGUSR2, &sa, NULL);
+
+	fprintf(stderr, "nix-badge: bling up on %s @ 0x%02x, %d screens, first %s\n",
+		OLED_I2C_BUS, OLED_I2C_ADDR, n_screens, screens[0].name);
+
+	int screen_ix = 0;
+
+	// USER button state carried across wait() calls: released to start, no
+	// press in progress. CPU delta state for the load screen.
+	int btn_prev = 1;
+	uint64_t press_start_ms = 0;
+	unsigned long long busy_prev = 0, idle_prev = 0;
+	read_cpu_jiffies(&busy_prev, &idle_prev);
+
+	while (!stop_requested) {
+		struct badge_ctx ctx;
+		bling_gather(&ctx, &busy_prev, &idle_prev);
+
+		uint32_t want_ms = screens[screen_ix].render(&ctx);
+		if (oled_flush(fd) != 0)
+			fprintf(stderr, "nix-badge: bling: flush failed: %s\n",
+				strerror(errno));
+
+		// Interruptible frame wait: wakes early on a signal flag or button.
+		bling_wait(want_ms, &btn_prev, &press_start_ms);
+
+		// Act on any change the wait or a signal queued. Pattern first, so a
+		// simultaneous pattern+screen request still applies both.
+		if (want_next_pattern) {
+			want_next_pattern = 0;
+			leds_next_pattern();
+		}
+		if (want_next_screen) {
+			want_next_screen = 0;
+			screen_ix = (screen_ix + 1) % n_screens;
+			fprintf(stderr, "nix-badge: bling: screen -> %s\n",
+				screens[screen_ix].name);
+		}
+	}
+
+	// Blank the panel on a clean stop, same as `oled run`, so a restart
+	// repaints from a known state. Drop the blob mapping too for tidiness.
+	oled_blank_off(fd);
+	close(fd);
+	if (badapple_base)
+		munmap((void *)badapple_base, badapple_maplen);
+	return 0;
+}
+
 // =================================================================== main ===
 
 static void usage(void)
@@ -2308,6 +2833,7 @@ static void usage(void)
 		"  nix-badge core <arm|riscv|status>\n"
 		"  nix-badge power [calibrate]\n"
 		"  nix-badge oled <run|off>\n"
+		"  nix-badge bling [--badapple PATH]\n"
 		"  nix-badge mmio <read ADDR | write ADDR VALUE>\n"
 		"\n"
 		"patterns: off solid pulse rainbow chase\n");
@@ -2388,6 +2914,8 @@ int main(int argc, char **argv)
 		return cmd_power(argc - 2, argv + 2);
 	if (strcmp(argv[1], "oled") == 0)
 		return cmd_oled(argc - 2, argv + 2);
+	if (strcmp(argv[1], "bling") == 0)
+		return cmd_bling(argc - 2, argv + 2);
 	if (strcmp(argv[1], "mmio") == 0)
 		return cmd_mmio(argc - 2, argv + 2);
 	usage();
