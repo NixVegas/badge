@@ -1381,8 +1381,56 @@ static int saradc_median_raw(const char *dir, int ch)
 	return s[n / 2];
 }
 
+// Auto-calibrate the rail factor against the known ~5V USB VBUS. When power is
+// plugged, VSEL is the 5V USB rail through the TPS2116 mux -- a roughly known
+// quantity -- so with VBUS detected we pin factor = 5000mV / (VSEL_raw * scale),
+// absorbing this badge's divider tolerance and ADC leakage without a per-badge
+// DMM step. VSEL and VBAT share the divider, so the same factor calibrates the
+// battery read. No-op (keeps the stored factor) when VBUS is absent: on battery
+// there is no known reference, so the last USB-calibrated factor is reused.
+#define SARADC_VBUS_NOMINAL_MV 5000.0
+static int saradc_calibrate(void)
+{
+	int vbus = gpio_read_line("usb-vbus-det");
+	if (vbus != 1) {
+		fprintf(stderr, "calibrate: USB VBUS %s; no 5V reference, "
+				"factor unchanged\n",
+			vbus < 0 ? "unknown" : "absent");
+		return 1;
+	}
+	char dir[64], sp[96];
+	double scale;
+	if (saradc_dir(dir, sizeof(dir)) != 0) {
+		fprintf(stderr, "calibrate: no SARADC device\n");
+		return 1;
+	}
+	snprintf(sp, sizeof(sp), "%s/in_voltage_scale", dir);
+	if (read_sysfs_double(sp, &scale) != 0) {
+		fprintf(stderr, "calibrate: cannot read %s\n", sp);
+		return 1;
+	}
+	int raw = saradc_median_raw(dir, 0); // VSEL is channel 0
+	if (raw <= 0) {
+		fprintf(stderr, "calibrate: bad VSEL raw (%d)\n", raw);
+		return 1;
+	}
+	double factor = SARADC_VBUS_NOMINAL_MV / (raw * scale);
+	FILE *f = fopen("/var/lib/nix-badge/saradc-factor", "w");
+	if (!f) {
+		perror("calibrate: /var/lib/nix-badge/saradc-factor");
+		return 1;
+	}
+	fprintf(f, "%.4f\n", factor);
+	fclose(f);
+	printf("calibrated: VSEL raw %d @ %.0f mV VBUS -> factor %.4f\n", raw,
+	       SARADC_VBUS_NOMINAL_MV, factor);
+	return 0;
+}
+
 static int cmd_power(int argc, char **argv)
 {
+	if (argc >= 1 && strcmp(argv[0], "calibrate") == 0)
+		return saradc_calibrate();
 	(void)argc;
 	(void)argv;
 
@@ -1453,7 +1501,7 @@ static void usage(void)
 		"        [--color '#rrggbb' ...]\n"
 		"  nix-badge leds show\n"
 		"  nix-badge core <arm|riscv|status>\n"
-		"  nix-badge power\n"
+		"  nix-badge power [calibrate]\n"
 		"\n"
 		"patterns: off solid pulse rainbow chase\n");
 }
