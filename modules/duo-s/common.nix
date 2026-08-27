@@ -84,6 +84,18 @@ in
     };
   };
 
+  # /dev/gpiochip* default to root-only (crw------- root), so nix-badge power's
+  # VBUS-present + fault reads via the GPIO uAPI only work as root. The boot
+  # SARADC calibrate runs as root so it succeeds, but the badge user's
+  # `nix-badge power` then shows every GPIO line as "unknown". The badge user
+  # already lists the gpio group, but the group did not exist (so it was silently
+  # dropped) and the chardevs had no group access. Create the group and grant it
+  # the gpio chardevs so the meter reads VBUS + faults without root.
+  users.groups.gpio = { };
+  services.udev.extraRules = ''
+    SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"
+  '';
+
   # 24 WS2812 LEDs on the SPI3 MOSI line (40-pin header pin 19). The service
   # starts in the initrd and keeps running after switch_root, so the ring shows
   # life from very early boot. See modules/duo-s/leds.nix for the option set and
