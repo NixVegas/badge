@@ -1339,6 +1339,19 @@ static int read_sysfs_double(const char *path, double *out)
 	return ok ? 0 : -1;
 }
 
+// The rail correction factor, runtime-overridable. A positive decimal in
+// /var/lib/nix-badge/saradc-factor wins over the compile-time SARADC_FACTOR, so
+// re-calibrating (e.g. after a CLKDIV change that settles the divider further) is
+// a file write that takes effect on the next `nix-badge power`, with no rebuild.
+static double saradc_factor(void)
+{
+	double f;
+	if (read_sysfs_double("/var/lib/nix-badge/saradc-factor", &f) == 0 &&
+	    f > 0.0)
+		return f;
+	return SARADC_FACTOR;
+}
+
 static int cmp_int(const void *a, const void *b)
 {
 	int x = *(const int *)a, y = *(const int *)b;
@@ -1388,7 +1401,7 @@ static int cmd_power(int argc, char **argv)
 				int raw = saradc_median_raw(dir, rails[i].ch);
 				if (raw >= 0)
 					printf("%s %.3f V\n", rails[i].label,
-					       raw * scale * SARADC_FACTOR /
+					       raw * scale * saradc_factor() /
 						       1000.0);
 				else
 					printf("%s (read error)\n",

@@ -58,6 +58,17 @@
           name = "dw-axi-dmac-apb-regs-quiet";
           patch = ../../pkgs/firmware/dw-axi-dmac-apb-regs-quiet.patch;
         }
+        {
+          # The SARADC reads the badge rails through 2.2M/1M dividers whose ~688k
+          # source impedance undersamples on the fast ADC (the sample window is
+          # too short for the high-Z source to settle), so nix-badge corrects with
+          # a large fudge factor. Add clkdiv/sample_window module params (default
+          # max divider) so the ADC clock can be slowed to lengthen the sample
+          # window and settle the divider; tune live with
+          # `modprobe sophgo-cv1800b-adc clkdiv=N` then re-calibrate the factor.
+          name = "sophgo-cv1800b-adc-clkdiv-param";
+          patch = ../../pkgs/firmware/sophgo-cv1800b-adc-clkdiv-param.patch;
+        }
       ];
     }
 
