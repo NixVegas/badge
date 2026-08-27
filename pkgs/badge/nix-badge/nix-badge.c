@@ -1392,52 +1392,62 @@ static int saradc_median_raw(const char *dir, int ch)
 // the power tree from the USB rail -- so calibrate to that measured value.
 #define SARADC_VBUS_NOMINAL_MV 4960.0
 #define SARADC_FACTOR_FILE "/var/lib/nix-badge/saradc-factor"
-static int saradc_calibrate(int force)
+static int saradc_calibrate(int force, int quiet)
 {
 	// Calibrate once per badge: if a factor was already stored, keep it unless
-	// forced. So the boot service can run every boot and only acts the first
-	// time it gets the chance (VBUS plugged and not yet calibrated).
+	// forced. So this can run on EVERY voltage read and only acts the first time
+	// it gets the chance (VBUS plugged and not yet calibrated). quiet suppresses
+	// the chatter when it runs opportunistically from inside `power`.
 	if (!force && access(SARADC_FACTOR_FILE, F_OK) == 0) {
-		double cur = 0;
-		read_sysfs_double(SARADC_FACTOR_FILE, &cur);
-		printf("calibrate: already calibrated (factor %.4f); "
-		       "use --force to redo\n",
-		       cur);
+		if (!quiet) {
+			double cur = 0;
+			read_sysfs_double(SARADC_FACTOR_FILE, &cur);
+			printf("calibrate: already calibrated (factor %.4f); "
+			       "use --force to redo\n",
+			       cur);
+		}
 		return 0;
 	}
 	int vbus = gpio_read_line("usb-vbus-det");
 	if (vbus != 1) {
-		fprintf(stderr, "calibrate: USB VBUS %s; no reference yet, will "
-				"calibrate on a later boot with power plugged\n",
-			vbus < 0 ? "unknown" : "absent");
+		if (!quiet)
+			fprintf(stderr, "calibrate: USB VBUS %s; no reference "
+					"yet, will calibrate when power is "
+					"plugged\n",
+				vbus < 0 ? "unknown" : "absent");
 		return 1;
 	}
 	char dir[64], sp[96];
 	double scale;
 	if (saradc_dir(dir, sizeof(dir)) != 0) {
-		fprintf(stderr, "calibrate: no SARADC device\n");
+		if (!quiet)
+			fprintf(stderr, "calibrate: no SARADC device\n");
 		return 1;
 	}
 	snprintf(sp, sizeof(sp), "%s/in_voltage_scale", dir);
 	if (read_sysfs_double(sp, &scale) != 0) {
-		fprintf(stderr, "calibrate: cannot read %s\n", sp);
+		if (!quiet)
+			fprintf(stderr, "calibrate: cannot read %s\n", sp);
 		return 1;
 	}
 	int raw = saradc_median_raw(dir, 0); // VSEL is channel 0
 	if (raw <= 0) {
-		fprintf(stderr, "calibrate: bad VSEL raw (%d)\n", raw);
+		if (!quiet)
+			fprintf(stderr, "calibrate: bad VSEL raw (%d)\n", raw);
 		return 1;
 	}
 	double factor = SARADC_VBUS_NOMINAL_MV / (raw * scale);
 	FILE *f = fopen(SARADC_FACTOR_FILE, "w");
 	if (!f) {
-		perror("calibrate: " SARADC_FACTOR_FILE);
+		if (!quiet)
+			perror("calibrate: " SARADC_FACTOR_FILE);
 		return 1;
 	}
 	fprintf(f, "%.4f\n", factor);
 	fclose(f);
-	printf("calibrated: VSEL raw %d @ %.0f mV VBUS -> factor %.4f\n", raw,
-	       SARADC_VBUS_NOMINAL_MV, factor);
+	if (!quiet)
+		printf("calibrated: VSEL raw %d @ %.0f mV VBUS -> factor %.4f\n",
+		       raw, SARADC_VBUS_NOMINAL_MV, factor);
 	return 0;
 }
 
@@ -1445,10 +1455,16 @@ static int cmd_power(int argc, char **argv)
 {
 	if (argc >= 1 && strcmp(argv[0], "calibrate") == 0) {
 		int force = argc >= 2 && strcmp(argv[1], "--force") == 0;
-		return saradc_calibrate(force);
+		return saradc_calibrate(force, 0);
 	}
 	(void)argc;
 	(void)argv;
+
+	// Opportunistic auto-cal: if this badge has never been calibrated and USB
+	// VBUS is available right now, calibrate before reading so we report the real
+	// per-badge factor. No-op once calibrated or on battery; quiet so it does not
+	// clutter the reading. The OLED meter reuses this path, so it self-calibrates.
+	saradc_calibrate(0, 1);
 
 	char dir[64];
 	if (saradc_dir(dir, sizeof(dir)) == 0) {
