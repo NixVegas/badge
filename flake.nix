@@ -74,6 +74,7 @@
             ./modules/duo-s/wifi.nix
             ./modules/duo-s/leds.nix
             ./modules/duo-s/bling.nix
+            ./modules/duo-s/bootswap.nix
             ./modules/duo-s/deploy.nix
             ./modules/duo-s/core-${core}.nix
           ];
@@ -268,6 +269,14 @@
             bling-demo = import ./pkgs/badge/bling-content {
               inherit pkgs;
               fix = (pkgs.extend (import inputs.fix { }).overlay).fix;
+            };
+            # A pure-Nix LED ring pattern (rotating rainbow, f(t)->[rgb]) baked to
+            # a BLED blob by fix. Play it with `nix-badge leds set --blob <path>`.
+            bling-leds-demo = import ./pkgs/badge/bling-content {
+              inherit pkgs;
+              fix = (pkgs.extend (import inputs.fix { }).overlay).fix;
+              entry = "leds-demo.nix";
+              name = "bling-leds-demo";
             };
           };
 

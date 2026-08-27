@@ -48,6 +48,11 @@ pub const Config = struct {
     /// Only the first `ncolors` entries are meaningful; the rest are zeroed.
     colors_buf: [max_colors]Rgb = @splat(.{ .r = 0, .g = 0, .b = 0 }),
     ncolors: u32 = 1,
+    /// Optional path to a baked "BLED" LED-animation blob. When set (non-empty)
+    /// and it loads, the painter plays it instead of the computed pattern. Empty
+    /// = no blob. Reloadable on the same mtime watch as pattern/brightness/fps.
+    blob_buf: [256]u8 = @splat(0),
+    blob_len: usize = 0,
 
     pub fn default() Config {
         var c: Config = .{};
@@ -65,6 +70,17 @@ pub const Config = struct {
         const n = @min(path.len, self.device_buf.len);
         @memcpy(self.device_buf[0..n], path[0..n]);
         self.device_len = n;
+    }
+
+    /// The configured blob path, or an empty slice when none is set.
+    pub fn blob(self: *const Config) []const u8 {
+        return self.blob_buf[0..self.blob_len];
+    }
+
+    pub fn setBlob(self: *Config, path: []const u8) void {
+        const n = @min(path.len, self.blob_buf.len);
+        @memcpy(self.blob_buf[0..n], path[0..n]);
+        self.blob_len = n;
     }
 
     pub fn colors(self: *const Config) []const Rgb {
@@ -130,6 +146,9 @@ pub fn applyKeyValue(c: *Config, key: []const u8, val: []const u8) ConfigError!v
         c.pattern = Pattern.parse(val) orelse return error.BadPattern;
     } else if (std.mem.eql(u8, key, "colors")) {
         try parseColors(val, c);
+    } else if (std.mem.eql(u8, key, "blob")) {
+        // An empty value clears the blob (falls back to the computed pattern).
+        c.setBlob(val);
     }
     // Unknown keys ignored on purpose.
 }
@@ -164,6 +183,9 @@ pub fn writeRuntime(w: *std.Io.Writer, c: *const Config) std.Io.Writer.Error!voi
     try w.writeAll("colors = ");
     try writeColorList(w, c);
     try w.writeByte('\n');
+    // Always emit the blob line (possibly empty) so `leds set --blob ''` clears a
+    // previously-set blob rather than leaving a stale one from the base config.
+    try w.print("blob = {s}\n", .{c.blob()});
 }
 
 /// Write the `#rrggbb,#rrggbb,...` colour list (no trailing newline).
@@ -198,6 +220,16 @@ test "parseBuffer applies known keys and ignores unknown ones" {
     try std.testing.expectEqual(Rgb{ .r = 0, .g = 0xff, .b = 0 }, c.colors_buf[1]);
 }
 
+test "blob key sets and clears the blob path" {
+    var c = Config.default();
+    try std.testing.expectEqualStrings("", c.blob());
+    try parseBuffer(&c, "blob = /run/leds/spin.bled\n");
+    try std.testing.expectEqualStrings("/run/leds/spin.bled", c.blob());
+    // An empty value clears it (fall back to the computed pattern).
+    try parseBuffer(&c, "blob =\n");
+    try std.testing.expectEqualStrings("", c.blob());
+}
+
 test "applyKeyValue rejects out-of-range count and bad bits" {
     var c = Config.default();
     try std.testing.expectError(error.CountOutOfRange, applyKeyValue(&c, "count", "0"));
@@ -224,6 +256,7 @@ test "writeRuntime round-trips through parseBuffer" {
     c.encoding = .four;
     c.colors_buf[0] = .{ .r = 0x10, .g = 0x20, .b = 0x30 };
     c.ncolors = 1;
+    c.setBlob("/run/leds/rainbow.bled");
 
     var buf: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -238,4 +271,5 @@ test "writeRuntime round-trips through parseBuffer" {
     try std.testing.expectEqual(c.speed_hz, back.speed_hz);
     try std.testing.expectEqual(c.encoding, back.encoding);
     try std.testing.expectEqual(c.colors_buf[0], back.colors_buf[0]);
+    try std.testing.expectEqualStrings(c.blob(), back.blob());
 }

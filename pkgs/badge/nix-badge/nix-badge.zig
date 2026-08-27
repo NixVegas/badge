@@ -17,6 +17,7 @@ const config = @import("config.zig");
 const oled = @import("oled.zig");
 const sysfs = @import("sysfs.zig");
 const badapple = @import("badapple.zig");
+const bled = @import("bled.zig");
 const screens = @import("screens.zig");
 
 const Config = config.Config;
@@ -96,6 +97,7 @@ const usage_text =
     \\  nix-badge core <arm|riscv|status>
     \\  nix-badge power
     \\  nix-badge bling [--badapple PATH] [--oled-width W] [--oled-height H]
+    \\  nix-badge bootswap
     \\  nix-badge mmio <read ADDR | write ADDR VALUE>
     \\
     \\patterns: off solid pulse rainbow chase
@@ -312,10 +314,50 @@ fn sendFrame(fd: linux.fd_t, frame: []const u8, speed_hz: u32, report: bool) voi
     _ = rc catch std.log.warn("transfer failed", .{});
 }
 
-/// The `leds run` service. Renders the configured pattern to the ring and, when
-/// the runtime file's mtime changes, hot-reloads the CLI-mutable fields. Static
+/// Close any currently-open blob and open the one at `cfg.blob()` if set. Returns
+/// the new `?bled.Frames`: null when no blob is configured, or when the configured
+/// one is missing/short/bad-magic (logged), so the caller falls back to the
+/// computed pattern. This is only ever called on start and on an mtime change, so
+/// the open cost is off the hot path.
+fn refreshBlob(prev: ?bled.Frames, cfg: *const Config) ?bled.Frames {
+    var old = prev;
+    if (old) |*o| o.deinit();
+
+    const path = cfg.blob();
+    if (path.len == 0) return null;
+
+    var path_buf: [256]u8 = undefined;
+    const zpath = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return null;
+    return bled.load(zpath) catch |err| {
+        std.log.warn("blob {s}: {s}; using computed pattern", .{ path, @errorName(err) });
+        return null;
+    };
+}
+
+/// Copy the first `out.len` LEDs of one blob frame's ring-order RGB into `out`
+/// with the software brightness scale, matching what `ws2812.render` applies.
+/// `out.len` is the effective LED count: the blob's nleds, or fewer if the spidev
+/// bufsiz clamped it, so the frame always holds at least `out.len` LEDs.
+fn paintBlobFrame(frames: *const bled.Frames, now_ms: u64, brightness: u8, out: []Rgb) void {
+    const src = frames.frameAt(now_ms);
+    std.debug.assert(src.len >= out.len * bled.bytes_per_led);
+    for (out, 0..) |*dst, i| {
+        const px = bled.Frames.pixel(src, i);
+        dst.* = .{
+            .r = ws2812.scaleChannel(px.r, brightness),
+            .g = ws2812.scaleChannel(px.g, brightness),
+            .b = ws2812.scaleChannel(px.b, brightness),
+        };
+    }
+}
+
+/// The `leds run` service. Plays a baked "BLED" blob when one is configured and
+/// valid, otherwise renders the configured computed pattern. On a runtime-file
+/// mtime change it hot-reloads the CLI-mutable fields AND the blob path. Static
 /// patterns idle at 2 Hz (and still repaint, since a WS2812 chain has no error
-/// recovery of its own); animations run at their fps.
+/// recovery of its own); animations and blobs run at their fps. The WS2812 encode
+/// + spidev write + latch path is identical in both modes — only the pixel source
+/// differs — so the blob mode is purely additive and cannot regress flicker.
 fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
     var cfg = try loadConfig(base);
 
@@ -324,6 +366,13 @@ fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
 
     const bufsiz = readSpidevBufsiz();
     var max_count = maxCountForBufsiz(bufsiz, cfg.encoding.bytesPerLed());
+
+    // A configured, valid blob overrides the LED count (its nleds) and fps; the
+    // buffers below are then sized to the effective geometry. A missing/bad blob
+    // leaves `blob` null and the computed pattern drives everything.
+    var blob = refreshBlob(null, &cfg);
+    defer if (blob) |*b| b.deinit();
+    applyBlobGeometry(&cfg, blob, bufsiz, max_count);
     clampCount(&cfg, bufsiz, max_count);
 
     // The frame buffer is sized for the worst-case latch so a clock change never
@@ -337,9 +386,7 @@ fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
     defer linux.close(fd);
 
     var frame_len = frameLen(&cfg);
-    std.log.info("{d} leds, pattern {s}, brightness {d}, {d} fps, {d} bytes/frame", .{
-        cfg.count, cfg.pattern.name(), cfg.brightness, cfg.fps, frame_len,
-    });
+    logRunState(&cfg, blob, frame_len);
 
     var clk_logged = logClock(&cfg);
     const clk_deadline = linux.realtimeSeconds() + clk_report_timeout_s;
@@ -365,6 +412,8 @@ fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
         if (!std.meta.eql(now_mtime, seen_mtime)) {
             seen_mtime = now_mtime;
             reloadInto(&cfg, base, &max_count, bufsiz, fd);
+            blob = refreshBlob(blob, &cfg); // hot-reload the blob path too
+            applyBlobGeometry(&cfg, blob, bufsiz, max_count);
             frame_no = 0;
             report_timing = true;
             // Resize buffers to the possibly-changed count/encoding. On OOM we
@@ -387,25 +436,32 @@ fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
                 }
             }
             frame_len = frameLen(&cfg);
-            std.log.info("reloaded: pattern {s}, brightness {d}, {d} fps, count {d}", .{
-                cfg.pattern.name(), cfg.brightness, cfg.fps, cfg.count,
-            });
+            logRunState(&cfg, blob, frame_len);
         }
 
         const lit = pixels[0..cfg.count];
-        ws2812.render(.{
-            .pattern = cfg.pattern,
-            .brightness = cfg.brightness,
-            .fps = cfg.fps,
-            .colors = cfg.colors(),
-        }, frame_no, lit);
+        if (blob) |*frames| {
+            paintBlobFrame(frames, linux.monotonicMsec(), cfg.brightness, lit);
+        } else {
+            ws2812.render(.{
+                .pattern = cfg.pattern,
+                .brightness = cfg.brightness,
+                .fps = cfg.fps,
+                .colors = cfg.colors(),
+            }, frame_no, lit);
+        }
+        // Identical encode + transfer + latch for both modes — the flicker-free
+        // path is untouched; only the pixel source above differs.
         ws2812.encodeFrame(cfg.encoding, lit, latchBytes(cfg.speed_hz), frame[0..frame_len]);
 
         sendFrame(fd, frame[0..frame_len], cfg.speed_hz, report_timing);
         report_timing = false;
         frame_no +%= 1;
 
-        const period_ns: u64 = if (cfg.pattern.isAnimated())
+        // A blob is always animated (paced at its fps); a computed static pattern
+        // only needs to notice a config change, so it idles at 2 Hz.
+        const animated = blob != null or cfg.pattern.isAnimated();
+        const period_ns: u64 = if (animated)
             std.time.ns_per_s / @as(u64, cfg.fps)
         else
             std.time.ns_per_s / idle_poll_hz;
@@ -414,10 +470,34 @@ fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
     // Leave the LEDs as they are so a restart repaints without a visible gap.
 }
 
+/// When a blob is active, override the effective LED count (its nleds) and fps so
+/// the buffer sizing, encode, and pacing all follow the baked animation. No-op when
+/// no blob is active (the computed pattern's config values stand).
+fn applyBlobGeometry(cfg: *Config, blob: ?bled.Frames, bufsiz: u64, max_count: u32) void {
+    const frames = blob orelse return;
+    cfg.count = frames.nleds;
+    cfg.fps = std.math.clamp(@as(u32, frames.fps), 1, 200);
+    clampCount(cfg, bufsiz, max_count);
+}
+
+/// Log the active source (blob path or pattern name) and the frame geometry, once
+/// at start and after every reload.
+fn logRunState(cfg: *const Config, blob: ?bled.Frames, frame_len: usize) void {
+    if (blob) |frames| {
+        std.log.info("blob {s}: {d} leds, {d} fps, {d} frames, brightness {d}, {d} bytes/frame", .{
+            cfg.blob(), frames.nleds, frames.fps, frames.frames, cfg.brightness, frame_len,
+        });
+    } else {
+        std.log.info("pattern {s}: {d} leds, brightness {d}, {d} fps, {d} bytes/frame", .{
+            cfg.pattern.name(), cfg.count, cfg.brightness, cfg.fps, frame_len,
+        });
+    }
+}
+
 /// Re-read the config and adopt the CLI-mutable fields (pattern, brightness, fps,
-/// count, speed, encoding, colours). Hardware identity (device) is not reloaded.
-/// A speed change is pushed to the driver; each transfer also carries its own
-/// speed, so nothing is reopened.
+/// count, speed, encoding, colours, blob path). Hardware identity (device) is not
+/// reloaded. A speed change is pushed to the driver; each transfer also carries its
+/// own speed, so nothing is reopened.
 fn reloadInto(cfg: *Config, base: ?[]const u8, max_count: *u32, bufsiz: u64, fd: linux.fd_t) void {
     var fresh = Config.default();
     layerBase(&fresh, base);
@@ -432,6 +512,7 @@ fn reloadInto(cfg: *Config, base: ?[]const u8, max_count: *u32, bufsiz: u64, fd:
     cfg.encoding = fresh.encoding;
     cfg.colors_buf = fresh.colors_buf;
     cfg.ncolors = fresh.ncolors;
+    cfg.setBlob(fresh.blob());
 
     max_count.* = maxCountForBufsiz(bufsiz, cfg.encoding.bytesPerLed());
     clampCount(cfg, bufsiz, max_count.*);
@@ -502,6 +583,10 @@ fn cmdLedsSet(out: *Out, args: []const []const u8) CmdError!void {
                 return error.Failed;
             };
             cfg.ncolors += 1;
+        } else if (optArg(args, &i, "--blob")) |v| {
+            // A path selects a baked BLED animation; an empty value clears it and
+            // returns to the computed pattern.
+            cfg.setBlob(v);
         } else {
             std.log.err("set: unknown argument '{s}'", .{a});
             return error.Usage;
@@ -546,6 +631,7 @@ fn cmdLedsShow(out: *Out) CmdError!void {
     w.writeAll("colors = ") catch return error.Failed;
     config.writeColorList(w, &cfg) catch return error.Failed;
     w.writeByte('\n') catch return error.Failed;
+    w.print("blob = {s}\n", .{cfg.blob()}) catch return error.Failed;
 }
 
 fn cmdLeds(gpa: std.mem.Allocator, out: *Out, args: []const []const u8) CmdError!void {
@@ -994,6 +1080,135 @@ fn screenBadapple(panel: *oled.Panel, ctx: *const screens.Context) u32 {
     return clip.frameMs();
 }
 
+// ================================================================= bootswap ===
+//
+// A daemon that swaps the boot core when the USER holds the BOOT button. On a long
+// continuous hold (>= HOLD_MS) it latches the OTHER core and reboots, so a user
+// can flip ARM<->RISC-V from the button alone (board switch on AUTO). A short press
+// does nothing. The button is watched by name (portb, gpiochip renumbers), request-
+// once + edge poll() like the bling USER button.
+
+const bootswap_hold_ms = 3000;
+
+/// Reboot the machine cleanly. Prefer `systemctl reboot` (lets systemd tear down
+/// units); if that is absent or exits non-zero, fall back to sync() + reboot(2).
+/// Only returns on total failure (both paths failed), which the caller logs.
+fn rebootNow(io: std.Io) void {
+    // If systemd took the reboot, give it a moment to tear us down; otherwise fall
+    // straight to the syscall. The fallback runs unconditionally as a backstop, so
+    // even a "handled" reboot that stalls still restarts the machine.
+    if (systemctlReboot(io)) linux.sleepNsec(5 * std.time.ns_per_s);
+
+    linux.sync();
+    linux.reboot() catch |err| std.log.err("bootswap: reboot(2) failed: {s}", .{@errorName(err)});
+}
+
+/// Try `systemctl reboot`. Returns true when systemd accepted it (exit 0), false
+/// (with a logged reason) when it is absent or failed, so the caller falls back.
+fn systemctlReboot(io: std.Io) bool {
+    var child = std.process.spawn(io, .{ .argv = &.{ "systemctl", "reboot" } }) catch |err| {
+        std.log.warn("bootswap: spawn systemctl failed ({s}); using reboot(2)", .{@errorName(err)});
+        return false;
+    };
+    const term = child.wait(io) catch |err| {
+        std.log.warn("bootswap: systemctl wait failed ({s}); using reboot(2)", .{@errorName(err)});
+        return false;
+    };
+    switch (term) {
+        .exited => |code| {
+            if (code == 0) return true;
+            std.log.warn("bootswap: systemctl reboot exited {d}; using reboot(2)", .{code});
+        },
+        else => std.log.warn("bootswap: systemctl reboot abnormal exit; using reboot(2)", .{}),
+    }
+    return false;
+}
+
+/// The other core: what a swap latches. arm <-> riscv.
+fn otherCore(core: sysfs.Core) sysfs.Core {
+    return switch (core) {
+        .arm => .riscv,
+        .riscv => .arm,
+    };
+}
+
+/// Perform the swap: read the current boot core off the strap, latch the other,
+/// and reboot. If the strap can be re-read and did NOT flip after latching, the
+/// board switch is not on AUTO (it overrides the latch), so revert and do nothing
+/// rather than pointlessly rebooting into the same core.
+fn doBootswap(io: std.Io) void {
+    const current = sysfs.readStrap() orelse {
+        std.log.warn("bootswap: cannot read strap; not swapping", .{});
+        return;
+    };
+    const target = otherCore(current);
+
+    sysfs.latchCore(target) catch |err| {
+        std.log.err("bootswap: latch {s} failed: {s}", .{ @tagName(target), @errorName(err) });
+        return;
+    };
+
+    // Confirm the latch took (switch on AUTO). The strap reflects the latched
+    // selection; if it did not change to the target, AUTO is off — revert and bail.
+    if (sysfs.readStrap()) |after| {
+        if (after != target) {
+            std.log.warn("bootswap: strap still {s} after latching {s}; not in AUTO, ignoring", .{
+                @tagName(after), @tagName(target),
+            });
+            sysfs.latchCore(current) catch |err| {
+                std.log.warn("bootswap: revert latch failed: {s}", .{@errorName(err)});
+            };
+            return;
+        }
+    }
+
+    std.log.info("bootswap: {s} -> {s}, rebooting", .{ @tagName(current), @tagName(target) });
+    rebootNow(io);
+}
+
+/// Watch the BOOT button for a long continuous hold and, on one, swap the boot
+/// core and reboot. Request-once + edge poll() so no press is dropped; the hold is
+/// measured by polling with a timeout of "time remaining until HOLD_MS" after a
+/// press edge — if that timeout elapses with no release edge, the hold completed.
+fn cmdBootswap(io: std.Io) void {
+    installHandler(.TERM, onStop);
+    installHandler(.INT, onStop);
+
+    var button = sysfs.Button.open("btn-boot-n") orelse {
+        std.log.info("bootswap: no btn-boot-n line; nothing to do", .{});
+        return; // non-fatal, exit 0 so systemd does not respin
+    };
+    defer button.close();
+
+    std.log.info("bootswap: watching BOOT button, hold {d} ms to swap core", .{bootswap_hold_ms});
+
+    var press: PressState = .{};
+    while (!stop_requested.load(.monotonic)) {
+        // When idle, block indefinitely on the button; when a press is in progress,
+        // only until the hold threshold so we can act while it is still held.
+        var timeout_ms: i32 = -1;
+        if (press.down) {
+            const held = linux.monotonicMsec() - press.start_ms;
+            if (held >= bootswap_hold_ms) {
+                doBootswap(io); // returns only if we did not reboot (not AUTO, etc.)
+                press.down = false;
+                continue;
+            }
+            timeout_ms = @intCast(bootswap_hold_ms - held);
+        }
+
+        var fds = [_]linux.pollfd{.{ .fd = button.pollFd(), .events = linux.POLLIN, .revents = 0 }};
+        const ready = linux.poll(&fds, timeout_ms) orelse continue; // EINTR: re-check stop flag
+        if (ready == 0) continue; // hold-threshold timeout: loop re-checks `held`
+        if (fds[0].revents & linux.POLLIN == 0) continue;
+
+        while (button.nextEdge()) |edge| switch (edge) {
+            .press => press = .{ .start_ms = linux.monotonicMsec(), .down = true },
+            .release => press.down = false, // a short press: nothing happens
+        };
+    }
+}
+
 // ================================================================== main ===
 
 pub fn main(init: std.process.Init) !void {
@@ -1015,6 +1230,13 @@ pub fn main(init: std.process.Init) !void {
 
     const cmd = argv.items[1];
     const rest = argv.items[2..];
+
+    // bootswap recovers every fault internally (it is a resilient daemon), so it
+    // returns void rather than a CmdError; handle it before the fallible chain.
+    if (std.mem.eql(u8, cmd, "bootswap")) {
+        cmdBootswap(init.io);
+        return;
+    }
 
     const result: CmdError!void = if (std.mem.eql(u8, cmd, "leds"))
         cmdLeds(gpa, &out, rest)
@@ -1051,5 +1273,6 @@ test {
     _ = oled;
     _ = sysfs;
     _ = badapple;
+    _ = bled;
     _ = screens;
 }

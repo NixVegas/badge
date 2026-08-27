@@ -38,6 +38,7 @@ let
     fps = ${toString cfg.fps}
     pattern = ${cfg.pattern}
     colors = ${lib.concatStringsSep "," cfg.colors}
+    ${lib.optionalString (cfg.blob != null) "blob = ${cfg.blob}"}
   '';
 
   # One unit body, used in the initrd and in stage 2. Keep these identical or
@@ -79,6 +80,17 @@ in
     count = lib.mkOption {
       type = lib.types.ints.positive;
       description = "Number of WS2812 LEDs on the ring.";
+    };
+
+    blob = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        A baked "BLED" RGB-frame blob (see pkgs/badge/bling-content/leds.nix, a
+        pure-Nix `f(t) -> [rgb]` pattern evaluated by fix) to play on the ring
+        instead of a computed pattern. null uses the computed `pattern`.
+        Reloadable at run time: nix-badge leds set --blob PATH.
+      '';
     };
 
     device = lib.mkOption {

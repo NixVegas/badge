@@ -137,8 +137,8 @@ pub const Panel = struct {
     /// byte already at buf[0].
     pub fn flush(self: *Panel) linux.Error!void {
         try self.sendCommands(&.{
-            Cmd.column_addr, 0,                    @intCast(self.width - 1),
-            Cmd.page_addr,   0,                    @intCast(self.pages() - 1),
+            Cmd.column_addr, 0, @intCast(self.width - 1),
+            Cmd.page_addr,   0, @intCast(self.pages() - 1),
         });
         const n = try linux.write(self.fd, self.buf);
         if (n != self.buf.len) return error.Io;
@@ -154,18 +154,30 @@ pub const Panel = struct {
         const com_pins: u8 = if (self.height == 32) 0x02 else 0x12;
         const seq = [_]u8{
             Cmd.display_off,
-            Cmd.set_display_clock_div, 0x80,
-            Cmd.set_multiplex,         mux,
-            Cmd.set_display_offset,    0x00,
-            Cmd.set_start_line | 0x00, Cmd.charge_pump,
-            0x14,                      Cmd.memory_mode,
-            0x00,                      Cmd.seg_remap,
-            Cmd.com_scan_dec,          Cmd.set_com_pins,
-            com_pins,                  Cmd.set_contrast,
-            0x8f,                      Cmd.set_precharge,
-            0xf1,                      Cmd.set_vcom_detect,
-            0x40,                      Cmd.display_all_on_resume,
-            Cmd.normal_display,        Cmd.display_on,
+            Cmd.set_display_clock_div,
+            0x80,
+            Cmd.set_multiplex,
+            mux,
+            Cmd.set_display_offset,
+            0x00,
+            Cmd.set_start_line | 0x00,
+            Cmd.charge_pump,
+            0x14,
+            Cmd.memory_mode,
+            0x00,
+            Cmd.seg_remap,
+            Cmd.com_scan_dec,
+            Cmd.set_com_pins,
+            com_pins,
+            Cmd.set_contrast,
+            0x8f,
+            Cmd.set_precharge,
+            0xf1,
+            Cmd.set_vcom_detect,
+            0x40,
+            Cmd.display_all_on_resume,
+            Cmd.normal_display,
+            Cmd.display_on,
         };
         var i: usize = 0;
         while (i < seq.len) : (i += 8) {

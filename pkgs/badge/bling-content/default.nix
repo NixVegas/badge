@@ -29,14 +29,22 @@ pkgs.runCommand "${name}.bin"
     fix eval --raw "$src/${entry}" | xxd -r -p > "$out_bin"
 
     # Validate the blob so a broken animation fails the build, not the badge.
+    # Two formats: BADA (OLED, 16B header, page-major 1-bit frames) and BLED
+    # (LED ring, 12B header, nleds*3 RGB frames). Field at offset 4 is the width
+    # (BADA) or nleds (BLED).
     magic=$(head -c 4 "$out_bin")
-    [ "$magic" = "BADA" ] || { echo "bad magic '$magic'"; exit 1; }
-    w=$(od -An -tu2 -j4  -N2 "$out_bin" | tr -d ' ')
-    h=$(od -An -tu2 -j6  -N2 "$out_bin" | tr -d ' ')
-    fps=$(od -An -tu2 -j8  -N2 "$out_bin" | tr -d ' ')
-    count=$(od -An -tu4 -j12 -N4 "$out_bin" | tr -d ' ')
+    a=$(od -An -tu2 -j4 -N2 "$out_bin" | tr -d ' ')  # width | nleds
     total=$(wc -c < "$out_bin")
-    want=$(( 16 + count * w * (h / 8) ))
-    [ "$total" -eq "$want" ] || { echo "size $total != $want (w=$w h=$h count=$count)"; exit 1; }
-    echo "baked ${name}: ''${w}x''${h} ''${fps}fps ''${count} frames, $total bytes"
+    case "$magic" in
+      BADA)
+        h=$(od -An -tu2 -j6 -N2 "$out_bin" | tr -d ' ')
+        count=$(od -An -tu4 -j12 -N4 "$out_bin" | tr -d ' ')
+        want=$(( 16 + count * a * (h / 8) )) ;;
+      BLED)
+        count=$(od -An -tu4 -j8 -N4 "$out_bin" | tr -d ' ')
+        want=$(( 12 + count * a * 3 )) ;;
+      *) echo "bad magic '$magic'"; exit 1 ;;
+    esac
+    [ "$total" -eq "$want" ] || { echo "size $total != $want ($magic a=$a count=$count)"; exit 1; }
+    echo "baked ${name}: $magic, $count frames, $total bytes"
   ''

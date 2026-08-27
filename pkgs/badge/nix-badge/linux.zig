@@ -203,6 +203,33 @@ pub fn realtimeSeconds() i64 {
     return ts.sec;
 }
 
+// =================================================================== reboot ===
+// reboot(2) magic values and command. The two magics are a caller-authenticity
+// check the kernel enforces; RESTART does the normal warm reboot.
+
+pub const LINUX_REBOOT_MAGIC1 = linux.LINUX_REBOOT.MAGIC1.MAGIC1; // 0xfee1dead
+pub const LINUX_REBOOT_MAGIC2 = linux.LINUX_REBOOT.MAGIC2.MAGIC2; // 672274793
+pub const LINUX_REBOOT_CMD_RESTART = linux.LINUX_REBOOT.CMD.RESTART; // 0x01234567
+
+/// Flush filesystem buffers to disk. sync(2) cannot fail on Linux, so the return
+/// is a status we simply confirm succeeded rather than branch on.
+pub fn sync() void {
+    const rc = linux.syscall0(.sync);
+    std.debug.assert(linux.errno(rc) == .SUCCESS);
+}
+
+/// Warm-restart the machine via reboot(2). Only returns on failure (e.g. not
+/// privileged); a success does not return. The caller syncs first.
+pub fn reboot() Error!void {
+    const rc = linux.reboot(
+        LINUX_REBOOT_MAGIC1,
+        LINUX_REBOOT_MAGIC2,
+        LINUX_REBOOT_CMD_RESTART,
+        null,
+    );
+    _ = try decode(rc); // if this returns, the reboot did not happen
+}
+
 // ================================================================== spidev ===
 // linux/spi/spidev.h. SPI_IOC_MAGIC 'k' (0x6b).
 
