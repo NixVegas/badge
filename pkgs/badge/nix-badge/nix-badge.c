@@ -1363,7 +1363,10 @@ static int cmp_int(const void *a, const void *b)
 // badly-undersettled sample; the median rejects those.
 static int saradc_median_raw(const char *dir, int ch)
 {
-	enum { NSAMP = 25 };
+	/* 65, not 25: the leaky high-Z divider makes the per-read raw jitter ~+/-20%,
+	 * so a 25-sample median still wobbles a few counts run-to-run (~2.5% on the
+	 * reported volts). More samples tighten the median; a read is only a few us. */
+	enum { NSAMP = 65 };
 	int s[NSAMP], n = 0;
 	char rp[96];
 	snprintf(rp, sizeof(rp), "%s/in_voltage%d_raw", dir, ch);

@@ -58,17 +58,18 @@
           name = "dw-axi-dmac-apb-regs-quiet";
           patch = ../../pkgs/firmware/dw-axi-dmac-apb-regs-quiet.patch;
         }
-        {
-          # The SARADC reads the badge rails through 2.2M/1M dividers whose ~688k
-          # source impedance undersamples on the fast ADC (the sample window is
-          # too short for the high-Z source to settle), so nix-badge corrects with
-          # a large fudge factor. Add clkdiv/sample_window module params (default
-          # max divider) so the ADC clock can be slowed to lengthen the sample
-          # window and settle the divider; tune live with
-          # `modprobe sophgo-cv1800b-adc clkdiv=N` then re-calibrate the factor.
-          name = "sophgo-cv1800b-adc-clkdiv-param";
-          patch = ../../pkgs/firmware/sophgo-cv1800b-adc-clkdiv-param.patch;
-        }
+        # NOTE: a sophgo-cv1800b-adc clkdiv/sample_window module-param patch was
+        # tried here to fight the SARADC rail-reading attenuation, on the theory
+        # that the ~688k divider undersettles the sample window. Live sweeps on
+        # the badge DISPROVED it: raising clkdiv (slower ADC) LOWERS the reading,
+        # and shortening sample_window RAISES it -- i.e. it is leakage-dominated,
+        # not settling-dominated (the S/H cap bleeds toward a low equilibrium set
+        # by the ~138k leaky ADC input). The stock config (clkdiv=1,
+        # sample_window=15) already gives the most stable reading; a shorter
+        # window buys less attenuation but far more jitter, so with median
+        # smoothing it is no better. The real fix is a hardware buffer cap on the
+        # divider (a bench mod), not a driver knob. So no ADC patch: nix-badge's
+        # empirical factor (~19) on the stock timing is as good as software gets.
       ];
     }
 
