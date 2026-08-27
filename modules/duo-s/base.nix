@@ -14,7 +14,13 @@
 
       # The SG2000 uses the standard DesignWare UART. Same console node
       # regardless of which core boots, so it stays here, not in core-*.nix.
-      boot.kernelParams = [ "console=ttyS0,115200" "earlycon" ];
+      # iomem=relaxed disables IO_STRICT_DEVMEM's "busy region" denial (the
+      # kernel otherwise EPERMs /dev/mem access to any MMIO range a driver has
+      # claimed). Needed so `nix-badge mmio` can poke SoC registers during
+      # bring-up -- e.g. sweeping the SAO IIC1 pinmux (claimed by 3001000.pinctrl)
+      # while hunting the OLED's 0x3c ACK. Parsed generically in kernel/resource.c
+      # (arch-independent). Root-only; fine for a hacker badge.
+      boot.kernelParams = [ "console=ttyS0,115200" "earlycon" "iomem=relaxed" ];
 
       # Boot via U-Boot's extlinux. The vendor FSBL still runs first and is
       # packaged per-core in core-*.nix (ATF for ARM, OpenSBI for RISC-V).

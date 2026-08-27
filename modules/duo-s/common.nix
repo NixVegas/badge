@@ -145,6 +145,10 @@ in
     settings.PermitRootLogin = "no";
   };
 
+  # /dev/i2c-1 for the SAO SSD1306 OLED (IIC1, enabled in the common dtsi). The
+  # bling engine and `nix-badge oled` drive the panel from userspace via i2c-dev.
+  boot.kernelModules = [ "i2c-dev" ];
+
   environment.systemPackages = with pkgs; [
     htop
     i2c-tools

@@ -79,6 +79,10 @@
 #define DUOS_VIVO_D7		PINPOS('B', 11)
 #define DUOS_VIVO_D8		PINPOS('C', 11)
 
+/* SAO connector IIC1 (SDA/SCL) = pads VIVO_D4 / VIVO_D3 = PORTB 17/18. */
+#define DUOS_VIVO_D3		PINPOS('A', 10)
+#define DUOS_VIVO_D4		PINPOS('D', 10)
+
 / {
 	model = "Milk-V Duo S";
 	compatible = "milkv,duo-s", "sophgo,sg2002";
@@ -151,6 +155,19 @@
 				 <PINMUX(DUOS_UART0_RX, 0)>;
 			bias-pull-up;
 			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+	/* SAO IIC1 for the SSD1306 OLED (see &i2c1 in the common dtsi). VIVO_D4/D3
+	 * = PORTB 17/18, IIC1 = pinmux 5 (found empirically on the arm core: mux 5
+	 * is the only value where 0x3c ACKs). bias-pull-up enables the pad input
+	 * buffer so the controller senses SDA, and parallels the U12 TXS0104E pull. */
+	i2c1_cfg: i2c1-cfg {
+		i2c1-pins {
+			pinmux = <PINMUX(DUOS_VIVO_D4, 5)>, /* SAO SDA, portb 17 */
+				 <PINMUX(DUOS_VIVO_D3, 5)>; /* SAO SCL, portb 18 */
+			bias-pull-up;
 			power-source = <3300>;
 		};
 	};

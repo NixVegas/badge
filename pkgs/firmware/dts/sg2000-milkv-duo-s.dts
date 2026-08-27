@@ -263,6 +263,22 @@
 			power-source = <3300>;
 		};
 	};
+
+	/* SAO connector IIC1 for the SSD1306 OLED (see &i2c1 in the common dtsi).
+	 * The SAO SDA/SCL are PORTB 17/18 = pads VIVO_D4 / VIVO_D3, IIC1 = pinmux 5
+	 * (found empirically: mux 5 is the only value where 0x3c ACKs). bias-pull-up
+	 * both enables the pad input buffer (so the controller senses SDA/the ACK --
+	 * without it the mux is set but reads NAK) and adds an internal pull that
+	 * parallels the U12 TXS0104E's. power-source is required by the mainline
+	 * sophgo pinctrl or it -EINVALs the whole state (see spi3_cfg). */
+	i2c1_cfg: i2c1-cfg {
+		i2c1-pins {
+			pinmux = <PINMUX(PIN_VIVO_D4, 5)>, /* SAO SDA, portb 17 */
+				 <PINMUX(PIN_VIVO_D3, 5)>; /* SAO SCL, portb 18 */
+			bias-pull-up;
+			power-source = <3300>;
+		};
+	};
 };
 
 /*

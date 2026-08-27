@@ -96,6 +96,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -2307,6 +2308,7 @@ static void usage(void)
 		"  nix-badge core <arm|riscv|status>\n"
 		"  nix-badge power [calibrate]\n"
 		"  nix-badge oled <run|off>\n"
+		"  nix-badge mmio <read ADDR | write ADDR VALUE>\n"
 		"\n"
 		"patterns: off solid pulse rainbow chase\n");
 }
@@ -2327,6 +2329,51 @@ static int cmd_leds(int argc, char **argv)
 	return 2;
 }
 
+// ---------------------------------------------------------------- mmio ---
+// Minimal 32-bit /dev/mem peek/poke for SoC register bring-up. Used to sweep
+// the SAO IIC1 pinmux (VIVO_D4=0x0300114c, VIVO_D3=0x03001150) live while
+// hunting for the SSD1306's 0x3c ACK, so no reboot-per-guess is needed.
+//   nix-badge mmio read  <addr>
+//   nix-badge mmio write <addr> <value>
+static int cmd_mmio(int argc, char **argv)
+{
+	if (argc < 2)
+		die("usage: nix-badge mmio <read ADDR | write ADDR VALUE>");
+	int is_write = strcmp(argv[0], "write") == 0;
+	if (!is_write && strcmp(argv[0], "read") != 0)
+		die("mmio: first arg must be 'read' or 'write'");
+	if (is_write && argc < 3)
+		die("mmio write needs ADDR and VALUE");
+
+	unsigned long addr = strtoul(argv[1], NULL, 0);
+	uint32_t val = is_write ? (uint32_t)strtoul(argv[2], NULL, 0) : 0;
+
+	long pagesize = sysconf(_SC_PAGESIZE);
+	unsigned long base = addr & ~(unsigned long)(pagesize - 1);
+	unsigned long off = addr - base;
+
+	int fd = open("/dev/mem", O_RDWR | O_SYNC);
+	if (fd < 0)
+		die("open /dev/mem: %s", strerror(errno));
+	volatile uint8_t *map = mmap(NULL, (size_t)pagesize,
+				     PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+				     (off_t)base);
+	if (map == MAP_FAILED)
+		die("mmap 0x%lx: %s", base, strerror(errno));
+
+	volatile uint32_t *reg = (volatile uint32_t *)(map + off);
+	if (is_write) {
+		*reg = val;
+		__sync_synchronize();
+		printf("0x%08lx = 0x%08x\n", addr, *reg);
+	} else {
+		printf("0x%08lx = 0x%08x\n", addr, *reg);
+	}
+	munmap((void *)map, (size_t)pagesize);
+	close(fd);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
@@ -2341,6 +2388,8 @@ int main(int argc, char **argv)
 		return cmd_power(argc - 2, argv + 2);
 	if (strcmp(argv[1], "oled") == 0)
 		return cmd_oled(argc - 2, argv + 2);
+	if (strcmp(argv[1], "mmio") == 0)
+		return cmd_mmio(argc - 2, argv + 2);
 	usage();
 	return 2;
 }
