@@ -100,6 +100,7 @@
 #include <unistd.h>
 
 #include <linux/gpio.h>
+#include <linux/i2c-dev.h>
 #include <linux/spi/spidev.h>
 
 // Path that the CLI writes and that the service reads after the base config.
@@ -1521,6 +1522,777 @@ static int cmd_power(int argc, char **argv)
 	return 0;
 }
 
+// ==================================================================== oled ===
+//
+// A 128x32 SSD1306 monochrome OLED on I2C bus 1 at address 0x3c, driven through
+// the Linux i2c-dev userspace interface. `nix-badge oled run` is a foreground
+// systemd service: it renders a small status HUD to a static 512-byte
+// framebuffer and pushes it over I2C at ~12 fps, cycling between views on the
+// USER button. The rail/battery numbers reuse the SARADC + GPIO helpers that
+// `power` uses, so the meter self-calibrates off VBUS the same way.
+//
+// SSD1306 I2C framing: every message begins with a control byte. 0x00 says the
+// bytes that follow are COMMANDS, 0x40 says they are DISPLAY DATA (GDDRAM). We
+// keep the two streams separate: init/config goes out as command frames, the
+// framebuffer flush goes out as one data frame.
+//
+// The panel is organised as 4 pages of 128 columns. A page is 8 vertically
+// stacked pixels sharing a column byte, LSB on top. So a pixel at (x,y) lives in
+// page y/8, column x, at bit y%8 of that byte -- which is exactly how set_pixel
+// indexes the framebuffer, and why the buffer streams straight to GDDRAM with no
+// reshuffle once we select horizontal/page addressing over the whole panel.
+
+#define OLED_I2C_BUS "/dev/i2c-1"
+#define OLED_I2C_ADDR 0x3c
+#define OLED_W 128
+#define OLED_H 32
+#define OLED_PAGES (OLED_H / 8) // 4
+#define OLED_FBLEN (OLED_W * OLED_PAGES) // 512
+
+// SSD1306 command bytes we use.
+#define SSD1306_SETCONTRAST 0x81
+#define SSD1306_DISPLAYALLON_RESUME 0xa4
+#define SSD1306_NORMALDISPLAY 0xa6
+#define SSD1306_DISPLAYOFF 0xae
+#define SSD1306_DISPLAYON 0xaf
+#define SSD1306_SETDISPLAYOFFSET 0xd3
+#define SSD1306_SETCOMPINS 0xda
+#define SSD1306_SETVCOMDETECT 0xdb
+#define SSD1306_SETDISPLAYCLOCKDIV 0xd5
+#define SSD1306_SETPRECHARGE 0xd9
+#define SSD1306_SETMULTIPLEX 0xa8
+#define SSD1306_SETLOWCOLUMN 0x00
+#define SSD1306_SETHIGHCOLUMN 0x10
+#define SSD1306_SETSTARTLINE 0x40
+#define SSD1306_MEMORYMODE 0x20
+#define SSD1306_COLUMNADDR 0x21
+#define SSD1306_PAGEADDR 0x22
+#define SSD1306_COMSCANDEC 0xc8
+#define SSD1306_SEGREMAP 0xa1
+#define SSD1306_CHARGEPUMP 0x8d
+
+// The framebuffer. Static so set_pixel/oled_flush can reach it without threading
+// a pointer through every draw helper, and so the working set is one 512-byte
+// blob the compiler can keep hot.
+static uint8_t oled_fb[OLED_FBLEN];
+
+// ------------------------------------------------------------- oled: font ---
+//
+// A compact 5x7 ASCII font, one glyph per 5 bytes, each byte a COLUMN (LSB =
+// top pixel, matching the panel's page layout). Rendered with a 1px gap so cells
+// are 6px wide. Coverage: space, digits 0-9, A-Z, a-z, and the punctuation the
+// HUD needs ('.', '%', ':', '-', 'V' is already a letter). Anything outside the
+// covered range draws as blank. This is the classic 5x7 "font5x7" column table
+// trimmed to the glyphs we use; unsupported codepoints map to space.
+
+#define FONT_W 5
+#define FONT_H 7
+#define GLYPH_W (FONT_W + 1) // 6px cell incl. the 1px inter-char gap
+
+// One glyph = 5 column bytes. Index by ASCII value minus 0x20 (space).
+static const uint8_t oled_font[][FONT_W] = {
+	{ 0x00, 0x00, 0x00, 0x00, 0x00 }, // 0x20 space
+	{ 0x00, 0x00, 0x5f, 0x00, 0x00 }, // 0x21 !
+	{ 0x00, 0x07, 0x00, 0x07, 0x00 }, // 0x22 "
+	{ 0x14, 0x7f, 0x14, 0x7f, 0x14 }, // 0x23 #
+	{ 0x24, 0x2a, 0x7f, 0x2a, 0x12 }, // 0x24 $
+	{ 0x23, 0x13, 0x08, 0x64, 0x62 }, // 0x25 %
+	{ 0x36, 0x49, 0x55, 0x22, 0x50 }, // 0x26 &
+	{ 0x00, 0x05, 0x03, 0x00, 0x00 }, // 0x27 '
+	{ 0x00, 0x1c, 0x22, 0x41, 0x00 }, // 0x28 (
+	{ 0x00, 0x41, 0x22, 0x1c, 0x00 }, // 0x29 )
+	{ 0x14, 0x08, 0x3e, 0x08, 0x14 }, // 0x2a *
+	{ 0x08, 0x08, 0x3e, 0x08, 0x08 }, // 0x2b +
+	{ 0x00, 0x50, 0x30, 0x00, 0x00 }, // 0x2c ,
+	{ 0x08, 0x08, 0x08, 0x08, 0x08 }, // 0x2d -
+	{ 0x00, 0x60, 0x60, 0x00, 0x00 }, // 0x2e .
+	{ 0x20, 0x10, 0x08, 0x04, 0x02 }, // 0x2f /
+	{ 0x3e, 0x51, 0x49, 0x45, 0x3e }, // 0x30 0
+	{ 0x00, 0x42, 0x7f, 0x40, 0x00 }, // 0x31 1
+	{ 0x42, 0x61, 0x51, 0x49, 0x46 }, // 0x32 2
+	{ 0x21, 0x41, 0x45, 0x4b, 0x31 }, // 0x33 3
+	{ 0x18, 0x14, 0x12, 0x7f, 0x10 }, // 0x34 4
+	{ 0x27, 0x45, 0x45, 0x45, 0x39 }, // 0x35 5
+	{ 0x3c, 0x4a, 0x49, 0x49, 0x30 }, // 0x36 6
+	{ 0x01, 0x71, 0x09, 0x05, 0x03 }, // 0x37 7
+	{ 0x36, 0x49, 0x49, 0x49, 0x36 }, // 0x38 8
+	{ 0x06, 0x49, 0x49, 0x29, 0x1e }, // 0x39 9
+	{ 0x00, 0x36, 0x36, 0x00, 0x00 }, // 0x3a :
+	{ 0x00, 0x56, 0x36, 0x00, 0x00 }, // 0x3b ;
+	{ 0x08, 0x14, 0x22, 0x41, 0x00 }, // 0x3c <
+	{ 0x14, 0x14, 0x14, 0x14, 0x14 }, // 0x3d =
+	{ 0x00, 0x41, 0x22, 0x14, 0x08 }, // 0x3e >
+	{ 0x02, 0x01, 0x51, 0x09, 0x06 }, // 0x3f ?
+	{ 0x32, 0x49, 0x79, 0x41, 0x3e }, // 0x40 @
+	{ 0x7e, 0x11, 0x11, 0x11, 0x7e }, // 0x41 A
+	{ 0x7f, 0x49, 0x49, 0x49, 0x36 }, // 0x42 B
+	{ 0x3e, 0x41, 0x41, 0x41, 0x22 }, // 0x43 C
+	{ 0x7f, 0x41, 0x41, 0x22, 0x1c }, // 0x44 D
+	{ 0x7f, 0x49, 0x49, 0x49, 0x41 }, // 0x45 E
+	{ 0x7f, 0x09, 0x09, 0x09, 0x01 }, // 0x46 F
+	{ 0x3e, 0x41, 0x49, 0x49, 0x7a }, // 0x47 G
+	{ 0x7f, 0x08, 0x08, 0x08, 0x7f }, // 0x48 H
+	{ 0x00, 0x41, 0x7f, 0x41, 0x00 }, // 0x49 I
+	{ 0x20, 0x40, 0x41, 0x3f, 0x01 }, // 0x4a J
+	{ 0x7f, 0x08, 0x14, 0x22, 0x41 }, // 0x4b K
+	{ 0x7f, 0x40, 0x40, 0x40, 0x40 }, // 0x4c L
+	{ 0x7f, 0x02, 0x0c, 0x02, 0x7f }, // 0x4d M
+	{ 0x7f, 0x04, 0x08, 0x10, 0x7f }, // 0x4e N
+	{ 0x3e, 0x41, 0x41, 0x41, 0x3e }, // 0x4f O
+	{ 0x7f, 0x09, 0x09, 0x09, 0x06 }, // 0x50 P
+	{ 0x3e, 0x41, 0x51, 0x21, 0x5e }, // 0x51 Q
+	{ 0x7f, 0x09, 0x19, 0x29, 0x46 }, // 0x52 R
+	{ 0x46, 0x49, 0x49, 0x49, 0x31 }, // 0x53 S
+	{ 0x01, 0x01, 0x7f, 0x01, 0x01 }, // 0x54 T
+	{ 0x3f, 0x40, 0x40, 0x40, 0x3f }, // 0x55 U
+	{ 0x1f, 0x20, 0x40, 0x20, 0x1f }, // 0x56 V
+	{ 0x3f, 0x40, 0x38, 0x40, 0x3f }, // 0x57 W
+	{ 0x63, 0x14, 0x08, 0x14, 0x63 }, // 0x58 X
+	{ 0x07, 0x08, 0x70, 0x08, 0x07 }, // 0x59 Y
+	{ 0x61, 0x51, 0x49, 0x45, 0x43 }, // 0x5a Z
+	{ 0x00, 0x7f, 0x41, 0x41, 0x00 }, // 0x5b [
+	{ 0x02, 0x04, 0x08, 0x10, 0x20 }, // 0x5c backslash
+	{ 0x00, 0x41, 0x41, 0x7f, 0x00 }, // 0x5d ]
+	{ 0x04, 0x02, 0x01, 0x02, 0x04 }, // 0x5e ^
+	{ 0x40, 0x40, 0x40, 0x40, 0x40 }, // 0x5f _
+	{ 0x00, 0x01, 0x02, 0x04, 0x00 }, // 0x60 `
+	{ 0x20, 0x54, 0x54, 0x54, 0x78 }, // 0x61 a
+	{ 0x7f, 0x48, 0x44, 0x44, 0x38 }, // 0x62 b
+	{ 0x38, 0x44, 0x44, 0x44, 0x20 }, // 0x63 c
+	{ 0x38, 0x44, 0x44, 0x48, 0x7f }, // 0x64 d
+	{ 0x38, 0x54, 0x54, 0x54, 0x18 }, // 0x65 e
+	{ 0x08, 0x7e, 0x09, 0x01, 0x02 }, // 0x66 f
+	{ 0x0c, 0x52, 0x52, 0x52, 0x3e }, // 0x67 g
+	{ 0x7f, 0x08, 0x04, 0x04, 0x78 }, // 0x68 h
+	{ 0x00, 0x44, 0x7d, 0x40, 0x00 }, // 0x69 i
+	{ 0x20, 0x40, 0x44, 0x3d, 0x00 }, // 0x6a j
+	{ 0x7f, 0x10, 0x28, 0x44, 0x00 }, // 0x6b k
+	{ 0x00, 0x41, 0x7f, 0x40, 0x00 }, // 0x6c l
+	{ 0x7c, 0x04, 0x18, 0x04, 0x78 }, // 0x6d m
+	{ 0x7c, 0x08, 0x04, 0x04, 0x78 }, // 0x6e n
+	{ 0x38, 0x44, 0x44, 0x44, 0x38 }, // 0x6f o
+	{ 0x7c, 0x14, 0x14, 0x14, 0x08 }, // 0x70 p
+	{ 0x08, 0x14, 0x14, 0x18, 0x7c }, // 0x71 q
+	{ 0x7c, 0x08, 0x04, 0x04, 0x08 }, // 0x72 r
+	{ 0x48, 0x54, 0x54, 0x54, 0x20 }, // 0x73 s
+	{ 0x04, 0x3f, 0x44, 0x40, 0x20 }, // 0x74 t
+	{ 0x3c, 0x40, 0x40, 0x20, 0x7c }, // 0x75 u
+	{ 0x1c, 0x20, 0x40, 0x20, 0x1c }, // 0x76 v
+	{ 0x3c, 0x40, 0x30, 0x40, 0x3c }, // 0x77 w
+	{ 0x44, 0x28, 0x10, 0x28, 0x44 }, // 0x78 x
+	{ 0x0c, 0x50, 0x50, 0x50, 0x3c }, // 0x79 y
+	{ 0x44, 0x64, 0x54, 0x4c, 0x44 }, // 0x7a z
+};
+
+// Highest ASCII code the table covers (0x7a = 'z').
+#define FONT_LAST 0x7a
+
+// ------------------------------------------------------- oled: framebuffer ---
+
+// Set or clear one pixel. Off-screen coordinates are dropped so callers never
+// have to clip. page = y/8, bit = y%8, matching the SSD1306 GDDRAM layout.
+static void set_pixel(int x, int y, int on)
+{
+	if (x < 0 || x >= OLED_W || y < 0 || y >= OLED_H)
+		return;
+	uint8_t *cell = &oled_fb[(y / 8) * OLED_W + x];
+	uint8_t bit = (uint8_t)(1u << (y % 8));
+	if (on)
+		*cell |= bit;
+	else
+		*cell &= (uint8_t)~bit;
+}
+
+static void oled_clear(void)
+{
+	memset(oled_fb, 0, sizeof(oled_fb));
+}
+
+// Draw one glyph at (x,y), y being the top pixel row. Returns nothing; callers
+// step x by GLYPH_W. Codepoints outside the covered range render as a blank
+// cell, so a stray byte never smears the display.
+static void oled_draw_char(int x, int y, char ch)
+{
+	unsigned c = (unsigned char)ch;
+	if (c < 0x20 || c > FONT_LAST)
+		c = 0x20; // space for anything we do not carry
+	const uint8_t *g = oled_font[c - 0x20];
+	for (int col = 0; col < FONT_W; col++) {
+		uint8_t bits = g[col];
+		for (int row = 0; row < FONT_H; row++)
+			if (bits & (1u << row))
+				set_pixel(x + col, y + row, 1);
+	}
+}
+
+// Draw a NUL-terminated string. Characters are laid out left to right with the
+// 1px inter-char gap baked into GLYPH_W; drawing stops at the right edge.
+static void oled_draw_text(int x, int y, const char *s)
+{
+	for (; *s; s++) {
+		if (x >= OLED_W)
+			break;
+		oled_draw_char(x, y, *s);
+		x += GLYPH_W;
+	}
+}
+
+// Draw a "big" (2x scaled) string for the hero number on the battery view. Each
+// source pixel becomes a 2x2 block, so glyphs are 10px wide + 2px gap = 12px.
+static void oled_draw_text_2x(int x, int y, const char *s)
+{
+	for (; *s; s++) {
+		if (x >= OLED_W)
+			break;
+		unsigned c = (unsigned char)*s;
+		if (c < 0x20 || c > FONT_LAST)
+			c = 0x20;
+		const uint8_t *g = oled_font[c - 0x20];
+		for (int col = 0; col < FONT_W; col++) {
+			uint8_t bits = g[col];
+			for (int row = 0; row < FONT_H; row++) {
+				if (!(bits & (1u << row)))
+					continue;
+				int px = x + col * 2;
+				int py = y + row * 2;
+				set_pixel(px, py, 1);
+				set_pixel(px + 1, py, 1);
+				set_pixel(px, py + 1, 1);
+				set_pixel(px + 1, py + 1, 1);
+			}
+		}
+		x += 2 * GLYPH_W;
+	}
+}
+
+// A horizontal bar: a hollow rectangle w x h at (x,y) with the leftmost
+// frac (0..1) of its interior filled. Clamped so out-of-range fractions saturate
+// rather than overrun. Handy for a battery/CPU/mem gauge.
+static void oled_draw_hbar(int x, int y, int w, int h, double frac)
+{
+	if (w < 2 || h < 2)
+		return;
+	if (frac < 0.0)
+		frac = 0.0;
+	if (frac > 1.0)
+		frac = 1.0;
+
+	// Border.
+	for (int i = 0; i < w; i++) {
+		set_pixel(x + i, y, 1);
+		set_pixel(x + i, y + h - 1, 1);
+	}
+	for (int j = 0; j < h; j++) {
+		set_pixel(x, y + j, 1);
+		set_pixel(x + w - 1, y + j, 1);
+	}
+
+	// Fill. The interior is (w-2) x (h-2), inset by the 1px border.
+	int inner = w - 2;
+	int fill = (int)(inner * frac + 0.5);
+	for (int i = 0; i < fill; i++)
+		for (int j = 1; j < h - 1; j++)
+			set_pixel(x + 1 + i, y + j, 1);
+}
+
+// -------------------------------------------------------------- oled: i2c ---
+
+// Open the I2C bus and bind to the SSD1306's slave address. Returns an fd, or -1
+// with a message on stderr. The bus node is created by the DTS enabling i2c1; it
+// may not exist on a core that does not mux it, which is not fatal for the tool.
+static int oled_open(void)
+{
+	int fd = open(OLED_I2C_BUS, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "nix-badge: cannot open %s: %s\n", OLED_I2C_BUS,
+			strerror(errno));
+		return -1;
+	}
+	if (ioctl(fd, I2C_SLAVE, OLED_I2C_ADDR) < 0) {
+		fprintf(stderr, "nix-badge: cannot select I2C addr 0x%02x: %s\n",
+			OLED_I2C_ADDR, strerror(errno));
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+// Send a run of command bytes as one control(0x00)+payload frame. Returns 0 on
+// success. The SSD1306 accepts a whole command list after a single 0x00 control
+// byte, so init is a handful of writes rather than one per command.
+static int oled_cmds(int fd, const uint8_t *cmds, size_t n)
+{
+	uint8_t buf[64];
+	if (n + 1 > sizeof(buf))
+		return -1; // our init lists are short; keep the stack frame tiny
+	buf[0] = 0x00; // Co=0, D/C#=0 -> command stream
+	memcpy(buf + 1, cmds, n);
+	ssize_t w = write(fd, buf, n + 1);
+	return (w == (ssize_t)(n + 1)) ? 0 : -1;
+}
+
+static int oled_cmd1(int fd, uint8_t c)
+{
+	return oled_cmds(fd, &c, 1);
+}
+
+// Push the whole 512-byte framebuffer to GDDRAM. We first point the column and
+// page address windows at the full 128x32 panel (horizontal addressing mode set
+// in init auto-advances across it), then stream the buffer behind a single 0x40
+// control byte. One 513-byte write is well under the i2c-dev per-transfer limit.
+static int oled_flush(int fd)
+{
+	uint8_t win[] = {
+		SSD1306_COLUMNADDR, 0, OLED_W - 1,	  // columns 0..127
+		SSD1306_PAGEADDR,   0, OLED_PAGES - 1,	  // pages 0..3
+	};
+	if (oled_cmds(fd, win, sizeof(win)) != 0)
+		return -1;
+
+	uint8_t buf[1 + OLED_FBLEN];
+	buf[0] = 0x40; // Co=0, D/C#=1 -> data stream
+	memcpy(buf + 1, oled_fb, OLED_FBLEN);
+	ssize_t w = write(fd, buf, sizeof(buf));
+	return (w == (ssize_t)sizeof(buf)) ? 0 : -1;
+}
+
+// The SSD1306 power-on / config sequence for a 128x32 panel. This is the classic
+// Adafruit init tuned for the 32-row geometry: multiplex 0x1f (32 rows), COM
+// pins 0x02 (sequential, no remap, right for 128x32), charge pump on, horizontal
+// addressing mode, segment remap + reversed COM scan so (0,0) is top-left in the
+// usual orientation. Returns 0 on success.
+static int oled_init(int fd)
+{
+	static const uint8_t init[] = {
+		SSD1306_DISPLAYOFF,
+		SSD1306_SETDISPLAYCLOCKDIV, 0x80,	// default ratio / osc freq
+		SSD1306_SETMULTIPLEX, 0x1f,		// 32 rows (MUX = height-1)
+		SSD1306_SETDISPLAYOFFSET, 0x00,
+		SSD1306_SETSTARTLINE | 0x00,
+		SSD1306_CHARGEPUMP, 0x14,		// internal charge pump on
+		SSD1306_MEMORYMODE, 0x00,		// horizontal addressing
+		SSD1306_SEGREMAP,			// col 127 -> SEG0
+		SSD1306_COMSCANDEC,			// scan COM[N-1]..COM0
+		SSD1306_SETCOMPINS, 0x02,		// 128x32 COM pin layout
+		SSD1306_SETCONTRAST, 0x8f,
+		SSD1306_SETPRECHARGE, 0xf1,		// charge-pump precharge
+		SSD1306_SETVCOMDETECT, 0x40,
+		SSD1306_DISPLAYALLON_RESUME,		// follow GDDRAM, not all-on
+		SSD1306_NORMALDISPLAY,			// non-inverted
+		SSD1306_DISPLAYON,
+	};
+	// The init list is longer than one oled_cmds frame is sized for, and some
+	// panels dislike a giant command burst, so send it a few bytes at a time.
+	for (size_t i = 0; i < sizeof(init); i += 8) {
+		size_t chunk = sizeof(init) - i;
+		if (chunk > 8)
+			chunk = 8;
+		if (oled_cmds(fd, init + i, chunk) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+// ------------------------------------------------------------ oled: sensors ---
+//
+// Small readers for the "load" view, kept local to the oled section. Each is
+// tolerant of a missing/garbled /proc file: on failure it leaves the out-params
+// at whatever the caller pre-seeded, so a transient read error just repeats the
+// last value rather than blanking the HUD.
+
+// 1/5/15-minute load averages from /proc/loadavg.
+static void read_loadavg(double *l1, double *l5, double *l15)
+{
+	FILE *f = fopen("/proc/loadavg", "r");
+	if (!f)
+		return;
+	double a = 0, b = 0, c = 0;
+	if (fscanf(f, "%lf %lf %lf", &a, &b, &c) == 3) {
+		*l1 = a;
+		*l5 = b;
+		*l15 = c;
+	}
+	fclose(f);
+}
+
+// Aggregate CPU jiffies from the first "cpu" line of /proc/stat, split into
+// "busy" (user+nice+system+irq+softirq+steal) and "idle" (idle+iowait). The
+// caller diffs two samples to get a utilisation fraction; a single reading is
+// meaningless on its own.
+static void read_cpu_jiffies(unsigned long long *busy, unsigned long long *idle)
+{
+	*busy = 0;
+	*idle = 0;
+	FILE *f = fopen("/proc/stat", "r");
+	if (!f)
+		return;
+	char lbl[16];
+	unsigned long long u = 0, ni = 0, sy = 0, id = 0, io = 0, irq = 0,
+			   sirq = 0, st = 0;
+	// user nice system idle iowait irq softirq steal (guests folded into user)
+	if (fscanf(f, "%15s %llu %llu %llu %llu %llu %llu %llu %llu", lbl, &u,
+		   &ni, &sy, &id, &io, &irq, &sirq, &st) >= 5) {
+		*busy = u + ni + sy + irq + sirq + st;
+		*idle = id + io;
+	}
+	fclose(f);
+}
+
+// Memory used fraction (0..1) from /proc/meminfo: (MemTotal - MemAvailable) /
+// MemTotal. MemAvailable already accounts for reclaimable cache, so this tracks
+// real pressure rather than the misleading "free" number.
+static double read_mem_used_frac(void)
+{
+	FILE *f = fopen("/proc/meminfo", "r");
+	if (!f)
+		return 0.0;
+	char key[32];
+	unsigned long val;
+	char unit[16];
+	unsigned long total = 0, avail = 0;
+	while (fscanf(f, "%31s %lu %15s", key, &val, unit) >= 2) {
+		if (strcmp(key, "MemTotal:") == 0)
+			total = val;
+		else if (strcmp(key, "MemAvailable:") == 0)
+			avail = val;
+		if (total && avail)
+			break;
+	}
+	fclose(f);
+	if (!total)
+		return 0.0;
+	if (avail > total)
+		avail = total;
+	return (double)(total - avail) / (double)total;
+}
+
+// System uptime in whole seconds from /proc/uptime.
+static unsigned long read_uptime_s(void)
+{
+	FILE *f = fopen("/proc/uptime", "r");
+	if (!f)
+		return 0;
+	double up = 0;
+	if (fscanf(f, "%lf", &up) != 1)
+		up = 0;
+	fclose(f);
+	return (unsigned long)up;
+}
+
+// -------------------------------------------------------------- oled: views ---
+//
+// Each view paints the whole framebuffer for one screen. They pull their data
+// through the same SARADC/GPIO helpers `power` uses, so the meter matches the
+// CLI numbers and self-calibrates off VBUS. Voltages come out as
+// raw * scale * saradc_factor() / 1000 volts, exactly like cmd_power.
+
+enum oled_view {
+	VIEW_BATTERY = 0,
+	VIEW_LOAD,
+	VIEW_POWER,
+	VIEW_COUNT,
+};
+
+// Read one rail (channel ch) in volts, or a negative number on failure. dir/scale
+// are passed in so a view reads several rails without re-scanning sysfs.
+static double oled_rail_volts(const char *dir, double scale, int ch)
+{
+	int raw = saradc_median_raw(dir, ch);
+	if (raw < 0)
+		return -1.0;
+	return raw * scale * saradc_factor() / 1000.0;
+}
+
+// Resolve the SARADC directory and in_voltage_scale once per render. Returns 0
+// and fills dir/scale on success; -1 if the ADC is unavailable.
+static int oled_adc_setup(char *dir, size_t dirlen, double *scale)
+{
+	if (saradc_dir(dir, dirlen) != 0)
+		return -1;
+	char sp[96];
+	snprintf(sp, sizeof(sp), "%s/in_voltage_scale", dir);
+	if (read_sysfs_double(sp, scale) != 0)
+		return -1;
+	return 0;
+}
+
+// View 1 -- battery: VBAT big, a 3.0..4.2 V bar with a rough %, and a USB tag.
+static void oled_view_battery(void)
+{
+	oled_clear();
+
+	char dir[64];
+	double scale;
+	double vbat = -1.0;
+	if (oled_adc_setup(dir, sizeof(dir), &scale) == 0)
+		vbat = oled_rail_volts(dir, scale, 1); // VBAT is channel 1
+
+	int vbus = gpio_read_line("usb-vbus-det");
+
+	oled_draw_text(0, 0, "BATT");
+	if (vbus == 1)
+		oled_draw_text(OLED_W - 3 * GLYPH_W, 0, "USB");
+
+	char big[16];
+	if (vbat >= 0.0) {
+		snprintf(big, sizeof(big), "%.2fV", vbat);
+		oled_draw_text_2x(0, 9, big);
+	} else {
+		oled_draw_text_2x(0, 9, "--.--");
+	}
+
+	// Linear 3.0 V (empty) .. 4.2 V (full). Crude but honest for a Li-ion HUD.
+	double frac = (vbat - 3.0) / (4.2 - 3.0);
+	if (frac < 0.0)
+		frac = 0.0;
+	if (frac > 1.0)
+		frac = 1.0;
+
+	oled_draw_hbar(0, OLED_H - 7, OLED_W - 24, 7, vbat >= 0.0 ? frac : 0.0);
+	char pct[8];
+	snprintf(pct, sizeof(pct), "%3d%%", (int)(frac * 100.0 + 0.5));
+	oled_draw_text(OLED_W - 22, OLED_H - 7, pct);
+}
+
+// View 2 -- load: 1-min loadavg (big-ish), a CPU% bar and a mem% bar. The CPU
+// fraction is a static delta across renders; the first frame after a view switch
+// shows 0% until the second sample lands, which is fine at ~12 fps.
+static void oled_view_load(double cpu_frac, double mem_frac)
+{
+	oled_clear();
+
+	double l1 = 0, l5 = 0, l15 = 0;
+	read_loadavg(&l1, &l5, &l15);
+
+	// Header: 1-min load on the left, uptime as up:NNh / up:NNm on the right.
+	char line[24];
+	snprintf(line, sizeof(line), "LD %.2f %.2f", l1, l5);
+	oled_draw_text(0, 0, line);
+
+	unsigned long up = read_uptime_s();
+	char ut[24];
+	// Clamp the displayed hours so a bogus /proc/uptime cannot make a silly
+	// wide string; anything past ~41 days just pins at 999h.
+	unsigned hours = up / 3600 > 999 ? 999 : (unsigned)(up / 3600);
+	unsigned mins = (unsigned)((up % 3600) / 60);
+	if (up >= 3600)
+		snprintf(ut, sizeof(ut), "%uh", hours);
+	else
+		snprintf(ut, sizeof(ut), "%um", mins);
+	int utx = OLED_W - (int)strlen(ut) * GLYPH_W;
+	oled_draw_text(utx < 0 ? 0 : utx, 0, ut);
+
+	if (cpu_frac < 0.0)
+		cpu_frac = 0.0;
+	if (mem_frac < 0.0)
+		mem_frac = 0.0;
+
+	oled_draw_text(0, 11, "CPU");
+	oled_draw_hbar(4 * GLYPH_W, 10, OLED_W - 4 * GLYPH_W - 26, 8, cpu_frac);
+	char cp[8];
+	snprintf(cp, sizeof(cp), "%3d%%", (int)(cpu_frac * 100.0 + 0.5));
+	oled_draw_text(OLED_W - 22, 11, cp);
+
+	oled_draw_text(0, 22, "MEM");
+	oled_draw_hbar(4 * GLYPH_W, 21, OLED_W - 4 * GLYPH_W - 26, 8, mem_frac);
+	char mp[8];
+	snprintf(mp, sizeof(mp), "%3d%%", (int)(mem_frac * 100.0 + 0.5));
+	oled_draw_text(OLED_W - 22, 22, mp);
+}
+
+// View 3 -- power/rails: VSEL and VBUS volts, VBUS presence, and any asserted
+// fault by short name. Mirrors what `nix-badge power` prints, condensed to 4
+// lines of 5x7 text (4 * 8px = 32px, exactly the panel height).
+static void oled_view_power(void)
+{
+	oled_clear();
+
+	char dir[64];
+	double scale;
+	double vsel = -1.0;
+	if (oled_adc_setup(dir, sizeof(dir), &scale) == 0)
+		vsel = oled_rail_volts(dir, scale, 0); // VSEL is channel 0
+
+	int vbus = gpio_read_line("usb-vbus-det");
+
+	char line[24];
+	if (vsel >= 0.0)
+		snprintf(line, sizeof(line), "VSEL %.2fV", vsel);
+	else
+		snprintf(line, sizeof(line), "VSEL --.--");
+	oled_draw_text(0, 0, line);
+
+	snprintf(line, sizeof(line), "VBUS %s",
+		 vbus < 0 ? "unk" : (vbus ? "yes" : "no"));
+	oled_draw_text(0, 8, line);
+
+	// Active-low fault lines: 0 = FAULT. Collect the asserted ones by short
+	// name onto one line; show "OK" when everything is clear.
+	static const struct {
+		const char *name;
+		const char *line;
+	} faults[] = {
+		{ "USB", "usb-5v-fault-n" },
+		{ "HDMI", "hdmi-5v-fault-n" },
+		{ "SD", "sd-fault-n" },
+		{ "SAO", "sao-fault-n" },
+	};
+	char flt[24];
+	size_t used = 0;
+	flt[0] = '\0';
+	for (size_t i = 0; i < 4; i++) {
+		int v = gpio_read_line(faults[i].line);
+		if (v == 0) { // asserted (active low)
+			int n = snprintf(flt + used, sizeof(flt) - used, "%s%s",
+					 used ? " " : "", faults[i].name);
+			if (n > 0 && (size_t)n < sizeof(flt) - used)
+				used += (size_t)n;
+		}
+	}
+	oled_draw_text(0, 16, "FLT:");
+	oled_draw_text(4 * GLYPH_W, 16, used ? flt : "OK");
+}
+
+// -------------------------------------------------------------- oled: run ---
+
+// Blank the panel and turn the display off. Used by `oled off` and on exit from
+// `oled run`, so a stopped service does not leave a frozen frame lit.
+static int oled_blank_off(int fd)
+{
+	oled_clear();
+	int rc = oled_flush(fd);
+	if (oled_cmd1(fd, SSD1306_DISPLAYOFF) != 0)
+		rc = -1;
+	return rc;
+}
+
+static int cmd_oled_run(void)
+{
+	int fd = oled_open();
+	if (fd < 0)
+		return 1;
+	if (oled_init(fd) != 0) {
+		fprintf(stderr, "nix-badge: SSD1306 init failed: %s\n",
+			strerror(errno));
+		close(fd);
+		return 1;
+	}
+
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = on_signal;
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGINT, &sa, NULL);
+
+	fprintf(stderr, "nix-badge: oled up on %s @ 0x%02x, %dx%d\n",
+		OLED_I2C_BUS, OLED_I2C_ADDR, OLED_W, OLED_H);
+
+	int view = VIEW_BATTERY;
+
+	// USER button (btn-boot-n) is active-low: 0 = pressed. We edge-detect a
+	// press (was released, now pressed) and advance the view once per press,
+	// so a held button does not spin through every screen.
+	int btn_prev = 1; // assume released at start
+
+	// CPU utilisation is a delta between renders, so we keep the previous
+	// jiffy sample. mem is instantaneous.
+	unsigned long long busy_prev = 0, idle_prev = 0;
+	read_cpu_jiffies(&busy_prev, &idle_prev);
+	double cpu_frac = 0.0;
+
+	// ~12 fps. Plenty for a status HUD and light on the I2C bus / CPU.
+	const long frame_ns = 1000000000L / 12;
+
+	while (!stop_requested) {
+		struct timespec t_a;
+		clock_gettime(CLOCK_MONOTONIC, &t_a);
+
+		// Opportunistic self-calibration off VBUS, same as `power`. Quiet,
+		// idempotent: a no-op once a factor is stored or on battery.
+		saradc_calibrate(0, 1);
+
+		// Debounced button edge -> advance the view.
+		int btn = gpio_read_line("btn-boot-n");
+		if (btn == 0 && btn_prev == 1)
+			view = (view + 1) % VIEW_COUNT;
+		if (btn >= 0)
+			btn_prev = btn;
+
+		// Refresh the CPU delta every frame regardless of the active view,
+		// so switching to the load screen shows a live number at once.
+		unsigned long long busy = 0, idle = 0;
+		read_cpu_jiffies(&busy, &idle);
+		unsigned long long dbusy = busy - busy_prev;
+		unsigned long long didle = idle - idle_prev;
+		unsigned long long dtot = dbusy + didle;
+		if (dtot)
+			cpu_frac = (double)dbusy / (double)dtot;
+		busy_prev = busy;
+		idle_prev = idle;
+
+		switch (view) {
+		case VIEW_LOAD:
+			oled_view_load(cpu_frac, read_mem_used_frac());
+			break;
+		case VIEW_POWER:
+			oled_view_power();
+			break;
+		case VIEW_BATTERY:
+		default:
+			oled_view_battery();
+			break;
+		}
+
+		if (oled_flush(fd) != 0)
+			fprintf(stderr, "nix-badge: oled flush failed: %s\n",
+				strerror(errno));
+
+		// Sleep the remainder of the frame.
+		struct timespec t_b;
+		clock_gettime(CLOCK_MONOTONIC, &t_b);
+		long spent_ns = (long)((t_b.tv_sec - t_a.tv_sec) * 1000000000L +
+				       (t_b.tv_nsec - t_a.tv_nsec));
+		long rem_ns = frame_ns - spent_ns;
+		if (rem_ns > 0) {
+			struct timespec ts = { .tv_sec = 0, .tv_nsec = rem_ns };
+			nanosleep(&ts, NULL);
+		}
+	}
+
+	// Leave the panel dark on a clean stop so a restarted service repaints
+	// from a known state rather than a stale frame.
+	oled_blank_off(fd);
+	close(fd);
+	return 0;
+}
+
+static int cmd_oled_off(void)
+{
+	int fd = oled_open();
+	if (fd < 0)
+		return 1;
+	// The panel may be uninitialised (fresh boot with no `run` yet), so bring
+	// the controller up first, then blank + display-off. init is idempotent.
+	oled_init(fd);
+	int rc = oled_blank_off(fd);
+	close(fd);
+	return rc == 0 ? 0 : 1;
+}
+
+static int cmd_oled(int argc, char **argv)
+{
+	if (argc < 1) {
+		fprintf(stderr, "usage: nix-badge oled <run|off>\n");
+		return 2;
+	}
+	if (strcmp(argv[0], "run") == 0)
+		return cmd_oled_run();
+	if (strcmp(argv[0], "off") == 0)
+		return cmd_oled_off();
+	fprintf(stderr, "oled: expected run or off\n");
+	return 2;
+}
+
 // =================================================================== main ===
 
 static void usage(void)
@@ -1534,6 +2306,7 @@ static void usage(void)
 		"  nix-badge leds show\n"
 		"  nix-badge core <arm|riscv|status>\n"
 		"  nix-badge power [calibrate]\n"
+		"  nix-badge oled <run|off>\n"
 		"\n"
 		"patterns: off solid pulse rainbow chase\n");
 }
@@ -1566,6 +2339,8 @@ int main(int argc, char **argv)
 		return cmd_core(argc - 2, argv + 2);
 	if (strcmp(argv[1], "power") == 0)
 		return cmd_power(argc - 2, argv + 2);
+	if (strcmp(argv[1], "oled") == 0)
+		return cmd_oled(argc - 2, argv + 2);
 	usage();
 	return 2;
 }
