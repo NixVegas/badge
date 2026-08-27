@@ -138,4 +138,42 @@
  */
 &saradc {
 	status = "okay";
+	/* Expose the ADC channels to in-kernel consumers (the iio-rescale below). */
+	#io-channel-cells = <1>;
+};
+
+/*
+ * VBAT as a standard Linux power_supply, to compare against nix-badge's
+ * per-badge VBUS auto-cal and decide fixed-factor-vs-cal. iio-rescale
+ * (voltage-divider) applies a FIXED factor to the VBAT SARADC channel;
+ * generic-adc-battery (adc-battery) then publishes it at
+ * /sys/class/power_supply/. The physical divider is 2.2M/1M (x3.2), but the
+ * ~138k leaky SARADC input loads it to an effective ~19.24, so output/full-ohms
+ * encode ~19.24 (a per-SoC approximation, NOT the real resistors). Compare
+ * voltage_now here to `nix-badge power` (which auto-cals per badge off the ~5V
+ * VBUS) to see how far a single fixed factor drifts across badges/temperature.
+ * Both cores get this via the shared dtsi. Drivers autoload (CONFIG_IIO_RESCALE,
+ * CONFIG_GENERIC_ADC_BATTERY are =m).
+ */
+/ {
+	vbat_scaled: vbat-divider {
+		compatible = "voltage-divider";
+		io-channels = <&saradc 1>; /* VBAT = SARADC channel 1 */
+		#io-channel-cells = <1>;
+		output-ohms = <1000>;
+		full-ohms = <19240>; /* 19240/1000 = 19.24 effective factor */
+	};
+
+	badge_battery: badge-battery {
+		compatible = "simple-battery";
+		voltage-min-design-microvolt = <3000000>;
+		voltage-max-design-microvolt = <4200000>;
+	};
+
+	vbat_supply: vbat-adc-battery {
+		compatible = "adc-battery";
+		io-channels = <&vbat_scaled 0>;
+		io-channel-names = "voltage";
+		monitored-battery = <&badge_battery>;
+	};
 };
