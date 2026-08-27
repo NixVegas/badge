@@ -13,6 +13,14 @@
     # badge's nixpkgs so the target-arch activate wrapper matches the systems.
     deploy-rs.url = "github:serokell/deploy-rs";
     deploy-rs.inputs.nixpkgs.follows = "nixpkgs-2605";
+    # psyclyx/fix: a fast, parallel Nix-language evaluator (Zig). It has no
+    # flake.nix (it uses npins), so it comes in as a plain source and is built
+    # via its own default.nix overlay against our nixpkgs (which has zig_0_16).
+    # Used at build time to evaluate the pure-Nix bling screens into blobs.
+    fix = {
+      url = "github:psyclyx/fix";
+      flake = false;
+    };
   };
 
   outputs =
@@ -251,6 +259,16 @@
             v1 = pkgs.nixbadge-v1;
             # OpenOCD with the CH347 driver, for JTAG over the badge's J1 port.
             openocd-ch347 = import ./pkgs/openocd-ch347.nix { inherit pkgs; };
+            # The `fix` evaluator (psyclyx/fix), built via its overlay on our
+            # nixpkgs. Exposed so the bling content bake can use it.
+            fix = (pkgs.extend (import inputs.fix { }).overlay).fix;
+            # A pure-Nix OLED animation baked to a BADA blob by `fix` -- the
+            # proof that the badge's screens can be authored in Nix. Play with
+            # `nix-badge bling --badapple <result>/bling-anim.bin`.
+            bling-demo = import ./pkgs/badge/bling-content {
+              inherit pkgs;
+              fix = (pkgs.extend (import inputs.fix { }).overlay).fix;
+            };
           };
 
           devShells = {

@@ -22,6 +22,22 @@
         "type": "github"
       }
     },
+    "fix": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1787807081,
+        "narHash": "sha256-MVcIbItFSct4CtYluISwkN3798Z/aJNpARnAtoE5vUY=",
+        "owner": "psyclyx",
+        "repo": "fix",
+        "rev": "2b23db57bfe4e1ae498ca4f841358a5c52752699",
+        "type": "github"
+      },
+      "original": {
+        "owner": "psyclyx",
+        "repo": "fix",
+        "type": "github"
+      }
+    },
     "flake-compat": {
       "flake": false,
       "locked": {
@@ -188,6 +204,7 @@
     "root": {
       "inputs": {
         "deploy-rs": "deploy-rs",
+        "fix": "fix",
         "flake-compat": "flake-compat_2",
         "flake-parts": "flake-parts",
         "flakever": "flakever",
