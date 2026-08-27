@@ -1388,13 +1388,27 @@ static int saradc_median_raw(const char *dir, int ch)
 // DMM step. VSEL and VBAT share the divider, so the same factor calibrates the
 // battery read. No-op (keeps the stored factor) when VBUS is absent: on battery
 // there is no known reference, so the last USB-calibrated factor is reused.
-#define SARADC_VBUS_NOMINAL_MV 5000.0
-static int saradc_calibrate(void)
+// The observed VBUS at VSEL is ~4.96V, not a clean 5.00V -- a small drop through
+// the power tree from the USB rail -- so calibrate to that measured value.
+#define SARADC_VBUS_NOMINAL_MV 4960.0
+#define SARADC_FACTOR_FILE "/var/lib/nix-badge/saradc-factor"
+static int saradc_calibrate(int force)
 {
+	// Calibrate once per badge: if a factor was already stored, keep it unless
+	// forced. So the boot service can run every boot and only acts the first
+	// time it gets the chance (VBUS plugged and not yet calibrated).
+	if (!force && access(SARADC_FACTOR_FILE, F_OK) == 0) {
+		double cur = 0;
+		read_sysfs_double(SARADC_FACTOR_FILE, &cur);
+		printf("calibrate: already calibrated (factor %.4f); "
+		       "use --force to redo\n",
+		       cur);
+		return 0;
+	}
 	int vbus = gpio_read_line("usb-vbus-det");
 	if (vbus != 1) {
-		fprintf(stderr, "calibrate: USB VBUS %s; no 5V reference, "
-				"factor unchanged\n",
+		fprintf(stderr, "calibrate: USB VBUS %s; no reference yet, will "
+				"calibrate on a later boot with power plugged\n",
 			vbus < 0 ? "unknown" : "absent");
 		return 1;
 	}
@@ -1415,9 +1429,9 @@ static int saradc_calibrate(void)
 		return 1;
 	}
 	double factor = SARADC_VBUS_NOMINAL_MV / (raw * scale);
-	FILE *f = fopen("/var/lib/nix-badge/saradc-factor", "w");
+	FILE *f = fopen(SARADC_FACTOR_FILE, "w");
 	if (!f) {
-		perror("calibrate: /var/lib/nix-badge/saradc-factor");
+		perror("calibrate: " SARADC_FACTOR_FILE);
 		return 1;
 	}
 	fprintf(f, "%.4f\n", factor);
@@ -1429,8 +1443,10 @@ static int saradc_calibrate(void)
 
 static int cmd_power(int argc, char **argv)
 {
-	if (argc >= 1 && strcmp(argv[0], "calibrate") == 0)
-		return saradc_calibrate();
+	if (argc >= 1 && strcmp(argv[0], "calibrate") == 0) {
+		int force = argc >= 2 && strcmp(argv[1], "--force") == 0;
+		return saradc_calibrate(force);
+	}
 	(void)argc;
 	(void)argv;
 
