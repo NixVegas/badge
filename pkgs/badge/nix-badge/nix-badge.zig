@@ -944,14 +944,50 @@ fn blingWait(want_ms: u32, button: ?sysfs.Button, press: *PressState) void {
     }
 }
 
+// Where the current OLED screen is remembered across reboots. The LED pattern
+// already persists (the leds service layers /var/lib/nix-badge/leds.conf over the
+// declarative base at startup); this is the screen's equivalent. Persisted by
+// NAME, not index, so it survives a registry that changes shape (badapple present
+// or not).
+const bling_state_file: [*:0]const u8 = "/var/lib/nix-badge/bling.state";
+
+/// Restore the last-shown screen. A missing file or an unknown name (e.g. the
+/// saved screen is gone this boot) starts at screen 0.
+fn restoreScreen(active: []const Screen) usize {
+    var buf: [64]u8 = undefined;
+    const raw = linux.readFile(bling_state_file, &buf) orelse return 0;
+    const name = std.mem.trim(u8, raw, " \t\r\n");
+    for (active, 0..) |s, ix| {
+        if (std.mem.eql(u8, s.name, name)) return ix;
+    }
+    return 0;
+}
+
+/// Persist the current screen name for the next boot. Best-effort: a write fault
+/// only loses which screen was up, so it is logged, not fatal.
+fn persistScreen(name: []const u8) void {
+    ensureRuntimeDir() catch return;
+    var buf: [64]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{s}\n", .{name}) catch return;
+    linux.writeFile(bling_state_file, line) catch
+        std.log.warn("bling: cannot persist screen to {s}", .{bling_state_file});
+}
+
 fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     var badapple_path: ?[]const u8 = null;
     var oled_width: u16 = oled.default_width;
     var oled_height: u16 = oled.default_height;
+    // The USER button line, by device-tree name. Defaults to the dedicated USER
+    // button (PWR_GPIO1); btn-boot-n is deliberately NOT the default so the
+    // bootswap daemon can own it. A name the DT does not expose leaves the button
+    // null and only SIGUSR1/2 drive the screens/patterns.
+    var button_name: []const u8 = "user-btn";
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (optArg(args, &i, "--badapple")) |v| {
             badapple_path = v;
+        } else if (optArg(args, &i, "--button")) |v| {
+            button_name = v;
         } else if (optArg(args, &i, "--oled-width")) |v| {
             oled_width = std.fmt.parseInt(u16, v, 10) catch {
                 std.log.err("bling: bad --oled-width '{s}'", .{v});
@@ -1031,17 +1067,19 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     installHandler(.USR1, onUser);
     installHandler(.USR2, onUser);
 
-    // Request the USER button once with edge detection; null on a core without it,
-    // in which case only the SIGUSR1/2 controls drive the screens/patterns.
-    var button = sysfs.Button.open("btn-boot-n");
+    // Request the USER button once with edge detection; null when the DT exposes
+    // no line by this name, in which case only the SIGUSR1/2 controls drive the
+    // screens/patterns.
+    var button = sysfs.Button.open(button_name);
     defer if (button) |*b| b.close();
-    if (button == null) std.log.info("bling: no USER button line; SIGUSR1/2 only", .{});
+    if (button == null) std.log.info("bling: button '{s}' not found; SIGUSR1/2 only", .{button_name});
 
     std.log.info("bling up on {s} @ 0x{x:0>2}, {d} screens, first {s}", .{
         oled.i2c_bus, oled.i2c_addr, n, active_screens[0].name,
     });
 
-    var screen_ix: usize = 0;
+    var screen_ix: usize = restoreScreen(active_screens);
+    if (screen_ix != 0) std.log.info("bling: resuming screen {s}", .{active_screens[screen_ix].name});
     var press: PressState = .{};
     var cpu = screens.CpuMeter.init();
 
@@ -1060,6 +1098,7 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
         if (want_next_pattern.swap(false, .monotonic)) ledsNextPattern();
         if (want_next_screen.swap(false, .monotonic)) {
             screen_ix = (screen_ix + 1) % active_screens.len;
+            persistScreen(active_screens[screen_ix].name);
             std.log.info("bling: screen -> {s}", .{active_screens[screen_ix].name});
         }
     }

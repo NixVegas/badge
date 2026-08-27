@@ -49,6 +49,17 @@ in
       default = 32;
       description = "OLED height in pixels (32 or 64 rows).";
     };
+    button = lib.mkOption {
+      type = lib.types.str;
+      default = "user-btn";
+      description = ''
+        Device-tree gpio-line-name of the USER button: a short press cycles the
+        LED ring pattern, a long press cycles the OLED screen. Defaults to the
+        dedicated USER button (PWR_GPIO1); btn-boot-n is intentionally NOT used
+        so the bootswap daemon owns it. Until the DT names a line by this value
+        the daemon runs on SIGUSR1/2 alone (the button is optional).
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -65,6 +76,7 @@ in
           "${nixBadge}/bin/nix-badge bling"
           "--oled-width ${toString cfg.width}"
           "--oled-height ${toString cfg.height}"
+          "--button ${cfg.button}"
           "--badapple ${badApple}/badapple.bin"
         ];
         # bling exits 0 when the panel is absent (a core that does not mux the SAO
