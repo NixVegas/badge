@@ -224,3 +224,38 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c1_cfg>;
 };
+
+/*
+ * RTC/PWR-domain GPIO controller (RTCSYS_GPIO, SG2000 TRM: 0x05021000-0x05021FFF).
+ * Mainline names only porta..portd (gpiochip0..3 at 0x0302_0000..3000) and leaves
+ * this always-on RTC-domain bank unexposed, so its lines -- PWR_GPIO0..2,
+ * PWR_WAKEUP0/1, PWR_BUTTON1, PWR_SEQ*, PWR_VBAT_DET -- are unreachable from
+ * Linux. It IS a standard DesignWare APB GPIO (confirmed by the register layout:
+ * DR@0x00=0, DDR@0x04=0 all-inputs, EXT_PORTA@0x50 reads live inputs), and the
+ * block is live out of reset (RTC domain), so a plain dw-apb-gpio node binds and
+ * gives a 5th gpiochip. This is what makes the badge's USER button reachable: it
+ * is wired (via the reused LCD_RST net) to PWR_GPIO1/2 (M12/N13), which is NOT on
+ * porta..portd. No clocks/resets: the debounce clock is optional and the RTC
+ * block is never reset. The pad mux still selects PWR_GPIO by default; a pinctrl
+ * state to force GPIO-input + input-enable is added per-core if a line needs it.
+ */
+/* The base dtsi's `soc` node is unlabeled, so merge by path (dtc unions same-path
+ * nodes) to add the RTC gpio under the existing simple-bus (which has ranges;). */
+/ {
+	soc {
+		rtcsys_gpio: gpio@5021000 {
+			compatible = "snps,dw-apb-gpio";
+			reg = <0x05021000 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			porte: gpio-controller@0 {
+				compatible = "snps,dw-apb-gpio-port";
+				gpio-controller;
+				#gpio-cells = <2>;
+				ngpios = <32>;
+				reg = <0>;
+			};
+		};
+	};
+};
