@@ -142,6 +142,35 @@ pub const Button = struct {
         return .{ .req_fd = req.fd };
     }
 
+    /// Request `name` once as a plain INPUT (no edge IRQ) for LEVEL polling. Use
+    /// this on controllers without edge-interrupt support -- the RTC/PWR gpio at
+    /// 0x5021000 (the USER button) ENXIOs any edge request, but reads fine. Null
+    /// when the line does not exist. Sample with `level()`; the caller detects
+    /// the press/release + timing in software.
+    pub fn openPolled(name: []const u8) ?Button {
+        const found = findLine(name) orelse return null;
+        defer linux.close(found.chip);
+
+        var req: gpio.LineRequest = .{};
+        req.offsets[0] = found.offset;
+        req.num_lines = 1;
+        req.config.flags = gpio.FLAG_INPUT;
+        setConsumer(&req.consumer, "nix-badge btn");
+
+        _ = linux.ioctl(found.chip, gpio.GET_LINE, @intFromPtr(&req)) catch return null;
+        if (req.fd < 0) return null;
+        return .{ .req_fd = req.fd };
+    }
+
+    /// The line's current level via the held request fd (no re-request), or null
+    /// on ioctl failure. Active-low: 0 = pressed, 1 = released.
+    pub fn level(self: *const Button) ?u1 {
+        var vals: gpio.LineValues = .{};
+        vals.mask = 1;
+        _ = linux.ioctl(self.req_fd, gpio.GET_VALUES, @intFromPtr(&vals)) catch return null;
+        return @intCast(vals.bits & 1);
+    }
+
     pub fn close(self: *Button) void {
         linux.close(self.req_fd);
     }

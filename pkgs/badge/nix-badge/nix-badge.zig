@@ -997,36 +997,41 @@ const PressState = struct { start_ms: u64 = 0, down: bool = false };
 /// next-pattern flag, a long press the next-screen flag.
 fn blingWait(want_ms: u32, button: ?sysfs.Button, press: *PressState) void {
     const deadline_ms = linux.monotonicMsec() + want_ms;
+    const poll_ms: u64 = 15; // button sampling period
     while (true) {
         if (eventPending()) return;
         const now_ms = linux.monotonicMsec();
         if (now_ms >= deadline_ms) return;
-        const remaining: i32 = @intCast(@min(deadline_ms - now_ms, std.math.maxInt(i32)));
 
         // Without a button there is nothing to poll; a plain sleep suffices and
         // still wakes early on a signal (EINTR).
         const btn = button orelse {
-            linux.sleepNsec(@as(u64, @intCast(remaining)) * std.time.ns_per_ms);
+            linux.sleepNsec((deadline_ms - now_ms) * std.time.ns_per_ms);
             return;
         };
 
-        var fds = [_]linux.pollfd{.{ .fd = btn.pollFd(), .events = linux.POLLIN, .revents = 0 }};
-        const ready = linux.poll(&fds, remaining) orelse continue; // EINTR: re-check flags
-        if (ready == 0) return; // frame deadline reached
-        if (fds[0].revents & linux.POLLIN == 0) continue;
-
-        // Drain every coalesced edge so a fast tap is never lost.
-        while (btn.nextEdge()) |edge| switch (edge) {
-            .press => press.* = .{ .start_ms = linux.monotonicMsec(), .down = true },
-            .release => {
-                if (!press.down) continue;
+        // The RTC/PWR gpio (USER button) has no edge IRQ, so sample the LEVEL and
+        // detect press/release in software. Active-low: 0 = pressed. A release
+        // shorter than bling_longpress_ms cycles the LED pattern, a longer hold
+        // cycles the OLED screen -- acted on at release, so `press` (down + start)
+        // carries across frames.
+        if (btn.level()) |lvl| {
+            const pressed = lvl == 0;
+            if (pressed and !press.down) {
+                press.* = .{ .start_ms = now_ms, .down = true };
+            } else if (!pressed and press.down) {
                 press.down = false;
-                const held = linux.monotonicMsec() - press.start_ms;
-                const long = held >= bling_longpress_ms;
-                const flag = if (long) &want_next_screen else &want_next_pattern;
+                const held = now_ms - press.start_ms;
+                const flag = if (held >= bling_longpress_ms) &want_next_screen else &want_next_pattern;
                 flag.store(true, .monotonic);
-            },
-        };
+                return; // process the press promptly rather than finishing the wait
+            }
+        }
+
+        // @min narrows to a tiny type because poll_ms is comptime-known; widen
+        // back to u64 before scaling to ns or the *1e6 overflows the type.
+        const step: u64 = @min(poll_ms, deadline_ms - now_ms);
+        linux.sleepNsec(step * std.time.ns_per_ms);
     }
 }
 
@@ -1190,10 +1195,11 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     installHandler(.USR1, onUser);
     installHandler(.USR2, onUser);
 
-    // Request the USER button once with edge detection; null when the DT exposes
-    // no line by this name, in which case only the SIGUSR1/2 controls drive the
+    // Request the USER button once as a polled INPUT (the RTC/PWR gpio has no edge
+    // IRQ, so the edge path ENXIOs); blingWait samples its level. Null when the DT
+    // exposes no line by this name, in which case only SIGUSR1/2 drive the
     // screens/patterns.
-    var button = sysfs.Button.open(button_name);
+    var button = sysfs.Button.openPolled(button_name);
     defer if (button) |*b| b.close();
     if (button == null) std.log.info("bling: button '{s}' not found; SIGUSR1/2 only", .{button_name});
 

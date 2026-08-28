@@ -90,6 +90,20 @@
     count = 24;
   };
 
+  # OLED bling engine: play the FULL Bad Apple song as a pure-Nix pattern that
+  # the embedded fix evaluator applies per frame (the cyclable "nixapple" screen)
+  # -- the marquee "it's the Nix Badge" demo. aarch64 only (the evaluator is
+  # ARM-side; the riscv core accepts the flag but skips the screen). Measured on
+  # the badge: ~81 MB RSS while shown (plateaus -- frames are chunk constants),
+  # 8.5% CPU at 20 fps. buildPackages so the ffmpeg transcode + Nix generation
+  # run on the build host, not under target emulation.
+  nixbadge.oled.evalScreen = "${
+    import ../../pkgs/badge/bling-content/badapple-live.nix {
+      pkgs = pkgs.buildPackages;
+      durationSeconds = null;
+    }
+  }/badapple-live.nix";
+
   # Networking via NetworkManager: it manages eth0 (auto-connects wired) and
   # wlan0 once the AIC8800 WiFi comes up. wpa_supplicant backend because the
   # AIC8800 is a fullMAC driver that iwd handles poorly. NetworkManager does its

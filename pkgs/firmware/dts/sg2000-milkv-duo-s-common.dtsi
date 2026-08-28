@@ -255,6 +255,12 @@
 				#gpio-cells = <2>;
 				ngpios = <32>;
 				reg = <0>;
+				/* Line 2 is the S3 USER button (PWR_GPIO domain), found by
+				 * probing which RTC line flips on a press: active-low, rests
+				 * high, pressed pulls low. This controller has no edge IRQ, so
+				 * nix-badge LEVEL-POLLS it (see sysfs.Button.openPolled).
+				 * Naming through line 2 is enough; the rest stay unnamed. */
+				gpio-line-names = "", "", "user-btn";
 			};
 		};
 	};
