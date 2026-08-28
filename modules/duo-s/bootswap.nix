@@ -4,9 +4,12 @@
 # reverts if the switch overrides the latch). btn-boot-n is dual-purpose (it's
 # also the ROM recovery strap), so this makes the boot button useful in Linux;
 # the dedicated USER button (PWR_GPIO1) drives the bling engine separately.
-{ pkgs, lib, config, ... }:
+{ pkgs, lib, config, badgeFixSrc, ... }:
 let
-  nixBadge = import ../../pkgs/badge/nix-badge.nix { inherit pkgs; };
+  nixBadge = import ../../pkgs/badge/nix-badge.nix {
+    inherit pkgs;
+    fixSrc = badgeFixSrc;
+  };
 in
 {
   systemd.services.nixbadge-bootswap = {

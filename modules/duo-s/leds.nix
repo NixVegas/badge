@@ -21,12 +21,16 @@
   config,
   lib,
   pkgs,
+  badgeFixSrc,
   ...
 }:
 let
   cfg = config.nixbadge.leds;
 
-  pkg = import ../../pkgs/badge/nix-badge.nix { inherit pkgs; };
+  pkg = import ../../pkgs/badge/nix-badge.nix {
+    inherit pkgs;
+    fixSrc = badgeFixSrc;
+  };
 
   configFile = pkgs.writeText "nix-badge-leds.conf" ''
     device = ${cfg.device}

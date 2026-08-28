@@ -14,10 +14,13 @@
 # Apple blob in the closure; the ring still animates from leds.nix), and
 # width/height are passed to the runtime so a differently-sized 1-bit panel (a
 # Sharp Memory display, a 128x64 OLED) works without a code change.
-{ pkgs, lib, config, ... }:
+{ pkgs, lib, config, badgeFixSrc, ... }:
 let
   cfg = config.nixbadge.oled;
-  nixBadge = import ../../pkgs/badge/nix-badge.nix { inherit pkgs; };
+  nixBadge = import ../../pkgs/badge/nix-badge.nix {
+    inherit pkgs;
+    fixSrc = badgeFixSrc;
+  };
   # The Bad Apple blob is arch-independent DATA (a packed 1-bit frame file), but
   # producing it runs ffmpeg + a tiny C packer. Build those on the build host
   # (buildPackages), not the target -- with target pkgs a cross build would try

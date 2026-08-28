@@ -19,6 +19,7 @@ const sysfs = @import("sysfs.zig");
 const badapple = @import("badapple.zig");
 const bled = @import("bled.zig");
 const screens = @import("screens.zig");
+const fixeval = @import("fixeval.zig");
 
 const Config = config.Config;
 const Rgb = ws2812.Rgb;
@@ -99,6 +100,7 @@ const usage_text =
     \\  nix-badge bling [--badapple PATH] [--oled-width W] [--oled-height H]
     \\  nix-badge bootswap
     \\  nix-badge mmio <read ADDR | write ADDR VALUE>
+    \\  nix-badge fix-selftest              (smoke-test the embedded Nix evaluator)
     \\
     \\patterns: off solid pulse rainbow chase
     \\
@@ -1277,6 +1279,19 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // fix-selftest smoke-tests the embedded Nix evaluator. It returns fix's own
+    // eval error union (not CmdError), and a failure here is a build/ABI fault
+    // worth a non-zero exit rather than a usage message; handle it out of the
+    // fallible CmdError chain. Kept terse in usage: it is a smoke test.
+    if (std.mem.eql(u8, cmd, "fix-selftest")) {
+        fixeval.selftest(gpa) catch |err| {
+            std.log.err("fix-selftest failed: {s}", .{@errorName(err)});
+            out.flush();
+            std.process.exit(1);
+        };
+        return;
+    }
+
     const result: CmdError!void = if (std.mem.eql(u8, cmd, "leds"))
         cmdLeds(gpa, &out, rest)
     else if (std.mem.eql(u8, cmd, "core"))
@@ -1314,4 +1329,5 @@ test {
     _ = badapple;
     _ = bled;
     _ = screens;
+    _ = fixeval;
 }

@@ -15,6 +15,9 @@
         "sysfs.zig",
         "badapple.zig",
         "screens.zig",
+        "fixeval.zig",
+        "fix-stub/stub_root.zig",
+        "fix-stub/stub_cache.zig",
     },
     .dependencies = .{},
 }

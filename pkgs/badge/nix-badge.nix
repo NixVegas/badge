@@ -15,7 +15,26 @@
 # buildPackages.zig against pkgs.stdenv.hostPlatform's target triple. The LED
 # service must keep running across switch_root; a static binary at its real
 # /nix/store path resolves identically before and after, with no libc to find.
-{ pkgs }:
+# When `fixSrc` is a psyclyx/fix source tree (threaded through from the flake's
+# `inputs.fix` via mkDuoS's specialArgs), nix-badge links fix's `expr` evaluator
+# in fetch-less: we overlay the vendored fetch-less fetchers stub onto the pinned
+# fix source and pass it as `-Dfix-src`. This is the build FOUNDATION for later
+# per-frame Nix eval of LED patterns; it is not yet wired into any runtime loop
+# (only the hidden `nix-badge fix-selftest` smoke test uses it). With fixSrc null
+# the tool builds exactly as before, minus eval, so callers that do not pass it
+# keep working. Either way the build stays fully offline: the patched fix source
+# is a local store path, and fix's fetchers are stubbed to error.FetchUnsupported
+# so there is NO curl/libgit2/network in the closure.
+#
+# fix's evaluator is aarch64/x86_64 only: its fiber-based VM (src/base/fiber.zig)
+# hard-@compileError()s on any other arch, and src/base/segments.zig uses a
+# MAP.NORESERVE field that Zig's riscv64 std lacks. So on riscv64 we DROP fixSrc
+# and build eval-less (`fix-selftest` reports eval unavailable); the badge's
+# riscv boot chain keeps a working nix-badge. aarch64 gets the full evaluator.
+{
+  pkgs,
+  fixSrc ? null,
+}:
 let
   hp = pkgs.stdenv.hostPlatform;
   zigTarget =
@@ -25,6 +44,27 @@ let
       "riscv64-linux-musl"
     else
       throw "nix-badge: unsupported target ${hp.system}";
+
+  # Only aarch64 can link fix (see the arch note above); ignore fixSrc elsewhere.
+  effectiveFixSrc = if hp.isAarch64 then fixSrc else null;
+
+  # Overlay the vendored fetch-less fetchers stub onto the pinned fix source.
+  # The stub files use relative imports (@import("fetch/types.zig")), so they
+  # must live inside fix's own src/fetchers/ at build time. runCommand produces
+  # a fresh, writable store path; buildPackages so it evaluates on the build
+  # host. Only built when fixSrc is provided (and the arch supports it).
+  patchedFixSrc =
+    if effectiveFixSrc == null then
+      null
+    else
+      pkgs.buildPackages.runCommand "fix-src-fetchless" { } ''
+        cp -r ${effectiveFixSrc} $out
+        chmod -R +w $out
+        cp ${./nix-badge/fix-stub/stub_root.zig} $out/src/fetchers/stub_root.zig
+        cp ${./nix-badge/fix-stub/stub_cache.zig} $out/src/fetchers/stub_cache.zig
+      '';
+
+  fixArg = pkgs.lib.optionalString (patchedFixSrc != null) "-Dfix-src=${patchedFixSrc}";
 in
 pkgs.buildPackages.stdenv.mkDerivation {
   pname = "nix-badge";
@@ -44,7 +84,7 @@ pkgs.buildPackages.stdenv.mkDerivation {
     runHook preBuild
     export HOME="$TMPDIR"
     export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
-    zig build -Dtarget=${zigTarget} -Doptimize=ReleaseSafe --prefix "$out"
+    zig build -Dtarget=${zigTarget} -Doptimize=ReleaseSafe ${fixArg} --prefix "$out"
     runHook postBuild
   '';
 

@@ -64,6 +64,12 @@
       mkDuoS =
         { core, buildPlatform }:
         nixpkgs-2605.lib.nixosSystem {
+          # Thread the pinned fix source to the modules that build nix-badge, so
+          # its fetch-less `expr` evaluator links in (the FOUNDATION for later
+          # per-frame Nix eval of LED patterns).
+          specialArgs = {
+            badgeFixSrc = inputs.fix;
+          };
           modules = [
             {
               nixpkgs.hostPlatform = hostPlatformOf core;
