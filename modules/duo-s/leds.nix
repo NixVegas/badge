@@ -43,6 +43,7 @@ let
     pattern = ${cfg.pattern}
     colors = ${lib.concatStringsSep "," cfg.colors}
     ${lib.optionalString (cfg.blob != null) "blob = ${cfg.blob}"}
+    ${lib.optionalString (cfg.evalPattern != null) "eval = ${cfg.evalPattern}"}
   '';
 
   # One unit body, used in the initrd and in stage 2. Keep these identical or
@@ -94,6 +95,21 @@ in
         pure-Nix `f(t) -> [rgb]` pattern evaluated by fix) to play on the ring
         instead of a computed pattern. null uses the computed `pattern`.
         Reloadable at run time: nix-badge leds set --blob PATH.
+      '';
+    };
+
+    evalPattern = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        A pure-Nix LED pattern FUNCTION (see pkgs/badge/bling-content/leds-live.nix:
+        `scope: { bitmap = [ 0xRRGGBB... ]; nextMs; }`) evaluated per frame by the
+        embedded fix evaluator. Unlike `blob` (baked at build time), this reads the
+        LIVE scope (t, battery, ...) each frame. Highest precedence, over blob and
+        the computed pattern. aarch64 only -- ignored on the riscv core, which has
+        no evaluator and falls back to blob/computed. Reloadable at run time:
+        nix-badge leds set --eval PATH. Note: if set here (declaratively) the file
+        is added to the initrd so early boot can eval it.
       '';
     };
 
@@ -225,7 +241,10 @@ in
     boot.initrd.systemd.storePaths = [
       "${pkg}/bin/nix-badge"
       configFile
-    ];
+    ]
+    # A declaratively-set eval pattern is read by name at runtime, so its source
+    # must be in the initrd too for early-boot eval.
+    ++ lib.optional (cfg.evalPattern != null) cfg.evalPattern;
 
     # spi-dw-mmio and spidev are built into the kernel, but the DTS routes SPI3
     # through the cv1800b dmamux for slave DMA, so dw_spi defers its probe until

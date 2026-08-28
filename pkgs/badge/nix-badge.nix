@@ -62,6 +62,12 @@ let
         chmod -R +w $out
         cp ${./nix-badge/fix-stub/stub_root.zig} $out/src/fetchers/stub_root.zig
         cp ${./nix-badge/fix-stub/stub_cache.zig} $out/src/fetchers/stub_cache.zig
+        # Add Engine.applyValue + Engine.makeAttrs (native apply + native attrs
+        # construction): apply a compile-once pattern lambda to a fresh per-frame
+        # scope with NO source recompile, so fix mints no new chunk per frame
+        # (chunks are permanent GC roots, never collected -- compile-per-frame
+        # would leak). The flake pin (2b23db57) matches the patch's base exactly.
+        patch -p1 -d $out < ${./nix-badge/fix-stub/native-apply.patch}
       '';
 
   fixArg = pkgs.lib.optionalString (patchedFixSrc != null) "-Dfix-src=${patchedFixSrc}";

@@ -93,7 +93,7 @@ const usage_text =
     \\usage:
     \\  nix-badge leds run --config FILE
     \\  nix-badge leds set [--pattern P] [--brightness 0-255] [--count N] [--speed-hz HZ]
-    \\        [--bits 3|4|8] [--fps N] [--color '#rrggbb' ...]
+    \\        [--bits 3|4|8] [--fps N] [--color '#rrggbb' ...] [--blob PATH] [--eval PATH]
     \\  nix-badge leds show
     \\  nix-badge core <arm|riscv|status>
     \\  nix-badge power
@@ -377,6 +377,18 @@ fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
     applyBlobGeometry(&cfg, blob, bufsiz, max_count);
     clampCount(&cfg, bufsiz, max_count);
 
+    // A configured pure-Nix `eval` pattern (aarch64 only) is the HIGHEST-precedence
+    // pixel source, over blob and the computed pattern. It paces on its own nextMs.
+    // Sensor inputs are refreshed on a slow tick (battery is a median-of-33 ADC
+    // read); `t` is current every frame. Missing/bad/unavailable -> null, so the
+    // painter transparently falls back to blob/computed (and riscv, with no eval
+    // built in, always takes that path).
+    var eval_pat: ?fixeval.Pattern = openEval(gpa, &cfg);
+    defer if (eval_pat) |*p| p.deinit();
+    var sensors: fixeval.Fields = .{};
+    var last_sensor_ms: u64 = 0;
+    var cpu_meter = screens.CpuMeter.init();
+
     // The frame buffer is sized for the worst-case latch so a clock change never
     // reallocates it. Pixels and frame both resize on a count/encoding reload.
     var pixels = gpa.alloc(Rgb, cfg.count) catch return error.Failed;
@@ -416,6 +428,12 @@ fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
             reloadInto(&cfg, base, &max_count, bufsiz, fd);
             blob = refreshBlob(blob, &cfg); // hot-reload the blob path too
             applyBlobGeometry(&cfg, blob, bufsiz, max_count);
+            // Hot-reload the eval pattern: close and re-open on any config change.
+            // The pattern is a pure function of `t`, so reopening never resets the
+            // visible animation; only the compile is redone (rare, ~ms).
+            if (eval_pat) |*p| p.deinit();
+            eval_pat = openEval(gpa, &cfg);
+            last_sensor_ms = 0; // force a sensor refresh next frame
             frame_no = 0;
             report_timing = true;
             // Resize buffers to the possibly-changed count/encoding. On OOM we
@@ -441,18 +459,43 @@ fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
             logRunState(&cfg, blob, frame_len);
         }
 
+        const now_ms = linux.monotonicMsec();
         const lit = pixels[0..cfg.count];
-        if (blob) |*frames| {
-            paintBlobFrame(frames, linux.monotonicMsec(), cfg.brightness, lit);
-        } else {
-            ws2812.render(.{
-                .pattern = cfg.pattern,
-                .brightness = cfg.brightness,
-                .fps = cfg.fps,
-                .colors = cfg.colors(),
-            }, frame_no, lit);
+
+        // Source precedence: eval > blob > computed. The eval pattern, when it
+        // renders successfully, also dictates the frame period via its nextMs.
+        var eval_period_ns: ?u64 = null;
+        if (eval_pat) |*p| {
+            if (last_sensor_ms == 0 or now_ms - last_sensor_ms >= sensor_interval_ms) {
+                sensors = gatherSensors(&cpu_meter);
+                last_sensor_ms = now_ms;
+            }
+            var fields = sensors;
+            fields.t_ms = now_ms;
+            fields.width = cfg.count;
+            fields.height = 1;
+            fields.brightness = cfg.brightness;
+            if (p.render(fields, lit)) |next_ms| {
+                eval_period_ns = @as(u64, next_ms) * std.time.ns_per_ms;
+            } else |_| {
+                // render() already logged once; disable eval and fall back for good.
+                p.deinit();
+                eval_pat = null;
+            }
         }
-        // Identical encode + transfer + latch for both modes — the flicker-free
+        if (eval_period_ns == null) {
+            if (blob) |*frames| {
+                paintBlobFrame(frames, now_ms, cfg.brightness, lit);
+            } else {
+                ws2812.render(.{
+                    .pattern = cfg.pattern,
+                    .brightness = cfg.brightness,
+                    .fps = cfg.fps,
+                    .colors = cfg.colors(),
+                }, frame_no, lit);
+            }
+        }
+        // Identical encode + transfer + latch for every source — the flicker-free
         // path is untouched; only the pixel source above differs.
         ws2812.encodeFrame(cfg.encoding, lit, latchBytes(cfg.speed_hz), frame[0..frame_len]);
 
@@ -460,16 +503,50 @@ fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
         report_timing = false;
         frame_no +%= 1;
 
-        // A blob is always animated (paced at its fps); a computed static pattern
-        // only needs to notice a config change, so it idles at 2 Hz.
-        const animated = blob != null or cfg.pattern.isAnimated();
-        const period_ns: u64 = if (animated)
-            std.time.ns_per_s / @as(u64, cfg.fps)
-        else
-            std.time.ns_per_s / idle_poll_hz;
+        // An eval pattern paces on the nextMs it returned; otherwise a blob or
+        // animated computed pattern runs at fps, and a static one idles at 2 Hz.
+        const period_ns: u64 = eval_period_ns orelse blk: {
+            const animated = blob != null or cfg.pattern.isAnimated();
+            break :blk if (animated)
+                std.time.ns_per_s / @as(u64, cfg.fps)
+            else
+                std.time.ns_per_s / idle_poll_hz;
+        };
         linux.sleepNsec(period_ns);
     }
     // Leave the LEDs as they are so a restart repaints without a visible gap.
+}
+
+/// How often the slow sensor block (battery, USB, load, cpu, mem, uptime) is
+/// re-read for the eval scope. `t` updates every frame; these change on a ~1 s
+/// timescale and battery is a median-of-33 ADC read, so polling them per frame
+/// would be wasted I/O.
+const sensor_interval_ms: u64 = 1000;
+
+/// Open the configured eval pattern, or null when none is set or eval is not
+/// built in (riscv). A bad pattern logs inside `open` and also yields null, so
+/// the painter transparently falls back to the blob/computed source.
+fn openEval(gpa: std.mem.Allocator, cfg: *const Config) ?fixeval.Pattern {
+    if (!fixeval.have_fix or cfg.eval().len == 0) return null;
+    return fixeval.Pattern.open(gpa, cfg.eval());
+}
+
+/// Snapshot the slow sensor inputs for the eval scope. Called on the sensor tick,
+/// not every frame; `t`/width/height/brightness are filled per frame by the caller.
+fn gatherSensors(cpu: *screens.CpuMeter) fixeval.Fields {
+    const bat = sysfs.readBattery();
+    var l1: f64 = 0;
+    var l5: f64 = 0;
+    screens.readLoad1And5(&l1, &l5);
+    return .{
+        .battery_mv = bat.millivolts orelse 0,
+        .battery_pct = bat.percent orelse 0,
+        .on_usb = (sysfs.readLine("usb-vbus-det") orelse 0) != 0,
+        .load1 = l1,
+        .cpu_pct = cpu.sample(),
+        .mem_pct = @intFromFloat(@min(screens.readMemUsedFrac() * 100.0 + 0.5, 255.0)),
+        .uptime_s = @intCast(@min(screens.readUptimeS(), @as(u64, std.math.maxInt(u32)))),
+    };
 }
 
 /// When a blob is active, override the effective LED count (its nleds) and fps so
@@ -589,6 +666,10 @@ fn cmdLedsSet(out: *Out, args: []const []const u8) CmdError!void {
             // A path selects a baked BLED animation; an empty value clears it and
             // returns to the computed pattern.
             cfg.setBlob(v);
+        } else if (optArg(args, &i, "--eval")) |v| {
+            // A path selects a pure-Nix pattern function evaluated per frame
+            // (aarch64 only, highest precedence); an empty value clears it.
+            cfg.setEval(v);
         } else {
             std.log.err("set: unknown argument '{s}'", .{a});
             return error.Usage;
@@ -615,7 +696,9 @@ fn optArg(args: []const []const u8, i: *usize, flag: []const u8) ?[]const u8 {
 }
 
 fn writeRuntimeConfig(cfg: *const Config) CmdError!void {
-    var buf: [1024]u8 = undefined;
+    // Room for the base fields, the colour list, and two store-path lines
+    // (blob + eval), which are ~120 chars each.
+    var buf: [2048]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     config.writeRuntime(&w, cfg) catch return error.Failed;
     linux.writeFile(runtime_conf, w.buffered()) catch {
@@ -634,6 +717,7 @@ fn cmdLedsShow(out: *Out) CmdError!void {
     config.writeColorList(w, &cfg) catch return error.Failed;
     w.writeByte('\n') catch return error.Failed;
     w.print("blob = {s}\n", .{cfg.blob()}) catch return error.Failed;
+    w.print("eval = {s}\n", .{cfg.eval()}) catch return error.Failed;
 }
 
 fn cmdLeds(gpa: std.mem.Allocator, out: *Out, args: []const []const u8) CmdError!void {
