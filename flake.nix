@@ -284,6 +284,17 @@
               entry = "leds-demo.nix";
               name = "bling-leds-demo";
             };
+            # Bad Apple as a PURE-NIX per-frame pattern the embedded fix
+            # evaluator applies once per frame on the OLED (compile-once +
+            # native applyValue, decoded to page-major bytes by renderOled).
+            # Point the runtime at it with `nix-badge bling --eval-screen
+            # <result>/badapple-live.nix`. durationSeconds defaults small (a fast
+            # test file); override for the whole song. The frames are re-encoded
+            # from the deterministic ffmpeg-baked BADA blob, so build it on the
+            # build host (buildPackages) -- the output is arch-neutral Nix text.
+            bling-badapple-live = import ./pkgs/badge/bling-content/badapple-live.nix {
+              pkgs = pkgs.buildPackages;
+            };
           };
 
           devShells = {

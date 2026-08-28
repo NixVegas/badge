@@ -63,6 +63,25 @@ in
         the daemon runs on SIGUSR1/2 alone (the button is optional).
       '';
     };
+    evalScreen = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        Optional path to a pure-Nix per-frame OLED pattern (the unified content
+        contract: `scope: { bitmap = [ <int> ... ]; nextMs; }`, bitmap a flat
+        list of packed ints, 4 page-bytes/int LE). When set, the bling engine
+        compiles it ONCE via the embedded fix evaluator and applies it every
+        frame as an extra cyclable "nixapple" screen (long-press / SIGUSR2 to
+        reach it), decoding the ints to SSD1306 page-major bytes.
+
+        aarch64 ONLY: the fix evaluator is compiled into the ARM core; on the
+        eval-less riscv core the flag is accepted but the screen is skipped. The
+        file is read at runtime (bling is a stage-2 service; no initrd), so point
+        it at e.g. the `bling-badapple-live` package's
+        `<store>/badapple-live.nix`.
+      '';
+      example = lib.literalExpression ''"''${pkgs.bling-badapple-live}/badapple-live.nix"'';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -75,13 +94,18 @@ in
         # Runs as root: opens /dev/i2c-1 (0x3c), medians the SARADC sysfs for the
         # battery/rail screens, reads the USER button, and rewrites
         # /var/lib/nix-badge/leds.conf to cycle the ring's pattern.
-        ExecStart = lib.concatStringsSep " " [
-          "${nixBadge}/bin/nix-badge bling"
-          "--oled-width ${toString cfg.width}"
-          "--oled-height ${toString cfg.height}"
-          "--button ${cfg.button}"
-          "--badapple ${badApple}/badapple.bin"
-        ];
+        ExecStart = lib.concatStringsSep " " (
+          [
+            "${nixBadge}/bin/nix-badge bling"
+            "--oled-width ${toString cfg.width}"
+            "--oled-height ${toString cfg.height}"
+            "--button ${cfg.button}"
+            "--badapple ${badApple}/badapple.bin"
+          ]
+          # The pure-Nix eval screen is additive (the badapple blob still leads);
+          # only passed when declaratively set. aarch64 only (no-op on riscv).
+          ++ lib.optional (cfg.evalScreen != null) "--eval-screen ${cfg.evalScreen}"
+        );
         # bling exits 0 when the panel is absent (a core that does not mux the SAO
         # i2c, so /dev/i2c-1 has nothing at 0x3c): a clean no-op, not a failure,
         # so Restart=on-failure will not spin on such a core. A real fault

@@ -97,7 +97,7 @@ const usage_text =
     \\  nix-badge leds show
     \\  nix-badge core <arm|riscv|status>
     \\  nix-badge power
-    \\  nix-badge bling [--badapple PATH] [--oled-width W] [--oled-height H]
+    \\  nix-badge bling [--badapple PATH] [--eval-screen PATH] [--oled-width W] [--oled-height H]
     \\  nix-badge bootswap
     \\  nix-badge mmio <read ADDR | write ADDR VALUE>
     \\  nix-badge fix-selftest              (smoke-test the embedded Nix evaluator)
@@ -1061,6 +1061,7 @@ fn persistScreen(name: []const u8) void {
 
 fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     var badapple_path: ?[]const u8 = null;
+    var eval_screen_path: ?[]const u8 = null;
     var oled_width: u16 = oled.default_width;
     var oled_height: u16 = oled.default_height;
     // The USER button line, by device-tree name. Defaults to the dedicated USER
@@ -1072,6 +1073,8 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     while (i < args.len) : (i += 1) {
         if (optArg(args, &i, "--badapple")) |v| {
             badapple_path = v;
+        } else if (optArg(args, &i, "--eval-screen")) |v| {
+            eval_screen_path = v;
         } else if (optArg(args, &i, "--button")) |v| {
             button_name = v;
         } else if (optArg(args, &i, "--oled-width")) |v| {
@@ -1131,11 +1134,45 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     }
     defer if (clip) |*c| c.deinit();
 
-    // Build the screen registry. badapple leads (and is the default) when loaded.
-    var registry: [5]Screen = undefined;
+    // Optionally open the pure-Nix eval screen: a compiled-once lambda applied
+    // per frame (fixeval), decoded to page-major bytes. Only on an eval build
+    // (aarch64) with a readable pattern; any failure just leaves it out (the
+    // other screens still run). Its framebuffer is heap-sized to the panel.
+    var eval_pat: ?fixeval.Pattern = null;
+    var eval_fb: ?[]u8 = null;
+    if (eval_screen_path) |path| {
+        if (fixeval.have_fix) {
+            if (fixeval.Pattern.open(gpa, path)) |p| {
+                const fb = gpa.alloc(u8, @as(usize, panel.width) * (panel.height / 8)) catch blk: {
+                    std.log.warn("bling: cannot allocate eval-screen framebuffer; skipping", .{});
+                    break :blk null;
+                };
+                if (fb) |b| {
+                    eval_pat = p;
+                    eval_fb = b;
+                    std.log.info("bling: eval screen {s} ready", .{path});
+                } else {
+                    var dead = p;
+                    dead.deinit();
+                }
+            }
+        } else {
+            std.log.info("bling: --eval-screen {s} requested but eval unavailable on this arch", .{path});
+        }
+    }
+    defer if (eval_pat) |*p| p.deinit();
+    defer if (eval_fb) |b| gpa.free(b);
+
+    // Build the screen registry. badapple leads (and is the default) when loaded;
+    // the eval screen (when present) is an additional cyclable entry.
+    var registry: [6]Screen = undefined;
     var n: usize = 0;
     if (clip != null) {
         registry[n] = .{ .name = "badapple", .render = screenBadapple };
+        n += 1;
+    }
+    if (eval_pat != null) {
+        registry[n] = .{ .name = "nixapple", .render = screenEval };
         n += 1;
     }
     registry[n] = .{ .name = "battery", .render = screens.battery };
@@ -1146,7 +1183,7 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     n += 1;
     registry[n] = .{ .name = "clock", .render = screens.clock };
     n += 1;
-    const active_screens = registry[0..n];
+    var active_screens = registry[0..n];
 
     installHandler(.TERM, onStop);
     installHandler(.INT, onStop);
@@ -1174,10 +1211,28 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     active_clip = if (clip) |*c| c else null;
     defer active_clip = null;
 
+    // Likewise the eval screen reads its pattern + framebuffer via file-scope
+    // pointers (fixed screen fn signature). `eval_screen_failed` latches a render
+    // fault; the loop then drops the "nixapple" entry from the active set.
+    active_eval_pat = if (eval_pat) |*p| p else null;
+    active_eval_fb = eval_fb;
+    defer {
+        active_eval_pat = null;
+        active_eval_fb = null;
+    }
+
     while (!stop_requested.load(.monotonic)) {
         const ctx = blingGather(&cpu);
         const want_ms = active_screens[screen_ix].render(&panel, &ctx);
         panel.flush() catch std.log.warn("bling: flush failed", .{});
+
+        // A latched eval-screen fault (logged once inside renderOled): remove the
+        // "nixapple" entry so the loop falls back to the remaining screens.
+        if (eval_screen_failed) {
+            eval_screen_failed = false;
+            active_screens = dropScreen(active_screens, "nixapple", &screen_ix);
+            std.log.warn("bling: eval screen dropped after render fault", .{});
+        }
 
         blingWait(want_ms, button, &press);
 
@@ -1194,6 +1249,28 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     panel.blankOff() catch |err| std.log.warn("bling: blank-off failed: {s}", .{@errorName(err)});
 }
 
+/// Remove the screen named `name` from `active` in place (shifting the tail down
+/// over the backing array) and return the shortened slice. `cur_ix` is fixed up
+/// so it still points at a live screen: unchanged if before the removed one,
+/// decremented if at or after it, and clamped so it never indexes past the end.
+/// A name not present (or an empty result) returns the slice untouched.
+fn dropScreen(active: []Screen, name: []const u8, cur_ix: *usize) []Screen {
+    var found: ?usize = null;
+    for (active, 0..) |s, ix| {
+        if (std.mem.eql(u8, s.name, name)) {
+            found = ix;
+            break;
+        }
+    }
+    const rm = found orelse return active;
+    if (active.len <= 1) return active; // never drop the last screen -> empty set
+    std.mem.copyForwards(Screen, active[rm .. active.len - 1], active[rm + 1 ..]);
+    const shorter = active[0 .. active.len - 1];
+    if (cur_ix.* > rm) cur_ix.* -= 1;
+    if (cur_ix.* >= shorter.len) cur_ix.* = 0;
+    return shorter;
+}
+
 // The clip the badapple screen plays. Set only while the bling loop runs (single
 // threaded); the screen fn signature is fixed by the registry so it cannot take
 // the clip as a parameter, hence this scoped pointer rather than a parameter.
@@ -1203,6 +1280,41 @@ fn screenBadapple(panel: *oled.Panel, ctx: *const screens.Context) u32 {
     const clip = active_clip orelse return 100;
     panel.blit(clip.frameAt(ctx.now_ms));
     return clip.frameMs();
+}
+
+// The pure-Nix eval screen's state, set only while the bling loop runs (single
+// threaded); the screen fn signature is fixed so it cannot take these as params.
+// `active_eval_pat`/`active_eval_fb` are the compiled pattern and its panel-sized
+// page-major framebuffer; `eval_screen_failed` latches a render fault so the loop
+// drops the screen and never spins the log.
+var active_eval_pat: ?*fixeval.Pattern = null;
+var active_eval_fb: ?[]u8 = null;
+var eval_screen_failed: bool = false;
+
+fn screenEval(panel: *oled.Panel, ctx: *const screens.Context) u32 {
+    const pat = active_eval_pat orelse return 100;
+    const fb = active_eval_fb orelse return 100;
+    // Reuse the sensor block the loop already gathered into `ctx`. The eval scope
+    // wants full-range fields; brightness is not applied on the 1-bit panel.
+    const fields: fixeval.Fields = .{
+        .t_ms = ctx.now_ms,
+        .width = panel.width,
+        .height = panel.height,
+        .battery_mv = ctx.battery_mv orelse 0,
+        .battery_pct = ctx.battery_pct orelse 0,
+        .on_usb = ctx.on_usb == 1,
+        .load1 = ctx.load1,
+        .cpu_pct = ctx.cpu_pct,
+        .mem_pct = ctx.mem_pct,
+        .uptime_s = @intCast(@min(ctx.uptime_s, @as(u64, std.math.maxInt(u32)))),
+    };
+    const want_ms = pat.renderOled(fields, fb) catch {
+        // Logged once inside renderOled; latch so the loop drops this screen.
+        eval_screen_failed = true;
+        return 100;
+    };
+    panel.blit(fb);
+    return want_ms;
 }
 
 // ================================================================= bootswap ===

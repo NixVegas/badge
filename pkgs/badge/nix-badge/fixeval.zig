@@ -32,9 +32,12 @@ const expr = if (have_fix) @import("expr") else struct {};
 const Engine = if (have_fix) expr.Engine else void;
 const Value = if (have_fix) @import("runtime").value.Value else void;
 
-/// Largest pattern source we read. A pattern is a small Nix function; 64 KiB is
-/// generous and bounds the owned buffer.
-pub const max_pattern_bytes = 64 * 1024;
+/// Largest pattern source we read. A live LED pattern is ~1 KiB, but a baked
+/// frame-list (Bad Apple: ~400 frames = 392 KiB at 20 s, ~6 MiB for the full
+/// song) is the outlier -- size for that. The scratch buffer is transient (freed
+/// after the source is duped to its real size), so this only caps a one-shot
+/// allocation at Pattern.open.
+pub const max_pattern_bytes = 8 * 1024 * 1024;
 
 /// The per-frame inputs fed to a content function's `scope`. `t_ms` changes every
 /// frame; the sensor block is refreshed by the caller on a slow tick (battery is
@@ -82,7 +85,10 @@ pub const Pattern = struct {
             return null;
         }
         const text = readPattern(gpa, path) orelse return null;
-        var ev = Engine.init(gpa, .{ .worker_count = 0 }) catch |err| {
+        // compile_cache = .off: a persistent cross-run disk chunk cache is useless
+        // for a single embedded pattern (compiled once), and `.auto` probes
+        // XDG_CACHE_HOME the service does not set. Skip it.
+        var ev = Engine.init(gpa, .{ .worker_count = 0, .compile_cache = .off }) catch |err| {
             std.log.err("leds: eval engine init failed: {s}", .{@errorName(err)});
             gpa.free(text);
             return null;
@@ -119,25 +125,21 @@ pub const Pattern = struct {
         self.gpa.free(self.text);
     }
 
-    /// Evaluate one frame: apply the compiled lambda to a native `scope` built
-    /// from `fields`, decode the returned `{ bitmap = [0xRRGGBB...]; nextMs; }`
-    /// into `out` (brightness-scaled), and return the clamped nextMs hint. On any
-    /// eval fault logs ONCE and returns the error so the caller disables eval for
-    /// the run and falls back -- never spinning the log every frame.
-    pub fn render(self: *Pattern, fields: Fields, out: []Rgb) !u32 {
-        if (comptime !have_fix) return error.EvalUnavailable;
-        return self.renderInner(fields, out) catch |err| {
-            if (!self.logged_error) {
-                std.log.err("leds: eval render failed: {s}; falling back to computed", .{@errorName(err)});
-                self.logged_error = true;
-            }
-            return err;
-        };
-    }
+    /// One applied frame: the forced `bitmap` list values and the raw `nextMs`
+    /// int. The two decoders (`render` for LEDs, `renderOled` for page-bytes)
+    /// share this; each reads `bitmap` its own way, THEN calls `finishFrame` so
+    /// the young-Value collection never runs while a decoder is still reading the
+    /// bitmap ints out of the Value heap.
+    const Frame = struct {
+        bitmap: []const Value,
+        next_ms: i64,
+    };
 
-    fn renderInner(self: *Pattern, fields: Fields, out: []Rgb) !u32 {
-        if (comptime !have_fix) return error.EvalUnavailable;
-
+    /// Build the per-frame `scope`, apply the compiled lambda, and force the
+    /// `{ bitmap = [ints]; nextMs; }` result into a `Frame`. Mints NO new chunk
+    /// (native apply runs the pre-compiled body). The returned bitmap slice points
+    /// into the Value heap and stays valid until `finishFrame` collects.
+    fn applyFrame(self: *Pattern, fields: Fields) !Frame {
         // Build the scope attrset natively -- inline ints/floats/bool, no chunk,
         // no heap-member rooting. camelCase, matching the content contract.
         const scope = try self.ev.makeAttrs(&.{
@@ -162,8 +164,42 @@ pub const Pattern = struct {
         if (bitmap.kind() != .list) return error.BitmapNotList;
 
         const pix = try self.ev.heapListOf(bitmap.asObjectId());
-        const n = @min(pix.len, out.len);
-        for (pix[0..n], 0..) |p, i| {
+        return .{ .bitmap = pix, .next_ms = next.asInt() };
+    }
+
+    /// Advance the frame counter, collect young Value garbage on the cadence (the
+    /// scope, result attrset, and bitmap list of THIS frame), and clamp the raw
+    /// nextMs to a sane frame period. MUST be called only after the caller has
+    /// finished reading the bitmap ints -- the collection can sweep them.
+    fn finishFrame(self: *Pattern, next_ms: i64) u32 {
+        self.frame +%= 1;
+        if (self.frame % collect_every == 0) _ = self.ev.collectNow();
+        return if (next_ms <= 0) 33 else @intCast(@min(next_ms, @as(i64, 60_000)));
+    }
+
+    /// Evaluate one frame: apply the compiled lambda to a native `scope` built
+    /// from `fields`, decode the returned `{ bitmap = [0xRRGGBB...]; nextMs; }`
+    /// into `out` (brightness-scaled), and return the clamped nextMs hint. On any
+    /// eval fault logs ONCE and returns the error so the caller disables eval for
+    /// the run and falls back -- never spinning the log every frame.
+    pub fn render(self: *Pattern, fields: Fields, out: []Rgb) !u32 {
+        if (comptime !have_fix) return error.EvalUnavailable;
+        return self.renderInner(fields, out) catch |err| {
+            if (!self.logged_error) {
+                std.log.err("leds: eval render failed: {s}; falling back to computed", .{@errorName(err)});
+                self.logged_error = true;
+            }
+            return err;
+        };
+    }
+
+    fn renderInner(self: *Pattern, fields: Fields, out: []Rgb) !u32 {
+        if (comptime !have_fix) return error.EvalUnavailable;
+
+        const f = try self.applyFrame(fields);
+
+        const n = @min(f.bitmap.len, out.len);
+        for (f.bitmap[0..n], 0..) |p, i| {
             const v = (try self.ev.forceValue(p)).asInt(); // 0xRRGGBB packed
             // `& 0xff` yields 0..255 regardless of sign, so the u8 cast is safe.
             const r: u8 = @intCast((v >> 16) & 0xff);
@@ -178,11 +214,47 @@ pub const Pattern = struct {
         // A short bitmap leaves the tail LEDs dark, not stale from last frame.
         for (out[n..]) |*px| px.* = .{ .r = 0, .g = 0, .b = 0 };
 
-        self.frame +%= 1;
-        if (self.frame % collect_every == 0) _ = self.ev.collectNow();
+        return self.finishFrame(f.next_ms); // collect only after the decode
+    }
 
-        const next_ms = next.asInt();
-        return if (next_ms <= 0) 33 else @intCast(@min(next_ms, @as(i64, 60_000)));
+    /// Evaluate one frame for a 1-bit OLED panel: apply the compiled lambda,
+    /// decode the returned `{ bitmap = [ints]; nextMs; }` into `out` as SSD1306
+    /// page-major GDDRAM bytes, and return the clamped nextMs hint. `out.len` is
+    /// `width*height/8` (512 for 128x32). Each bitmap int packs 4 consecutive
+    /// page-bytes little-endian: byte 0 = int & 0xff, byte 1 = (int>>8)&0xff, ...
+    /// so `out.len/4` ints fill the frame. A short bitmap zero-fills the tail (a
+    /// dark panel) rather than leaving last frame's bytes. Logs ONCE on fault.
+    pub fn renderOled(self: *Pattern, fields: Fields, out: []u8) !u32 {
+        if (comptime !have_fix) return error.EvalUnavailable;
+        return self.renderOledInner(fields, out) catch |err| {
+            if (!self.logged_error) {
+                std.log.err("bling: eval-screen render failed: {s}; dropping eval screen", .{@errorName(err)});
+                self.logged_error = true;
+            }
+            return err;
+        };
+    }
+
+    fn renderOledInner(self: *Pattern, fields: Fields, out: []u8) !u32 {
+        if (comptime !have_fix) return error.EvalUnavailable;
+
+        const f = try self.applyFrame(fields);
+
+        // Each int is 4 page-bytes LE. Decode min(bitmapLen, out.len/4) ints.
+        const words = out.len / 4;
+        const n = @min(f.bitmap.len, words);
+        for (f.bitmap[0..n], 0..) |p, i| {
+            const v = (try self.ev.forceValue(p)).asInt();
+            out[i * 4 + 0] = @intCast(v & 0xff);
+            out[i * 4 + 1] = @intCast((v >> 8) & 0xff);
+            out[i * 4 + 2] = @intCast((v >> 16) & 0xff);
+            out[i * 4 + 3] = @intCast((v >> 24) & 0xff);
+        }
+        // Zero any tail the bitmap did not cover (short bitmap or a non-multiple
+        // panel size): a dark region, not stale bytes from the previous frame.
+        for (out[n * 4 ..]) |*b| b.* = 0;
+
+        return self.finishFrame(f.next_ms); // collect only after the decode
     }
 };
 
@@ -210,7 +282,7 @@ pub fn selftest(gpa: std.mem.Allocator) !void {
         return;
     }
 
-    var ev = try Engine.init(gpa, .{ .worker_count = 0 });
+    var ev = try Engine.init(gpa, .{ .worker_count = 0, .compile_cache = .off });
     defer ev.deinit();
 
     // Compile ONCE: a `scope -> { bitmap = [ints]; nextMs; }` function.
@@ -249,4 +321,45 @@ pub fn selftest(gpa: std.mem.Allocator) !void {
 
 test "have_fix flag is defined" {
     _ = have_fix;
+}
+
+// Exercise renderOled's page-byte LE decode on a real compiled Pattern: a lambda
+// that returns two known ints must land in the framebuffer as their 4 LE bytes,
+// with the untouched tail zeroed. On an eval-less build this test is a no-op.
+test "renderOled decodes bitmap ints to page-major LE bytes" {
+    if (comptime !have_fix) return;
+    // The Engine acquires a worker buffer pool lazily on first evaluate and holds
+    // it for its lifetime (fix owns that teardown); back it with an arena so the
+    // leak checker sees a clean tree once the arena is released.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+
+    var ev = try Engine.init(gpa, .{ .worker_count = 0, .compile_cache = .off });
+    // A two-int bitmap with distinct, byte-distinguishable values so a wrong
+    // endianness or offset is caught: 0x04030201 and 0x08070605.
+    const lambda = try ev.evaluate(
+        \\scope: { bitmap = [ 67305985 134678021 ]; nextMs = 50; }
+    );
+    try std.testing.expect(lambda.isNixClosure());
+    try ev.gcSetExternalRoots(&.{lambda});
+
+    // Build the Pattern by hand (open() reads from a path; here we already hold
+    // the compiled lambda). text is an empty owned slice so deinit's free is safe.
+    var pat: Pattern = .{
+        .gpa = gpa,
+        .ev = ev,
+        .text = try gpa.dupe(u8, ""),
+        .lambda = lambda,
+    };
+    defer pat.deinit();
+
+    var fb: [512]u8 = @splat(0xaa); // preload garbage so the tail-zero is checked
+    const next = try pat.renderOled(.{ .width = 128, .height = 32 }, &fb);
+    try std.testing.expectEqual(@as(u32, 50), next);
+
+    // int 0x04030201 -> bytes 01 02 03 04 ; int 0x08070605 -> 05 06 07 08.
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, fb[0..8]);
+    // Every byte past the two decoded ints is zeroed, not stale 0xaa.
+    for (fb[8..]) |b| try std.testing.expectEqual(@as(u8, 0), b);
 }
