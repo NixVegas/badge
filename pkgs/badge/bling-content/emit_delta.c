@@ -234,16 +234,28 @@ int main(int argc, char **argv)
 	printf("  nframes = %lu;\n", frames);
 	printf("  # a mod b (Nix has no builtins.mod; integer division floors for >= 0).\n");
 	printf("  mod = a: b: a - (a / b) * b;\n");
+	// A [backend] fps HUD stamped over EVERY frame (keyframe or delta) via the
+	// overlay contract (eval.zig applyOverlay), using the shared importable font
+	// lib. scope.backend is 0=fix / 1=nix; scope.fps is the loop's measured rate.
+	printf("  # [backend] fps HUD via the overlay contract + <nixbadge/lib/font.nix>.\n");
+	printf("  font = import <nixbadge/lib/font.nix>;\n");
+	printf("  hud = font.renderText {\n");
+	printf("    text = \"[\" + (builtins.elemAt [ \"fix\" \"nix\" ] scope.backend) + \"] \" + toString scope.fps + \"fps\";\n");
+	printf("    x = 0;\n");
+	printf("    width = scope.width;\n");
+	printf("  };\n");
 	printf("in\n");
 	// frameIndex is a monotonic per-screen play counter (see badapple-delta.md
 	// "Playback model"); it wraps so the clip loops and resets to 0 (a keyframe)
 	// on screen entry.
 	printf("let fr = builtins.elemAt frames (mod scope.frameIndex nframes);\n");
 	printf("in {\n");
-	printf("  bitmap = fr.b;\n");
-	printf("  delta  = !fr.k;\n");
-	printf("  n      = fr.n or 0;\n");
-	printf("  nextMs = %u;\n", next_ms);
+	printf("  bitmap   = fr.b;\n");
+	printf("  delta    = !fr.k;\n");
+	printf("  n        = fr.n or 0;\n");
+	printf("  nextMs   = %u;\n", next_ms);
+	printf("  overlay  = hud.overlay;\n");
+	printf("  overlayN = hud.overlayN;\n");
 	printf("}\n");
 
 	free(fb);

@@ -68,6 +68,8 @@ pkgs.runCommand "nixbadge-content"
     cp ${./screens/gallant-font-data.nix} "$out/lib/gallant-font-data.nix"
     cp ${./screens/spleen-5x8-font-data.nix} "$out/lib/spleen-5x8-font-data.nix"
     cp ${./screens/spleen-8x16-font-data.nix} "$out/lib/spleen-8x16-font-data.nix"
+    # The HUD font: renders "[backend] fps" text into overlay entries (imports the 5x8 table).
+    cp ${./lib/font.nix} "$out/lib/font.nix"
     sed -E \
       -e 's|import \.\./oled\.nix|import <nixbadge/lib/oled.nix>|g' \
       -e 's|import \./gallant-font-data\.nix|import <nixbadge/lib/gallant-font-data.nix>|g' \
@@ -101,6 +103,20 @@ pkgs.runCommand "nixbadge-content"
       " >/dev/null || { echo "SELFTEST FAIL: $f did not eval to a valid $want-int frame @h=$h" >&2; exit 1; }
     }
     ${checkCmds}
+
+    # Bad Apple: frame 0 (a keyframe) must eval AND carry a HUD overlay -- validates the
+    # emitted `import <nixbadge/lib/font.nix>` + font.nix end-to-end (backend 1 = nix).
+    nix --extra-experimental-features nix-command eval --impure --raw --expr "
+      let r = (import $out/oled.d/10-badapple.nix) {
+        frameIndex = 0; width = 128; height = 64; backend = 1; fps = 60;
+        t = 0; batteryMv = 0; batteryPct = 0; onUsb = false; load1 = 0.0;
+        cpuPct = 0; memPct = 0; uptimeS = 0;
+      };
+      in if builtins.isList r.bitmap && builtins.isInt r.nextMs
+            && r.overlayN > 0 && builtins.all (x: builtins.isInt x) r.overlay
+         then \"ok\" else throw \"bad badapple HUD frame\"
+    " >/dev/null || { echo "SELFTEST FAIL: 10-badapple.nix frame 0 / HUD overlay did not eval" >&2; exit 1; }
+    echo "nixbadge-content: badapple frame 0 evals + carries a [nix] fps HUD overlay"
 
     # A screen with NO search path must FAIL (proves the imports really are <nixbadge>, not
     # inlined): eval battery with NIX_PATH empty -> the import cannot resolve.
