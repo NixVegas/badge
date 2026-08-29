@@ -30,20 +30,20 @@ pub const Backend = union(enum) {
     fix: fixeval.FixBackend,
     nix: nixeval.NixBackend,
 
-    pub fn open(gpa: std.mem.Allocator, which: Kind, paths: []const []const u8) ?Backend {
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, which: Kind, paths: []const []const u8) ?Backend {
         switch (which) {
             .nix => {
                 if (nixeval.have_nix) {
-                    if (nixeval.NixBackend.open(gpa, paths)) |b| return .{ .nix = b };
+                    if (nixeval.NixBackend.open(gpa, io, paths)) |b| return .{ .nix = b };
                     std.log.warn("backend: nix requested but open failed; falling back to fix", .{});
                 } else {
                     std.log.info("backend: nix requested but not built on this arch; using fix", .{});
                 }
-                if (fixeval.FixBackend.open(gpa, paths)) |b| return .{ .fix = b };
+                if (fixeval.FixBackend.open(gpa, io, paths)) |b| return .{ .fix = b };
                 return null;
             },
             .fix => {
-                if (fixeval.FixBackend.open(gpa, paths)) |b| return .{ .fix = b };
+                if (fixeval.FixBackend.open(gpa, io, paths)) |b| return .{ .fix = b };
                 return null;
             },
         }
@@ -99,8 +99,8 @@ pub const ScreenSet = struct {
     active_ix: ?usize = null,
     logged_error: bool = false,
 
-    pub fn open(gpa: std.mem.Allocator, which: Kind, paths: []const []const u8) ?ScreenSet {
-        const be = Backend.open(gpa, which, paths) orelse return null;
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, which: Kind, paths: []const []const u8) ?ScreenSet {
+        const be = Backend.open(gpa, io, which, paths) orelse return null;
         return .{ .be = be };
     }
 
@@ -160,8 +160,8 @@ pub const Pattern = struct {
     frame: u64 = 0,
     logged_error: bool = false,
 
-    pub fn open(gpa: std.mem.Allocator, which: Kind, path: []const u8) ?Pattern {
-        const be = Backend.open(gpa, which, &.{path}) orelse return null;
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, which: Kind, path: []const u8) ?Pattern {
+        const be = Backend.open(gpa, io, which, &.{path}) orelse return null;
         return .{ .be = be };
     }
 
@@ -229,7 +229,7 @@ test "ScreenSet.renderOled paces delta playback via frameIndex and resets on scr
     const a = try writeScreen(&abuf, dir, "a.nix", "scope: { bitmap = [ scope.frameIndex ]; nextMs = 10; }");
     const b = try writeScreen(&bbuf, dir, "b.nix", "scope: { bitmap = [ 9 ]; nextMs = 20; }");
 
-    var set = ScreenSet.open(gpa, .fix, &.{ a, b }) orelse return error.OpenFailed;
+    var set = ScreenSet.open(gpa, std.testing.io, .fix, &.{ a, b }) orelse return error.OpenFailed;
     defer set.deinit();
     try std.testing.expectEqual(@as(usize, 2), set.count());
     try std.testing.expectEqual(Kind.fix, set.kind());
@@ -261,7 +261,7 @@ test "ScreenSet applies an overlay on top of the decoded frame" {
     const src = "scope: { bitmap = [ 67305985 ]; nextMs = 33; overlay = [ 129499136 ]; overlayN = 1; }";
     const s = try writeScreen(&abuf, dir, "ov.nix", src);
 
-    var set = ScreenSet.open(gpa, .fix, &.{s}) orelse return error.OpenFailed;
+    var set = ScreenSet.open(gpa, std.testing.io, .fix, &.{s}) orelse return error.OpenFailed;
     defer set.deinit();
     var fb: [512]u8 = @splat(0);
     _ = try set.renderOled(0, .{ .width = 128, .height = 32 }, &fb);
@@ -281,7 +281,7 @@ test "Pattern.render decodes an LED frame and reports nextMs" {
     var abuf: [512]u8 = undefined;
     const p = try writeScreen(&abuf, dir, "led.nix", "scope: { bitmap = [ 16711680 65280 ]; nextMs = 40; }");
 
-    var pat = Pattern.open(gpa, .fix, p) orelse return error.OpenFailed;
+    var pat = Pattern.open(gpa, std.testing.io, .fix, p) orelse return error.OpenFailed;
     defer pat.deinit();
     var px: [2]Rgb = undefined;
     const next = try pat.render(.{ .brightness = 255 }, &px);

@@ -139,7 +139,12 @@ pub const NixBackend = struct {
     /// Init libexpr, open a `dummy://` store + eval state, compile each path to a lambda
     /// ONCE and keep it rooted. Skips (logs once) a path that cannot be read / does not
     /// compile / is not a function. Returns null when nix is not linked or none loaded.
-    pub fn open(gpa: std.mem.Allocator, paths: []const []const u8) ?NixBackend {
+    ///
+    /// `io` is accepted for signature parity with FixBackend but ignored: upstream Nix does
+    /// its own filesystem `import`/`readFile` natively (no injected io), so a screen's
+    /// absolute-path import resolves without it.
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, paths: []const []const u8) ?NixBackend {
+        _ = io;
         if (comptime !have_nix) {
             std.log.info("nix: eval requested but not built on this arch", .{});
             return null;
