@@ -105,6 +105,19 @@ in
         ]
       '';
     };
+    evalDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        A directory the oled engine scans at runtime for *.nix screens (passed as
+        `--eval-dir`), sorted by filename so a NN- numeric prefix sets the cycle order --
+        drop-in, dir-based content (add a file, get a screen, no rebuild of the tool).
+        The screens may `import <nixbadge/lib/...>` (a shared font/draw library), resolved
+        by nix-badge's `nixbadge=/etc/nixbadge` search path. The default config sets this to
+        "/etc/nixbadge/oled.d" (installed via environment.etc). Combines with evalScreens
+        (explicit --eval-screen paths are appended alongside the scanned ones).
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -132,6 +145,9 @@ in
           # screens, else the oled daemon falls back to them. aarch64 only (no-op on riscv,
           # where eval is not built in). Order here = cycle order on the badge.
           ++ map (p: "--eval-screen ${p}") cfg.evalScreens
+          # Dir-based content: scan oled.d for *.nix (sorted). The default config points
+          # this at /etc/nixbadge/oled.d; screens there import <nixbadge/lib/...>.
+          ++ lib.optional (cfg.evalDir != null) "--eval-dir ${cfg.evalDir}"
         );
         # the oled daemon exits 0 when the panel is absent (a core that does not mux the SAO
         # i2c, so /dev/i2c-1 has nothing at 0x3c): a clean no-op, not a failure,

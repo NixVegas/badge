@@ -117,35 +117,24 @@
   # 128x64 panel (swapped in on the bench). The screens read scope.height, so they
   # lay out to the taller panel; the SSD1306 init parameterises for 64 rows.
   nixbadge.oled.height = 64;
-  nixbadge.oled.evalScreens =
-    let
-      # Bake Bad Apple for the 128x64 panel at 60 fps using the DELTA codec
-      # (pkgs/badge/bling-content/badapple-delta.md): each frame stores only the
-      # (offset,byte) changes vs the previous frame, packed 2/int; the runtime
-      # applies them to a persistent framebuffer and flushes ONLY the changed
-      # columns. That fits 60 fps under the 400 kHz I2C bus (a full-frame flush is
-      # ~23 ms => a ~43 fps ceiling) AND keeps memory well below a full-frame 60 fps
-      # bake (~13140 full frames would be ~27 MB of fix Values). keyframeInterval=60
-      # emits one full frame per second for glitch self-heal + future seeking.
-      badappleLive = import ../../pkgs/badge/bling-content/badapple-live.nix {
-        pkgs = pkgs.buildPackages;
-        durationSeconds = null;
-        height = 64;
-        fps = 60;
-        keyframeInterval = 60;
-      };
-      screens = import ../../pkgs/badge/bling-content/screens-install.nix {
-        pkgs = pkgs.buildPackages;
-      };
-    in
-    [
-      "${badappleLive}/badapple-live.nix"
-      "${screens}/screens/battery.nix"
-      "${screens}/screens/load.nix"
-      "${screens}/screens/power.nix"
-      "${screens}/screens/clock.nix"
-      "${screens}/screens/currentsystem.nix"
-    ];
+
+  # Dir-based content at /etc/nixbadge: the runtime scans oled.d/*.nix (--eval-dir), and a
+  # screen's `<nixbadge/lib/...>` imports resolve through nix-badge's `nixbadge=/etc/nixbadge`
+  # search path (both backends). This REPLACES the flat evalScreens list + the old
+  # inline-everything screens-install.nix: the font/draw library now lives once under lib/,
+  # imported by every screen. Bad Apple is baked for the 128x64 panel at 60 fps with the
+  # DELTA codec (badapple-delta.md: per-frame (offset,byte) changes, 2/int, applied to a
+  # persistent framebuffer, flushing only changed columns -> 60 fps under 400 kHz I2C);
+  # keyframeInterval=60 self-heals once/second. buildPackages so the ffmpeg transcode + Nix
+  # generation run on the build host.
+  environment.etc."nixbadge".source = import ../../pkgs/badge/bling-content/etc.nix {
+    pkgs = pkgs.buildPackages;
+    height = 64;
+    fps = 60;
+    durationSeconds = null;
+    keyframeInterval = 60;
+  };
+  nixbadge.oled.evalDir = "/etc/nixbadge/oled.d";
 
   # Networking via NetworkManager: it manages eth0 (auto-connects wired) and
   # wlan0 once the AIC8800 WiFi comes up. wpa_supplicant backend because the
