@@ -224,6 +224,18 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Phase 2 — `nixeval.zig` NixBackend + direct Zig↔C++ static link
 
+### PROVEN LINK RECIPE (spike 2026-08-29, `zig cc` end-to-end: links + runs 36.7 MB aarch64-musl)
+
+- Component attr: `pkgs.pkgsStatic.nixVersions.nixComponents_2_34."nix-expr-c"` (out=libs, dev=headers+.pc); siblings `nix-store-c`, `nix-util-c` for the other `nix_api_*.h`.
+- Link line (inside `-Wl,--start-group ... -Wl,--end-group`, `-static`):
+  - `pkg-config --libs --static nix-expr-c` **with `-Wl,--wrap=*` filtered out** (zig cc: `unsupported linker arg: --wrap`; drops nix's `__assert_fail` wrap, harmless).
+  - 4 extra `-L` that `--static` omits: `pkgsStatic.{acl, bzip2, libunistring, llhttp}`/lib.
+  - `libstdc++.a` FULL PATH: `<pkgsStatic.stdenv.cc.cc.lib>/aarch64-unknown-linux-musl/lib/libstdc++.a`.
+  - `libgcc.a` FULL PATH (has `_Unwind_*`): `<pkgsStatic.stdenv.cc.cc>/lib/gcc/aarch64-unknown-linux-musl/<ver>/libgcc.a`.
+- `linkLibC` (musl), NOT `linkLibCpp` (LLVM libc++ is ABI-incompatible with gcc libstdc++).
+- Includes: the three `*-c` dev `/include` dirs.
+- All the transitive `-L` from `nix-store -q --requisites --include-outputs <nix-expr-c.drv> | grep static-aarch64.../lib` (build closure) — in Nix, derive via `pkgs.closureInfo` on the C-API components' dev+out, or enumerate.
+
 ### Task 2.1: `nix-badge.nix` — link the Nix C API static libs (gated `nixEval`)
 
 **Files:**
