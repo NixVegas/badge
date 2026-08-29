@@ -97,6 +97,48 @@ pub fn mkdir(path: [*:0]const u8, mode: linux.mode_t) MkdirResult {
     };
 }
 
+/// A directory entry name (borrowed from the iterator's buffer; copy it before the next
+/// `next()` call, which may refill the buffer).
+pub const DirEntry = struct { name: []const u8, kind: u8 };
+
+/// A minimal getdents64 directory iterator over a caller-provided (8-aligned) buffer. Used
+/// to scan a content dir (`--eval-dir`) for `*.nix` screens without pulling in std.fs. `.`
+/// and `..` are skipped. Names returned point INTO `buf` and are only valid until the next
+/// `next()`; the caller dupes the ones it keeps.
+pub const DirIter = struct {
+    fd: fd_t,
+    buf: []align(8) u8,
+    len: usize = 0,
+    pos: usize = 0,
+
+    pub fn next(self: *DirIter) ?DirEntry {
+        while (true) {
+            if (self.pos >= self.len) {
+                const got = decode(linux.getdents64(self.fd, self.buf.ptr, self.buf.len)) catch return null;
+                if (got == 0) return null;
+                self.len = got;
+                self.pos = 0;
+            }
+            const rec: *align(8) linux.dirent64 = @ptrCast(@alignCast(&self.buf[self.pos]));
+            self.pos += rec.reclen;
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&rec.name)));
+            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            return .{ .name = name, .kind = rec.type };
+        }
+    }
+
+    pub fn deinit(self: *DirIter) void {
+        close(self.fd);
+    }
+};
+
+/// Open `path` as a directory for iteration, or null on any fault. `buf` must be 8-aligned
+/// (getdents64 records are 8-aligned) and is where entries are read; size it a few KiB.
+pub fn openDirIter(path: [*:0]const u8, buf: []align(8) u8) ?DirIter {
+    const fd = open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0) catch return null;
+    return .{ .fd = fd, .buf = buf };
+}
+
 pub fn mmapRead(fd: fd_t, len: usize) Error![]align(std.heap.page_size_min) u8 {
     const ret = linux.mmap(null, len, .{ .READ = true }, .{ .TYPE = .PRIVATE }, fd, 0);
     _ = try decode(ret);

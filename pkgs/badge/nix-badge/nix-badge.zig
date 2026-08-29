@@ -121,7 +121,7 @@ const usage_text =
     \\  nix-badge bling show
     \\  nix-badge core <arm|riscv|status>
     \\  nix-badge power
-    \\  nix-badge oled [--badapple PATH] [--eval-screen PATH ...] [--oled-width W] [--oled-height H] [--backend fix|nix]
+    \\  nix-badge oled [--badapple PATH] [--eval-screen PATH ...] [--eval-dir DIR] [--oled-width W] [--oled-height H] [--backend fix|nix]
     \\  nix-badge bootswap
     \\  nix-badge mmio <read ADDR | write ADDR VALUE>
     \\  nix-badge fix-selftest              (smoke-test the embedded fix evaluator)
@@ -385,7 +385,7 @@ fn paintBlobFrame(frames: *const bled.Frames, now_ms: u64, brightness: u8, out: 
 /// recovery of its own); animations and blobs run at their fps. The WS2812 encode
 /// + spidev write + latch path is identical in both modes — only the pixel source
 /// differs — so the blob mode is purely additive and cannot regress flicker.
-fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.Kind) CmdError!void {
+fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.Kind, io: std.Io) CmdError!void {
     var cfg = try loadConfig(base);
 
     installHandler(.TERM, onStop);
@@ -408,7 +408,7 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.
     // read); `t` is current every frame. Missing/bad/unavailable -> null, so the
     // painter transparently falls back to blob/computed (and riscv, with no eval
     // built in, always takes that path).
-    var eval_pat: ?backend.Pattern = openEval(gpa, &cfg, backend_kind);
+    var eval_pat: ?backend.Pattern = openEval(gpa, &cfg, backend_kind, io);
     defer if (eval_pat) |*p| p.deinit();
     var sensors: eval.Fields = .{};
     var last_sensor_ms: u64 = 0;
@@ -457,7 +457,7 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.
             // The pattern is a pure function of `t`, so reopening never resets the
             // visible animation; only the compile is redone (rare, ~ms).
             if (eval_pat) |*p| p.deinit();
-            eval_pat = openEval(gpa, &cfg, backend_kind);
+            eval_pat = openEval(gpa, &cfg, backend_kind, io);
             last_sensor_ms = 0; // force a sensor refresh next frame
             frame_no = 0;
             report_timing = true;
@@ -552,9 +552,9 @@ const sensor_interval_ms: u64 = 1000;
 /// Open the configured eval pattern, or null when none is set or eval is not
 /// built in (riscv). A bad pattern logs inside `open` and also yields null, so
 /// the painter transparently falls back to the blob/computed source.
-fn openEval(gpa: std.mem.Allocator, cfg: *const Config, kind: backend.Kind) ?backend.Pattern {
+fn openEval(gpa: std.mem.Allocator, cfg: *const Config, kind: backend.Kind, io: std.Io) ?backend.Pattern {
     if (cfg.eval().len == 0) return null;
-    return backend.Pattern.open(gpa, kind, cfg.eval());
+    return backend.Pattern.open(gpa, io, kind, cfg.eval());
 }
 
 /// Snapshot the slow sensor inputs for the eval scope. Called on the sensor tick,
@@ -746,7 +746,7 @@ fn cmdBlingShow(out: *Out) CmdError!void {
     w.print("eval = {s}\n", .{cfg.eval()}) catch return error.Failed;
 }
 
-fn cmdBling(gpa: std.mem.Allocator, out: *Out, args: []const []const u8) CmdError!void {
+fn cmdBling(gpa: std.mem.Allocator, out: *Out, io: std.Io, args: []const []const u8) CmdError!void {
     if (args.len < 1) return error.Usage;
     if (std.mem.eql(u8, args[0], "run")) {
         var base: ?[]const u8 = null;
@@ -762,7 +762,7 @@ fn cmdBling(gpa: std.mem.Allocator, out: *Out, args: []const []const u8) CmdErro
                 return error.Usage;
             }
         }
-        return cmdBlingRun(gpa, base, kind);
+        return cmdBlingRun(gpa, base, kind, io);
     }
     if (std.mem.eql(u8, args[0], "set")) return cmdBlingSet(out, args[1..]);
     if (std.mem.eql(u8, args[0], "show")) return cmdBlingShow(out);
@@ -1123,7 +1123,42 @@ fn persistScreen(name: []const u8) void {
 // cap is logged and ignored.
 const max_eval_screens = 16;
 
-fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
+/// Scan `dir` for `*.nix` files and append their full paths (sorted ascending by name, so a
+/// `NN-` numeric prefix sets the cycle order) to `out` starting at `count`; returns the new
+/// count. Full paths are gpa-duped (process-lifetime; the oled loop holds them until exit).
+/// Bounded by out.len; a directory with more `.nix` files than fit is logged and truncated.
+/// A borrowed dirent name is copied by the allocPrint, so nothing dangles past `next()`.
+fn collectNixScreens(gpa: std.mem.Allocator, dir: []const u8, out: [][]const u8, count: usize) usize {
+    var dbuf: [512]u8 = undefined;
+    const zdir = std.fmt.bufPrintZ(&dbuf, "{s}", .{dir}) catch return count;
+    var iterbuf: [8192]u8 align(8) = undefined;
+    var it = linux.openDirIter(zdir.ptr, &iterbuf) orelse {
+        std.log.warn("oled: --eval-dir {s} not readable; ignoring", .{dir});
+        return count;
+    };
+    defer it.deinit();
+
+    var c = count;
+    while (it.next()) |e| {
+        if (!std.mem.endsWith(u8, e.name, ".nix")) continue;
+        if (c >= out.len) {
+            std.log.warn("oled: --eval-dir {s} has more than {d} screens; dropping the rest", .{ dir, out.len });
+            break;
+        }
+        // allocPrint copies the borrowed dirent name into a fresh, process-lifetime path.
+        out[c] = std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, e.name }) catch break;
+        c += 1;
+    }
+    // Every path shares the `dir + "/"` prefix, so a plain lexical sort orders by basename.
+    std.mem.sort([]const u8, out[count..c], {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    return c;
+}
+
+fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdError!void {
     var badapple_path: ?[]const u8 = null;
     // `--eval-screen PATH` is repeatable: each occurrence appends a pure-Nix OLED
     // screen. They are compiled into ONE shared fix Engine (a ScreenSet) so the
@@ -1146,6 +1181,10 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
             badapple_path = v;
         } else if (optArg(args, &i, "--backend")) |v| {
             backend_kind = parseBackendKind(v);
+        } else if (optArg(args, &i, "--eval-dir")) |v| {
+            // Drop-in dir-based content: scan v for *.nix, sorted by name (NN- prefix =
+            // cycle order). Appends to any explicit --eval-screen already collected.
+            eval_screen_count = collectNixScreens(gpa, v, &eval_screen_paths, eval_screen_count);
         } else if (optArg(args, &i, "--eval-screen")) |v| {
             if (eval_screen_count < max_eval_screens) {
                 eval_screen_paths[eval_screen_count] = v;
@@ -1230,7 +1269,7 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     if (eval_screen_count > 0) {
         // A live backend switch persists its choice; honour it over the ExecStart default.
         backend_kind = restoreBackend(backend_kind);
-        if (backend.ScreenSet.open(gpa, backend_kind, eval_screen_paths[0..eval_screen_count])) |s| {
+        if (backend.ScreenSet.open(gpa, io, backend_kind, eval_screen_paths[0..eval_screen_count])) |s| {
             const fb = gpa.alloc(u8, @as(usize, panel.width) * (panel.height / 8)) catch blk: {
                 std.log.warn("oled: cannot alloc eval framebuffer; using computed", .{});
                 break :blk null;
@@ -1409,8 +1448,8 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
                     backendName(cur_kind), backendName(new_kind), eval_screen_count,
                 });
                 s.deinit();
-                eval_set = backend.ScreenSet.open(gpa, new_kind, eval_screen_paths[0..eval_screen_count]) orelse
-                    backend.ScreenSet.open(gpa, cur_kind, eval_screen_paths[0..eval_screen_count]);
+                eval_set = backend.ScreenSet.open(gpa, io, new_kind, eval_screen_paths[0..eval_screen_count]) orelse
+                    backend.ScreenSet.open(gpa, io, cur_kind, eval_screen_paths[0..eval_screen_count]);
                 if (eval_set) |*ns| {
                     backend_kind = ns.kind();
                     persistBackend(backend_kind);
@@ -1784,7 +1823,7 @@ pub fn main(init: std.process.Init) !void {
     // worth a non-zero exit rather than a usage message; handle it out of the
     // fallible CmdError chain. Kept terse in usage: it is a smoke test.
     if (std.mem.eql(u8, cmd, "fix-selftest")) {
-        fixeval.selftest(gpa) catch |err| {
+        fixeval.selftest(gpa, init.io) catch |err| {
             std.log.err("fix-selftest failed: {s}", .{@errorName(err)});
             out.flush();
             std.process.exit(1);
@@ -1805,13 +1844,13 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const result: CmdError!void = if (std.mem.eql(u8, cmd, "bling"))
-        cmdBling(gpa, &out, rest)
+        cmdBling(gpa, &out, init.io, rest)
     else if (std.mem.eql(u8, cmd, "core"))
         cmdCore(&out, rest)
     else if (std.mem.eql(u8, cmd, "power"))
         cmdPower(&out)
     else if (std.mem.eql(u8, cmd, "oled"))
-        cmdOled(gpa, rest)
+        cmdOled(gpa, init.io, rest)
     else if (std.mem.eql(u8, cmd, "mmio"))
         cmdMmio(&out, rest)
     else
@@ -1864,4 +1903,31 @@ test "parseBackendKind maps names, defaults to fix" {
     try std.testing.expectEqual(backend.Kind.nix, parseBackendKind("nix"));
     try std.testing.expectEqual(backend.Kind.fix, parseBackendKind("fix"));
     try std.testing.expectEqual(backend.Kind.fix, parseBackendKind("bogus"));
+}
+
+test "collectNixScreens: only *.nix, sorted by name, appended after existing" {
+    const gpa = std.testing.allocator;
+    // Fresh temp dir with mixed files, out of order.
+    var dbuf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintZ(&dbuf, "/tmp/nbdir-{d}", .{linux.monotonicMsec()});
+    switch (linux.mkdir(dir.ptr, 0o755)) {
+        .created, .exists, .failed => {},
+    }
+    var pbuf: [128]u8 = undefined;
+    inline for (.{ "20-load.nix", "10-badapple.nix", "readme.txt", "30-clock.nix" }) |fname| {
+        const p = try std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ dir, fname });
+        try linux.writeFile(p.ptr, "scope: { bitmap = [ 0 ]; nextMs = 33; }");
+    }
+
+    var out: [max_eval_screens][]const u8 = undefined;
+    // Seed one explicit path to prove the dir screens append after it.
+    out[0] = "explicit.nix";
+    const n = collectNixScreens(gpa, dir, &out, 1);
+    defer for (out[1..n]) |p| gpa.free(p);
+
+    try std.testing.expectEqual(@as(usize, 4), n); // explicit + 3 .nix (readme.txt skipped)
+    try std.testing.expectEqualStrings("explicit.nix", out[0]);
+    try std.testing.expect(std.mem.endsWith(u8, out[1], "/10-badapple.nix"));
+    try std.testing.expect(std.mem.endsWith(u8, out[2], "/20-load.nix"));
+    try std.testing.expect(std.mem.endsWith(u8, out[3], "/30-clock.nix"));
 }
