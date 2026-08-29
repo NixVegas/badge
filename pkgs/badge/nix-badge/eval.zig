@@ -11,6 +11,11 @@ const ws2812 = @import("ws2812.zig");
 
 pub const Rgb = ws2812.Rgb;
 
+/// Which evaluator produced a frame. Selected by `--backend` (default fix); nix is
+/// aarch64-only (see nixeval.have_nix). A screen sees this as `scope.backend` (an int
+/// id, `backend_id` below) so it can label the active evaluator without string interning.
+pub const BackendKind = enum(u8) { fix = 0, nix = 1 };
+
 /// The per-frame inputs fed to a content function's `scope`. Backend-agnostic; the
 /// backend turns these into its own attrset (fix `makeAttrs`, nix `BindingsBuilder`).
 pub const Fields = struct {
@@ -27,15 +32,30 @@ pub const Fields = struct {
     brightness: u8 = 255,
     /// Monotonic playback frame counter (delta screens index by this, not wall-clock).
     frame_index: u64 = 0,
+    /// Active evaluator, as an int (0 fix / 1 nix), fed to `scope.backend`. An int (not a
+    /// string) so neither backend has to intern a string into its value heap each frame;
+    /// a screen maps it to a name via its own inlined table (see badapple-live.nix).
+    backend_id: u8 = @intFromEnum(BackendKind.fix),
+    /// Last measured effective frames/sec (the loop's 3 s window), fed to `scope.fps` so a
+    /// screen can draw a live HUD. 0 until the first window closes.
+    fps: u32 = 0,
 };
 
 /// One applied+extracted frame. `bitmap` is a plain int list the backend forced out of
 /// its own value heap into a reused buffer, so the decode is evaluator-independent.
+///
+/// `overlay` (+ `overlay_n`) is an OPTIONAL, backward-compatible extension: packed exactly
+/// like a delta (2 entries/int, `E = offset*256+byte`, high 18 bits first), it is applied
+/// ON TOP of the decoded `bitmap` (keyframe, delta, OR full frame), letting a screen
+/// overwrite arbitrary framebuffer bytes from Nix -- e.g. stamp a `[backend] fps` HUD over
+/// clean Bad Apple. Absent (`overlay_n == 0`) -> no-op.
 pub const Frame = struct {
     bitmap: []const i64,
     next_ms: i64,
     delta: bool = false,
     n: u32 = 0,
+    overlay: []const i64 = &.{},
+    overlay_n: u32 = 0,
 };
 
 /// The panel region a rendered frame touched, so the caller flushes minimally. `full` ->
@@ -68,28 +88,43 @@ pub fn decodeOled(bitmap: []const i64, out: []u8, width: u32) Dirty {
     return .{ .full = true };
 }
 
-/// Decode a frame into the PERSISTENT framebuffer `out`, dispatching on `frame.delta`.
-/// Delta: `frame.n` packed (offset,byte) change entries, 2 per int, first in the high 18
-/// bits (E = offset*256+byte). Marks the changed columns per page for a partial flush.
-pub fn decodeOledFrame(frame: Frame, out: []u8, width: u32) Dirty {
-    if (!frame.delta) return decodeOled(frame.bitmap, out, width);
-    var d: Dirty = .{ .full = false };
-    if (width == 0) return d;
+/// Apply `n` packed (offset,byte) entries from `packed_ints` (2 per int, first in the high
+/// 18 bits, `E = offset*256+byte`) into `out`, OR-ing each touched column into `dirty`.
+/// Shared by the delta decode and the overlay: a delta starts from a fresh `Dirty`, an
+/// overlay adds to whatever the main decode already marked.
+pub fn applyOverlay(packed_ints: []const i64, n: u32, out: []u8, width: u32, dirty: *Dirty) void {
+    if (width == 0) return;
     const entry_mask: i64 = 0x3ffff; // 2^18 - 1
     var i: u32 = 0;
-    while (i < frame.n) : (i += 1) {
+    while (i < n) : (i += 1) {
         const int_idx = i / 2;
-        if (int_idx >= frame.bitmap.len) break; // malformed: n claims more ints than emitted
-        const v = frame.bitmap[int_idx];
+        if (int_idx >= packed_ints.len) break; // malformed: n claims more ints than emitted
+        const v = packed_ints[int_idx];
         const e: i64 = if (i & 1 == 0) (v >> 18) & entry_mask else v & entry_mask;
         const offset: usize = @intCast(e >> 8);
         if (offset >= out.len) continue; // defensive
         out[offset] = @intCast(e & 0xff);
         const page = offset / width;
         const col = offset % width;
-        if (page < Dirty.max_pages and col < 128) d.changed[page] |= @as(u128, 1) << @intCast(col);
+        if (page < Dirty.max_pages and col < 128) dirty.changed[page] |= @as(u128, 1) << @intCast(col);
     }
+}
+
+/// Decode a frame into the PERSISTENT framebuffer `out`, dispatching on `frame.delta`.
+/// Delta: `frame.n` packed (offset,byte) change entries via `applyOverlay`. Marks the
+/// changed columns per page for a partial flush. Does NOT apply `frame.overlay` -- the
+/// caller stamps that on top afterward (so it lands over full frames too).
+pub fn decodeOledFrame(frame: Frame, out: []u8, width: u32) Dirty {
+    if (!frame.delta) return decodeOled(frame.bitmap, out, width);
+    var d: Dirty = .{ .full = false };
+    applyOverlay(frame.bitmap, frame.n, out, width, &d);
     return d;
+}
+
+/// Clamp a raw `nextMs` hint to a sane frame period: a non-positive value becomes 33 ms
+/// (~30 fps default) and the max is 60 s so a screen cannot wedge the loop.
+pub fn clampNextMs(next_ms: i64) u32 {
+    return if (next_ms <= 0) 33 else @intCast(@min(next_ms, @as(i64, 60_000)));
 }
 
 /// Decode an LED frame: one 0xRRGGBB per int, brightness-scaled into `out`; a short
@@ -147,6 +182,31 @@ test "decodeOledFrame delta: odd n ignores the unused low half of the last int" 
     try std.testing.expectEqual(@as(u8, 0xEE), out[7]);
     // E1 would decode to offset 0 byte 0; n=1 must NOT apply it (out[0] stays 0).
     try std.testing.expectEqual(@as(u8, 0), out[0]);
+}
+
+test "applyOverlay: stamps entries over a framebuffer + adds to existing dirty" {
+    var out = [_]u8{0} ** 16; // width=8 => 2 pages
+    // Pre-mark page 0 col 1 as already dirty (as a main delta would have).
+    var d: Dirty = .{ .full = false };
+    d.changed[0] |= @as(u128, 1) << 1;
+    // Overlay: page 1 (offset 8+3=11) byte 0x77, and page 0 col 4 byte 0x22.
+    const e0: i64 = 11 * 256 + 0x77;
+    const e1: i64 = 4 * 256 + 0x22;
+    const packed_int: i64 = e0 * 262144 + e1;
+    applyOverlay(&.{packed_int}, 2, &out, 8, &d);
+    try std.testing.expectEqual(@as(u8, 0x77), out[11]);
+    try std.testing.expectEqual(@as(u8, 0x22), out[4]);
+    // The pre-existing dirty bit survives, and both overlay columns are now marked.
+    try std.testing.expect(d.changed[0] & (@as(u128, 1) << 1) != 0);
+    try std.testing.expect(d.changed[0] & (@as(u128, 1) << 4) != 0);
+    try std.testing.expect(d.changed[1] & (@as(u128, 1) << 3) != 0);
+}
+
+test "clampNextMs: floors non-positive to 33, caps at 60000" {
+    try std.testing.expectEqual(@as(u32, 33), clampNextMs(0));
+    try std.testing.expectEqual(@as(u32, 33), clampNextMs(-5));
+    try std.testing.expectEqual(@as(u32, 16), clampNextMs(16));
+    try std.testing.expectEqual(@as(u32, 60_000), clampNextMs(100_000));
 }
 
 test "decodeLeds: 0xRRGGBB per int, brightness-scaled, dark tail" {

@@ -60,7 +60,7 @@ let
     };
     serviceConfig = {
       Type = "simple";
-      ExecStart = "${pkg}/bin/nix-badge bling run --config ${configFile}";
+      ExecStart = "${pkg}/bin/nix-badge bling run --config ${configFile} --backend ${cfg.backend}";
       # on-failure, not always. The service exits 0 when the spidev node never
       # appears, which is what a core without an SPI3 pinmux does, and we must
       # not spin on that.
@@ -110,6 +110,17 @@ in
         no evaluator and falls back to blob/computed. Reloadable at run time:
         nix-badge bling set --eval PATH. Note: if set here (declaratively) the file
         is added to the initrd so early boot can eval it.
+      '';
+    };
+
+    backend = lib.mkOption {
+      type = lib.types.enum [ "fix" "nix" ];
+      default = "fix";
+      description = ''
+        Which per-frame evaluator drives an `evalPattern`: "fix" (embedded `expr`)
+        or "nix" (the upstream Nix C API, aarch64 only), for an A/B on the LED ring.
+        No-op unless `evalPattern` is set. On riscv (or nixEval off) "nix" falls
+        back to fix at open().
       '';
     };
 

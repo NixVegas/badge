@@ -22,6 +22,7 @@ const screens = @import("screens.zig");
 const fixeval = @import("fixeval.zig");
 const nixeval = @import("nixeval.zig");
 const eval = @import("eval.zig");
+const backend = @import("backend.zig");
 
 const Config = config.Config;
 const Rgb = ws2812.Rgb;
@@ -36,6 +37,26 @@ const runtime_dir: [*:0]const u8 = "/var/lib/nix-badge";
 var stop_requested = std.atomic.Value(bool).init(false);
 var want_next_pattern = std.atomic.Value(bool).init(false);
 var want_next_screen = std.atomic.Value(bool).init(false);
+// A >5 s USER-button hold requests a live evaluator-backend switch (fix <-> nix).
+var want_switch_backend = std.atomic.Value(bool).init(false);
+
+/// Parse a `--backend fix|nix` value into a Kind. Unknown -> fix (logged). The nix arm
+/// falls back to fix at open() when it is not linked (riscv / nixEval off), so requesting
+/// nix on a fix-only build is harmless.
+fn parseBackendKind(v: []const u8) backend.Kind {
+    if (std.mem.eql(u8, v, "nix")) return .nix;
+    if (std.mem.eql(u8, v, "fix")) return .fix;
+    std.log.warn("unknown --backend '{s}'; using fix", .{v});
+    return .fix;
+}
+
+/// Human name of a backend kind, for the fps window log + the on-panel HUD.
+fn backendName(k: backend.Kind) []const u8 {
+    return switch (k) {
+        .fix => "fix",
+        .nix => "nix",
+    };
+}
 
 fn onStop(_: linux.SIG) callconv(.c) void {
     stop_requested.store(true, .monotonic);
@@ -58,12 +79,13 @@ fn installHandler(sig: linux.SIG, handler: linux.Sigaction.handler_fn) void {
     linux.sigaction(sig, &sa);
 }
 
-/// Whether a stop, next-pattern, or next-screen request is queued (by a signal or
-/// the button poll). Lets the oled frame sleep wake early.
+/// Whether a stop, next-pattern, next-screen, or backend-switch request is queued (by a
+/// signal or the button poll). Lets the oled frame sleep wake early.
 fn eventPending() bool {
     return stop_requested.load(.monotonic) or
         want_next_pattern.load(.monotonic) or
-        want_next_screen.load(.monotonic);
+        want_next_screen.load(.monotonic) or
+        want_switch_backend.load(.monotonic);
 }
 
 // ------------------------------------------------------------- output sink ---
@@ -93,16 +115,17 @@ const Out = struct {
 
 const usage_text =
     \\usage:
-    \\  nix-badge bling run --config FILE
+    \\  nix-badge bling run --config FILE [--backend fix|nix]
     \\  nix-badge bling set [--pattern P] [--brightness 0-255] [--count N] [--speed-hz HZ]
     \\        [--bits 3|4|8] [--fps N] [--color '#rrggbb' ...] [--blob PATH] [--eval PATH]
     \\  nix-badge bling show
     \\  nix-badge core <arm|riscv|status>
     \\  nix-badge power
-    \\  nix-badge oled [--badapple PATH] [--eval-screen PATH ...] [--oled-width W] [--oled-height H]
+    \\  nix-badge oled [--badapple PATH] [--eval-screen PATH ...] [--oled-width W] [--oled-height H] [--backend fix|nix]
     \\  nix-badge bootswap
     \\  nix-badge mmio <read ADDR | write ADDR VALUE>
-    \\  nix-badge fix-selftest              (smoke-test the embedded Nix evaluator)
+    \\  nix-badge fix-selftest              (smoke-test the embedded fix evaluator)
+    \\  nix-badge nix-selftest              (smoke-test the upstream Nix C API backend)
     \\
     \\patterns: off solid pulse rainbow chase
     \\
@@ -362,7 +385,7 @@ fn paintBlobFrame(frames: *const bled.Frames, now_ms: u64, brightness: u8, out: 
 /// recovery of its own); animations and blobs run at their fps. The WS2812 encode
 /// + spidev write + latch path is identical in both modes — only the pixel source
 /// differs — so the blob mode is purely additive and cannot regress flicker.
-fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
+fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.Kind) CmdError!void {
     var cfg = try loadConfig(base);
 
     installHandler(.TERM, onStop);
@@ -385,7 +408,7 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
     // read); `t` is current every frame. Missing/bad/unavailable -> null, so the
     // painter transparently falls back to blob/computed (and riscv, with no eval
     // built in, always takes that path).
-    var eval_pat: ?fixeval.Pattern = openEval(gpa, &cfg);
+    var eval_pat: ?backend.Pattern = openEval(gpa, &cfg, backend_kind);
     defer if (eval_pat) |*p| p.deinit();
     var sensors: eval.Fields = .{};
     var last_sensor_ms: u64 = 0;
@@ -434,7 +457,7 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
             // The pattern is a pure function of `t`, so reopening never resets the
             // visible animation; only the compile is redone (rare, ~ms).
             if (eval_pat) |*p| p.deinit();
-            eval_pat = openEval(gpa, &cfg);
+            eval_pat = openEval(gpa, &cfg, backend_kind);
             last_sensor_ms = 0; // force a sensor refresh next frame
             frame_no = 0;
             report_timing = true;
@@ -477,6 +500,7 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
             fields.width = cfg.count;
             fields.height = 1;
             fields.brightness = cfg.brightness;
+            fields.backend_id = @intFromEnum(backend_kind);
             if (p.render(fields, lit)) |next_ms| {
                 eval_period_ns = @as(u64, next_ms) * std.time.ns_per_ms;
             } else |_| {
@@ -528,9 +552,9 @@ const sensor_interval_ms: u64 = 1000;
 /// Open the configured eval pattern, or null when none is set or eval is not
 /// built in (riscv). A bad pattern logs inside `open` and also yields null, so
 /// the painter transparently falls back to the blob/computed source.
-fn openEval(gpa: std.mem.Allocator, cfg: *const Config) ?fixeval.Pattern {
-    if (!fixeval.have_fix or cfg.eval().len == 0) return null;
-    return fixeval.Pattern.open(gpa, cfg.eval());
+fn openEval(gpa: std.mem.Allocator, cfg: *const Config, kind: backend.Kind) ?backend.Pattern {
+    if (cfg.eval().len == 0) return null;
+    return backend.Pattern.open(gpa, kind, cfg.eval());
 }
 
 /// Snapshot the slow sensor inputs for the eval scope. Called on the sensor tick,
@@ -726,16 +750,19 @@ fn cmdBling(gpa: std.mem.Allocator, out: *Out, args: []const []const u8) CmdErro
     if (args.len < 1) return error.Usage;
     if (std.mem.eql(u8, args[0], "run")) {
         var base: ?[]const u8 = null;
+        var kind: backend.Kind = .fix;
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
             if (optArg(args, &i, "--config")) |v| {
                 base = v;
+            } else if (optArg(args, &i, "--backend")) |v| {
+                kind = parseBackendKind(v);
             } else {
                 std.log.err("run: unknown argument '{s}'", .{args[i]});
                 return error.Usage;
             }
         }
-        return cmdBlingRun(gpa, base);
+        return cmdBlingRun(gpa, base, kind);
     }
     if (std.mem.eql(u8, args[0], "set")) return cmdBlingSet(out, args[1..]);
     if (std.mem.eql(u8, args[0], "show")) return cmdBlingShow(out);
@@ -922,6 +949,8 @@ const Screen = struct {
 };
 
 const oled_longpress_ms = 400;
+// A USER-button hold of at least this long switches the evaluator backend live (fix<->nix).
+const backend_switch_ms = 5000;
 
 /// Advance the runtime config's `pattern =` to the next non-off pattern, leaving
 /// every other line untouched so the running service hot-reloads only the
@@ -1037,7 +1066,16 @@ fn oledWait(deadline_ms: u64, button: ?sysfs.Button, press: *PressState) void {
             } else if (!pressed and press.down) {
                 press.down = false;
                 const held = now_ms - press.start_ms;
-                const flag = if (held >= oled_longpress_ms) &want_next_screen else &want_next_pattern;
+                // Three release tiers: a very long hold (>= backend_switch_ms) flips the
+                // evaluator backend live; a long hold cycles the screen; a short press
+                // cycles the LED pattern. Acted on at release, so `press` carries across
+                // frames.
+                const flag = if (held >= backend_switch_ms)
+                    &want_switch_backend
+                else if (held >= oled_longpress_ms)
+                    &want_next_screen
+                else
+                    &want_next_pattern;
                 flag.store(true, .monotonic);
                 return; // process the press promptly rather than finishing the wait
             }
@@ -1099,10 +1137,15 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     // bootswap daemon can own it. A name the DT does not expose leaves the button
     // null and only SIGUSR1/2 drive the screens/patterns.
     var button_name: []const u8 = "user-btn";
+    // The starting evaluator backend (default fix). A >5 s button hold flips it live; the
+    // choice persists across restarts (see restoreBackend/persistBackend).
+    var backend_kind: backend.Kind = .fix;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (optArg(args, &i, "--badapple")) |v| {
             badapple_path = v;
+        } else if (optArg(args, &i, "--backend")) |v| {
+            backend_kind = parseBackendKind(v);
         } else if (optArg(args, &i, "--eval-screen")) |v| {
             if (eval_screen_count < max_eval_screens) {
                 eval_screen_paths[eval_screen_count] = v;
@@ -1182,28 +1225,24 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     // compile is skipped but the rest load. When at least one loads we get a set
     // and a shared framebuffer; otherwise `set` is null and we use the Zig
     // fallback registry below (also the riscv path, where eval is not built in).
-    var eval_set: ?fixeval.ScreenSet = null;
+    var eval_set: ?backend.ScreenSet = null;
     var eval_fb: ?[]u8 = null;
     if (eval_screen_count > 0) {
-        if (fixeval.have_fix) {
-            if (fixeval.ScreenSet.open(gpa, eval_screen_paths[0..eval_screen_count])) |s| {
-                const fb = gpa.alloc(u8, @as(usize, panel.width) * (panel.height / 8)) catch blk: {
-                    std.log.warn("oled: cannot alloc eval framebuffer; using computed", .{});
-                    break :blk null;
-                };
-                if (fb) |b| {
-                    eval_set = s;
-                    eval_fb = b;
-                } else {
-                    var dead = s;
-                    dead.deinit();
-                }
+        // A live backend switch persists its choice; honour it over the ExecStart default.
+        backend_kind = restoreBackend(backend_kind);
+        if (backend.ScreenSet.open(gpa, backend_kind, eval_screen_paths[0..eval_screen_count])) |s| {
+            const fb = gpa.alloc(u8, @as(usize, panel.width) * (panel.height / 8)) catch blk: {
+                std.log.warn("oled: cannot alloc eval framebuffer; using computed", .{});
+                break :blk null;
+            };
+            if (fb) |b| {
+                eval_set = s;
+                eval_fb = b;
+                backend_kind = s.kind(); // reflect a nix->fix fallback at open()
+            } else {
+                var dead = s;
+                dead.deinit();
             }
-        } else {
-            std.log.info(
-                "oled: {d} --eval-screen(s) requested but eval unavailable on this arch",
-                .{eval_screen_count},
-            );
         }
     }
     defer if (eval_set) |*s| s.deinit();
@@ -1219,13 +1258,11 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     // The array is sized for the larger of the two (the eval set, capped) plus the
     // blob lead.
     var registry: [max_eval_screens + 1]Screen = undefined;
-    var n: usize = 0;
+    var active_screens: []Screen = undefined;
     if (eval_set) |*s| {
-        for (0..s.count()) |ix| {
-            registry[n] = .{ .name = s.name(ix), .body = .{ .eval = ix } };
-            n += 1;
-        }
+        active_screens = buildEvalRegistry(&registry, s);
     } else {
+        var n: usize = 0;
         if (clip != null) {
             registry[n] = .{ .name = "badapple", .body = .{ .zig = screenBadapple } };
             n += 1;
@@ -1238,8 +1275,8 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
         n += 1;
         registry[n] = .{ .name = "clock", .body = .{ .zig = screens.clock } };
         n += 1;
+        active_screens = registry[0..n];
     }
-    var active_screens = registry[0..n];
 
     installHandler(.TERM, onStop);
     installHandler(.INT, onStop);
@@ -1255,7 +1292,7 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     if (button == null) std.log.info("oled: button '{s}' not found; SIGUSR1/2 only", .{button_name});
 
     std.log.info("oled up on {s} @ 0x{x:0>2}, {d} screens, first {s}", .{
-        oled.i2c_bus, oled.i2c_addr, n, active_screens[0].name,
+        oled.i2c_bus, oled.i2c_addr, active_screens.len, active_screens[0].name,
     });
 
     var screen_ix: usize = restoreScreen(active_screens);
@@ -1271,6 +1308,9 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     var fps_win_ms: u64 = 0;
     var eval_ns_sum: i128 = 0;
     var flush_ns_sum: i128 = 0;
+    // Carry the last window's measured fps forward into `scope.fps` each frame, so a screen
+    // can draw a live HUD (the value updates once per ~3 s window). 0 until the first close.
+    var last_fps: u32 = 0;
 
     // The active clip is read inside screenBadapple via this file-scope pointer,
     // set for the duration of the loop. It is single-threaded and cleared on exit.
@@ -1302,7 +1342,7 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
         // the fault is logged once inside renderOled).
         const set_ptr = if (eval_set) |*s| s else null;
         const t_eval0 = linux.monotonicNsec();
-        const rendered = renderScreen(cur, &panel, &ctx, set_ptr, eval_fb) orelse blk: {
+        const rendered = renderScreen(cur, &panel, &ctx, set_ptr, eval_fb, @intFromEnum(backend_kind), last_fps) orelse blk: {
             active_screens = dropScreen(active_screens, cur.name, &screen_ix);
             std.log.warn("oled: eval screen '{s}' dropped after render fault", .{cur.name});
             break :blk eval.OledFrame{ .next_ms = 100, .dirty = .{ .full = true } };
@@ -1328,8 +1368,11 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
             // Collect time is a SUBSET of eval (it runs inside renderScreen); shown
             // separately so eval-minus-collect = the per-frame apply+decode cost.
             const collms = @divTrunc(fixeval.takeCollectNs(), denom);
-            std.log.info("oled: {d} fps ({s}) eval~{d}ms (collect~{d}ms) flush~{d}ms", .{
-                fps_frames * 1000 / (ctx.now_ms - fps_win_ms), cur.name, evms, collms, flms,
+            last_fps = @intCast(fps_frames * 1000 / (ctx.now_ms - fps_win_ms));
+            // Backend tag ([fix]/[nix]) + self RSS so the A/B log shows fps, eval split, and
+            // the evaluator's memory cost side by side on the same screen.
+            std.log.info("oled: {d} fps [{s}] ({s}) eval~{d}ms (collect~{d}ms) flush~{d}ms rss~{d}MB", .{
+                last_fps, backendName(backend_kind), cur.name, evms, collms, flms, readSelfRssKb() / 1024,
             });
             fps_frames = 0;
             fps_win_ms = ctx.now_ms;
@@ -1347,6 +1390,38 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
             screen_ix = (screen_ix + 1) % active_screens.len;
             persistScreen(active_screens[screen_ix].name);
             std.log.info("oled: screen -> {s}", .{active_screens[screen_ix].name});
+        }
+        // A >5 s hold flips the evaluator backend live: tear down the current ScreenSet and
+        // reopen the SAME screens on the other backend (a recompile; a brief freeze is fine).
+        // The registry names point into the set's storage, so rebuild it after reopen. Only
+        // meaningful when eval screens are active AND the other backend is available.
+        if (want_switch_backend.swap(false, .monotonic)) {
+            if (eval_set) |*s| {
+                const cur_kind = s.kind();
+                const new_kind: backend.Kind = if (cur_kind == .fix) .nix else .fix;
+                const keep = active_screens[screen_ix].name; // try to stay on this screen
+                var keep_buf: [64]u8 = undefined;
+                const keep_name = if (keep.len <= keep_buf.len) blk: {
+                    @memcpy(keep_buf[0..keep.len], keep);
+                    break :blk keep_buf[0..keep.len];
+                } else keep;
+                std.log.info("oled: backend {s} -> {s} (recompiling {d} screens)", .{
+                    backendName(cur_kind), backendName(new_kind), eval_screen_count,
+                });
+                s.deinit();
+                eval_set = backend.ScreenSet.open(gpa, new_kind, eval_screen_paths[0..eval_screen_count]) orelse
+                    backend.ScreenSet.open(gpa, cur_kind, eval_screen_paths[0..eval_screen_count]);
+                if (eval_set) |*ns| {
+                    backend_kind = ns.kind();
+                    persistBackend(backend_kind);
+                    active_screens = buildEvalRegistry(&registry, ns);
+                    screen_ix = findScreen(active_screens, keep_name) orelse 0;
+                    std.log.info("oled: backend now [{s}]", .{backendName(backend_kind)});
+                } else {
+                    std.log.err("oled: backend switch lost the eval screens; stopping", .{});
+                    break;
+                }
+            }
         }
     }
 
@@ -1397,8 +1472,10 @@ fn renderScreen(
     screen: Screen,
     panel: *oled.Panel,
     ctx: *const screens.Context,
-    set: ?*fixeval.ScreenSet,
+    set: ?*backend.ScreenSet,
     fb: ?[]u8,
+    backend_id: u8,
+    fps: u32,
 ) ?eval.OledFrame {
     switch (screen.body) {
         .zig => |f| return .{ .next_ms = f(panel, ctx), .dirty = .{ .full = true } },
@@ -1407,7 +1484,7 @@ fn renderScreen(
             // both null-out together, so a missing one is a bug, not a fault.
             const s = set orelse return .{ .next_ms = 100, .dirty = .{ .full = true } };
             const b = fb orelse return .{ .next_ms = 100, .dirty = .{ .full = true } };
-            const r = s.renderOled(idx, evalFields(panel, ctx), b) catch return null;
+            const r = s.renderOled(idx, evalFields(panel, ctx, backend_id, fps), b) catch return null;
             panel.blit(b);
             return r;
         },
@@ -1462,7 +1539,7 @@ inline fn colBit(c: u16) u128 {
 /// Build the per-frame `Fields` an eval screen's scope wants from the snapshot the
 /// loop already gathered. `t_ms`/width/height are per-frame; the sensor block is
 /// carried in `ctx`. Brightness is not applied on the 1-bit panel.
-fn evalFields(panel: *const oled.Panel, ctx: *const screens.Context) eval.Fields {
+fn evalFields(panel: *const oled.Panel, ctx: *const screens.Context, backend_id: u8, fps: u32) eval.Fields {
     return .{
         .t_ms = ctx.now_ms,
         .width = panel.width,
@@ -1474,7 +1551,78 @@ fn evalFields(panel: *const oled.Panel, ctx: *const screens.Context) eval.Fields
         .cpu_pct = ctx.cpu_pct,
         .mem_pct = ctx.mem_pct,
         .uptime_s = @intCast(@min(ctx.uptime_s, @as(u64, std.math.maxInt(u32)))),
+        .backend_id = backend_id,
+        .fps = fps,
     };
+}
+
+/// Rebuild the screen registry from an eval screen set: one `.eval` entry per lambda, named
+/// by the set's (basename) names. Returns the active slice. Used at startup and after a live
+/// backend switch (the names point into the set's storage, so they must be rebuilt).
+fn buildEvalRegistry(registry: []Screen, s: *const backend.ScreenSet) []Screen {
+    var n: usize = 0;
+    const cnt = @min(s.count(), registry.len);
+    while (n < cnt) : (n += 1) registry[n] = .{ .name = s.name(n), .body = .{ .eval = n } };
+    return registry[0..n];
+}
+
+/// Index of the screen named `name` in `active`, or null if absent.
+fn findScreen(active: []const Screen, name: []const u8) ?usize {
+    for (active, 0..) |s, ix| {
+        if (std.mem.eql(u8, s.name, name)) return ix;
+    }
+    return null;
+}
+
+// Where the live-chosen evaluator backend is remembered across restarts (like oled.state
+// for the screen). Persisted by name ("fix"/"nix").
+const backend_state_file: [*:0]const u8 = "/var/lib/nix-badge/oled.backend";
+
+/// Restore the last live-chosen backend, or `dflt` when there is no saved choice. A saved
+/// "nix" on a fix-only build still falls back to fix at open(), so this is safe to honour.
+fn restoreBackend(dflt: backend.Kind) backend.Kind {
+    var buf: [16]u8 = undefined;
+    const raw = linux.readFile(backend_state_file, &buf) orelse return dflt;
+    const name = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, name, "nix")) return .nix;
+    if (std.mem.eql(u8, name, "fix")) return .fix;
+    return dflt;
+}
+
+/// Persist the current backend for the next start. Best-effort (a write fault only loses
+/// which backend was up), so it is logged, not fatal.
+fn persistBackend(kind: backend.Kind) void {
+    ensureRuntimeDir() catch return;
+    var buf: [16]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{s}\n", .{backendName(kind)}) catch return;
+    linux.writeFile(backend_state_file, line) catch
+        std.log.warn("oled: cannot persist backend to {s}", .{backend_state_file});
+}
+
+/// This process's resident set size in KiB, from /proc/self/status `VmRSS`. Used for the
+/// backend-tagged fps window log so the fix-vs-nix RSS is visible next to fps. 0 on any
+/// read/parse fault (the log just shows rss~0MB).
+fn readSelfRssKb() u64 {
+    var buf: [4096]u8 = undefined;
+    const raw = linux.readFile("/proc/self/status", &buf) orelse return 0;
+    return parseVmRssKb(raw) orelse 0;
+}
+
+/// Parse the `VmRSS:` kB value out of a /proc/self/status body. Factored for host testing.
+fn parseVmRssKb(status: []const u8) ?u64 {
+    var lines = std.mem.tokenizeScalar(u8, status, '\n');
+    while (lines.next()) |line| {
+        const rest = stripPrefix(line, "VmRSS:") orelse continue;
+        var toks = std.mem.tokenizeAny(u8, rest, " \t");
+        const num = toks.next() orelse return null;
+        return std.fmt.parseInt(u64, num, 10) catch null;
+    }
+    return null;
+}
+
+fn stripPrefix(s: []const u8, prefix: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, s, prefix)) return s[prefix.len..];
+    return null;
 }
 
 // ================================================================= bootswap ===
@@ -1694,4 +1842,26 @@ test {
     _ = bled;
     _ = screens;
     _ = fixeval;
+    _ = nixeval;
+    _ = eval;
+    _ = backend;
+}
+
+test "parseVmRssKb pulls the VmRSS kB field" {
+    const status =
+        \\VmPeak:   123456 kB
+        \\VmSize:   120000 kB
+        \\VmRSS:     45678 kB
+        \\VmData:    10000 kB
+    ;
+    try std.testing.expectEqual(@as(?u64, 45678), parseVmRssKb(status));
+    // Tab-separated (as real /proc uses) also parses; missing VmRSS -> null.
+    try std.testing.expectEqual(@as(?u64, 45678), parseVmRssKb("VmRSS:\t 45678 kB\n"));
+    try std.testing.expectEqual(@as(?u64, null), parseVmRssKb("VmSize:\t 100 kB\n"));
+}
+
+test "parseBackendKind maps names, defaults to fix" {
+    try std.testing.expectEqual(backend.Kind.nix, parseBackendKind("nix"));
+    try std.testing.expectEqual(backend.Kind.fix, parseBackendKind("fix"));
+    try std.testing.expectEqual(backend.Kind.fix, parseBackendKind("bogus"));
 }

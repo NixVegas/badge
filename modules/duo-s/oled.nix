@@ -64,6 +64,19 @@ in
         the daemon runs on SIGUSR1/2 alone (the button is optional).
       '';
     };
+    backend = lib.mkOption {
+      type = lib.types.enum [ "fix" "nix" ];
+      default = "fix";
+      description = ''
+        Which per-frame evaluator backend the eval screens use: "fix" (psyclyx
+        fix's embedded `expr`) or "nix" (the upstream Nix C API, aarch64 only).
+        This is only the STARTING choice -- a >5 s USER-button hold flips the
+        backend live and persists the new choice to /var/lib/nix-badge/oled.backend,
+        which is then honoured over this default on the next start (like the screen
+        index + LED pattern already persist). On riscv (or a build with nixEval
+        off) "nix" transparently falls back to fix at open().
+      '';
+    };
     evalScreens = lib.mkOption {
       type = lib.types.listOf lib.types.path;
       default = [ ];
@@ -111,6 +124,7 @@ in
             "--oled-height ${toString cfg.height}"
             "--button ${cfg.button}"
             "--badapple ${badApple}/badapple.bin"
+            "--backend ${cfg.backend}"
           ]
           # The pure-Nix eval screens: one repeated `--eval-screen PATH` per
           # configured screen. All compile into ONE shared fix Engine (a
