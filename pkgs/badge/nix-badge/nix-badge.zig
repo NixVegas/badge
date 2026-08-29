@@ -6,7 +6,7 @@
 //! behaviour familiar but fixes the C's shape: injected I/O (no global stdout),
 //! injected allocator (no page_allocator in helpers), explicit little-endian blob
 //! reads, error unions instead of int codes, and comptime asserts on the layout
-//! invariants (framebuffer size, uAPI struct widths). The `leds run` service
+//! invariants (framebuffer size, uAPI struct widths). The `bling run` service
 //! starts in the initrd and must not flicker, so its transfer path is unchanged
 //! in effect: one continuous SPI frame plus a >=320 us latch.
 
@@ -57,7 +57,7 @@ fn installHandler(sig: linux.SIG, handler: linux.Sigaction.handler_fn) void {
 }
 
 /// Whether a stop, next-pattern, or next-screen request is queued (by a signal or
-/// the button poll). Lets the bling frame sleep wake early.
+/// the button poll). Lets the oled frame sleep wake early.
 fn eventPending() bool {
     return stop_requested.load(.monotonic) or
         want_next_pattern.load(.monotonic) or
@@ -67,7 +67,7 @@ fn eventPending() bool {
 // ------------------------------------------------------------- output sink ---
 
 /// A buffered stdout writer bound to the injected I/O. Program output (the
-/// `power` voltages, `leds show`, the `core`/`mmio` results) goes here; diagnostic
+/// `power` voltages, `bling show`, the `core`/`mmio` results) goes here; diagnostic
 /// chatter goes to std.log (stderr). Flush before returning.
 const Out = struct {
     file_writer: std.Io.File.Writer,
@@ -91,13 +91,13 @@ const Out = struct {
 
 const usage_text =
     \\usage:
-    \\  nix-badge leds run --config FILE
-    \\  nix-badge leds set [--pattern P] [--brightness 0-255] [--count N] [--speed-hz HZ]
+    \\  nix-badge bling run --config FILE
+    \\  nix-badge bling set [--pattern P] [--brightness 0-255] [--count N] [--speed-hz HZ]
     \\        [--bits 3|4|8] [--fps N] [--color '#rrggbb' ...] [--blob PATH] [--eval PATH]
-    \\  nix-badge leds show
+    \\  nix-badge bling show
     \\  nix-badge core <arm|riscv|status>
     \\  nix-badge power
-    \\  nix-badge bling [--badapple PATH] [--eval-screen PATH] [--oled-width W] [--oled-height H]
+    \\  nix-badge oled [--badapple PATH] [--eval-screen PATH ...] [--oled-width W] [--oled-height H]
     \\  nix-badge bootswap
     \\  nix-badge mmio <read ADDR | write ADDR VALUE>
     \\  nix-badge fix-selftest              (smoke-test the embedded Nix evaluator)
@@ -168,7 +168,7 @@ fn ensureRuntimeDir() CmdError!void {
     }
 }
 
-// ----------------------------------------------------------------- leds run ---
+// ---------------------------------------------------------------- bling run ---
 
 const spidev_bufsiz_path: [*:0]const u8 = "/sys/module/spidev/parameters/bufsiz";
 const spidev_bufsiz_fallback: u64 = 4096;
@@ -353,14 +353,14 @@ fn paintBlobFrame(frames: *const bled.Frames, now_ms: u64, brightness: u8, out: 
     }
 }
 
-/// The `leds run` service. Plays a baked "BLED" blob when one is configured and
+/// The `bling run` service. Plays a baked "BLED" blob when one is configured and
 /// valid, otherwise renders the configured computed pattern. On a runtime-file
 /// mtime change it hot-reloads the CLI-mutable fields AND the blob path. Static
 /// patterns idle at 2 Hz (and still repaint, since a WS2812 chain has no error
 /// recovery of its own); animations and blobs run at their fps. The WS2812 encode
 /// + spidev write + latch path is identical in both modes — only the pixel source
 /// differs — so the blob mode is purely additive and cannot regress flicker.
-fn cmdLedsRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
+fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
     var cfg = try loadConfig(base);
 
     installHandler(.TERM, onStop);
@@ -603,9 +603,9 @@ fn reloadInto(cfg: *Config, base: ?[]const u8, max_count: *u32, bufsiz: u64, fd:
     }
 }
 
-// ---------------------------------------------------------------- leds set ---
+// --------------------------------------------------------------- bling set ---
 
-fn cmdLedsSet(out: *Out, args: []const []const u8) CmdError!void {
+fn cmdBlingSet(out: *Out, args: []const []const u8) CmdError!void {
     var cfg = Config.default();
     layerRuntime(&cfg); // start from what is live so a partial change keeps the rest
 
@@ -707,7 +707,7 @@ fn writeRuntimeConfig(cfg: *const Config) CmdError!void {
     };
 }
 
-fn cmdLedsShow(out: *Out) CmdError!void {
+fn cmdBlingShow(out: *Out) CmdError!void {
     var cfg = Config.default();
     layerRuntime(&cfg);
     const w = out.w();
@@ -720,7 +720,7 @@ fn cmdLedsShow(out: *Out) CmdError!void {
     w.print("eval = {s}\n", .{cfg.eval()}) catch return error.Failed;
 }
 
-fn cmdLeds(gpa: std.mem.Allocator, out: *Out, args: []const []const u8) CmdError!void {
+fn cmdBling(gpa: std.mem.Allocator, out: *Out, args: []const []const u8) CmdError!void {
     if (args.len < 1) return error.Usage;
     if (std.mem.eql(u8, args[0], "run")) {
         var base: ?[]const u8 = null;
@@ -733,10 +733,10 @@ fn cmdLeds(gpa: std.mem.Allocator, out: *Out, args: []const []const u8) CmdError
                 return error.Usage;
             }
         }
-        return cmdLedsRun(gpa, base);
+        return cmdBlingRun(gpa, base);
     }
-    if (std.mem.eql(u8, args[0], "set")) return cmdLedsSet(out, args[1..]);
-    if (std.mem.eql(u8, args[0], "show")) return cmdLedsShow(out);
+    if (std.mem.eql(u8, args[0], "set")) return cmdBlingSet(out, args[1..]);
+    if (std.mem.eql(u8, args[0], "show")) return cmdBlingShow(out);
     return error.Usage;
 }
 
@@ -897,25 +897,34 @@ fn parseCUnsigned(text: []const u8) ?u64 {
     return std.fmt.parseInt(u64, s, 10) catch null;
 }
 
-// ================================================================== bling ===
+// =================================================================== oled ===
 //
-// The bling engine supersedes the old `oled` subcommand: one loop, a registry of
-// screens each a pure function of a per-frame snapshot. The USER button and
-// SIGUSR1/2 advance either the LED pattern (by rewriting the runtime config so
-// the running `leds run` hot-reloads it) or the OLED screen, so one button cycles
-// both ring and panel.
+// The oled engine: one loop, a registry of screens each a pure function of a
+// per-frame snapshot. The USER button and SIGUSR1/2 advance either the LED
+// pattern (by rewriting the runtime config so the running `bling run` hot-reloads
+// it) or the OLED screen, so one button cycles both ring and panel.
 
+// A cyclable OLED screen. Two flavours share the loop: a computed Zig screen (a
+// pure function of the per-frame `Context`) and a pure-Nix eval screen (one
+// lambda of a shared `ScreenSet`, addressed by index). The loop renders either
+// through `renderScreen`, so cycling/persistence stay generic over the flavour.
 const Screen = struct {
     name: []const u8,
-    render: *const fn (panel: *oled.Panel, ctx: *const screens.Context) u32,
+    body: union(enum) {
+        // A computed screen: paints the panel directly from the snapshot.
+        zig: *const fn (panel: *oled.Panel, ctx: *const screens.Context) u32,
+        // A pure-Nix screen: index into `active_screen_set`'s lambdas; rendered
+        // via ScreenSet.renderOled into the shared eval framebuffer, then blitted.
+        eval: usize,
+    },
 };
 
-const bling_longpress_ms = 400;
+const oled_longpress_ms = 400;
 
 /// Advance the runtime config's `pattern =` to the next non-off pattern, leaving
 /// every other line untouched so the running service hot-reloads only the
 /// pattern. "off" is skipped so a button press never blanks the ring.
-fn ledsNextPattern() void {
+fn blingNextPattern() void {
     // Read the current pattern through the same parser the service uses.
     var current = Config.default();
     layerRuntime(&current);
@@ -927,7 +936,7 @@ fn ledsNextPattern() void {
     switch (linux.mkdir(runtime_dir, 0o755)) {
         .created, .exists => {},
         .failed => {
-            std.log.warn("bling: cannot create {s}", .{runtime_dir});
+            std.log.warn("oled: cannot create {s}", .{runtime_dir});
             return;
         },
     }
@@ -962,15 +971,15 @@ fn ledsNextPattern() void {
     if (!replaced) w.print("pattern = {s}\n", .{want}) catch return;
 
     linux.writeFile(runtime_conf, w.buffered()) catch {
-        std.log.warn("bling: cannot write {s}", .{runtime_conf});
+        std.log.warn("oled: cannot write {s}", .{runtime_conf});
         return;
     };
-    std.log.info("bling: LED pattern -> {s}", .{want});
+    std.log.info("oled: LED pattern -> {s}", .{want});
 }
 
 /// Gather the per-frame snapshot: the animation clock, battery/USB, and the proc
 /// meters. The CPU delta is tracked in `cpu` across frames.
-fn blingGather(cpu: *screens.CpuMeter) screens.Context {
+fn oledGather(cpu: *screens.CpuMeter) screens.Context {
     const bat = sysfs.readBattery();
     var l1: f64 = 0;
     var l5: f64 = 0;
@@ -987,16 +996,20 @@ fn blingGather(cpu: *screens.CpuMeter) screens.Context {
     };
 }
 
-/// Carries the button press timing across `blingWait` calls.
+/// Carries the button press timing across `oledWait` calls.
 const PressState = struct { start_ms: u64 = 0, down: bool = false };
 
-/// Wait up to `want_ms` for the next frame, waking early on a pending
-/// stop/pattern/screen flag, a SIGUSR1/2 (poll returns EINTR), or a USER-button
-/// edge. The button is event-driven off its held request fd, so no press is
-/// dropped and no line is re-requested per poll. A short press (<400 ms) sets the
-/// next-pattern flag, a long press the next-screen flag.
-fn blingWait(want_ms: u32, button: ?sysfs.Button, press: *PressState) void {
-    const deadline_ms = linux.monotonicMsec() + want_ms;
+/// Sleep until the absolute monotonic `deadline_ms` (the frame's start time plus
+/// its nextMs), waking early on a pending stop/pattern/screen flag, a SIGUSR1/2
+/// (poll returns EINTR), or a USER-button edge. The deadline is anchored to the
+/// frame START, not to this call, so the frame PERIOD is nextMs total -- the render
+/// + flush time is absorbed into the budget, not added on top of it. If render+flush
+/// already overran nextMs the deadline is in the past and this returns immediately,
+/// so playback runs as fast as the work allows (never faster than nextMs, never
+/// double-counted). The button is event-driven off its held request fd, so no press
+/// is dropped. A short press (<400 ms) sets the next-pattern flag, a long press the
+/// next-screen flag.
+fn oledWait(deadline_ms: u64, button: ?sysfs.Button, press: *PressState) void {
     const poll_ms: u64 = 15; // button sampling period
     while (true) {
         if (eventPending()) return;
@@ -1012,7 +1025,7 @@ fn blingWait(want_ms: u32, button: ?sysfs.Button, press: *PressState) void {
 
         // The RTC/PWR gpio (USER button) has no edge IRQ, so sample the LEVEL and
         // detect press/release in software. Active-low: 0 = pressed. A release
-        // shorter than bling_longpress_ms cycles the LED pattern, a longer hold
+        // shorter than oled_longpress_ms cycles the LED pattern, a longer hold
         // cycles the OLED screen -- acted on at release, so `press` (down + start)
         // carries across frames.
         if (btn.level()) |lvl| {
@@ -1022,7 +1035,7 @@ fn blingWait(want_ms: u32, button: ?sysfs.Button, press: *PressState) void {
             } else if (!pressed and press.down) {
                 press.down = false;
                 const held = now_ms - press.start_ms;
-                const flag = if (held >= bling_longpress_ms) &want_next_screen else &want_next_pattern;
+                const flag = if (held >= oled_longpress_ms) &want_next_screen else &want_next_pattern;
                 flag.store(true, .monotonic);
                 return; // process the press promptly rather than finishing the wait
             }
@@ -1036,17 +1049,17 @@ fn blingWait(want_ms: u32, button: ?sysfs.Button, press: *PressState) void {
 }
 
 // Where the current OLED screen is remembered across reboots. The LED pattern
-// already persists (the leds service layers /var/lib/nix-badge/leds.conf over the
+// already persists (the bling service layers /var/lib/nix-badge/leds.conf over the
 // declarative base at startup); this is the screen's equivalent. Persisted by
 // NAME, not index, so it survives a registry that changes shape (badapple present
 // or not).
-const bling_state_file: [*:0]const u8 = "/var/lib/nix-badge/bling.state";
+const oled_state_file: [*:0]const u8 = "/var/lib/nix-badge/oled.state";
 
 /// Restore the last-shown screen. A missing file or an unknown name (e.g. the
 /// saved screen is gone this boot) starts at screen 0.
 fn restoreScreen(active: []const Screen) usize {
     var buf: [64]u8 = undefined;
-    const raw = linux.readFile(bling_state_file, &buf) orelse return 0;
+    const raw = linux.readFile(oled_state_file, &buf) orelse return 0;
     const name = std.mem.trim(u8, raw, " \t\r\n");
     for (active, 0..) |s, ix| {
         if (std.mem.eql(u8, s.name, name)) return ix;
@@ -1060,13 +1073,23 @@ fn persistScreen(name: []const u8) void {
     ensureRuntimeDir() catch return;
     var buf: [64]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{s}\n", .{name}) catch return;
-    linux.writeFile(bling_state_file, line) catch
-        std.log.warn("bling: cannot persist screen to {s}", .{bling_state_file});
+    linux.writeFile(oled_state_file, line) catch
+        std.log.warn("oled: cannot persist screen to {s}", .{oled_state_file});
 }
 
-fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
+// Cap on the number of pure-Nix eval screens passed via `--eval-screen`. Five
+// today (badapple-live + battery/load/power/clock + currentsystem); size with
+// headroom so a config can add a few more without a code change. A path past the
+// cap is logged and ignored.
+const max_eval_screens = 16;
+
+fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     var badapple_path: ?[]const u8 = null;
-    var eval_screen_path: ?[]const u8 = null;
+    // `--eval-screen PATH` is repeatable: each occurrence appends a pure-Nix OLED
+    // screen. They are compiled into ONE shared fix Engine (a ScreenSet) so the
+    // Value/chunk heap is paid once, not once per screen.
+    var eval_screen_paths: [max_eval_screens][]const u8 = undefined;
+    var eval_screen_count: usize = 0;
     var oled_width: u16 = oled.default_width;
     var oled_height: u16 = oled.default_height;
     // The USER button line, by device-tree name. Defaults to the dedicated USER
@@ -1079,21 +1102,29 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
         if (optArg(args, &i, "--badapple")) |v| {
             badapple_path = v;
         } else if (optArg(args, &i, "--eval-screen")) |v| {
-            eval_screen_path = v;
+            if (eval_screen_count < max_eval_screens) {
+                eval_screen_paths[eval_screen_count] = v;
+                eval_screen_count += 1;
+            } else {
+                std.log.warn(
+                    "oled: too many --eval-screen (>{d}); ignoring {s}",
+                    .{ max_eval_screens, v },
+                );
+            }
         } else if (optArg(args, &i, "--button")) |v| {
             button_name = v;
         } else if (optArg(args, &i, "--oled-width")) |v| {
             oled_width = std.fmt.parseInt(u16, v, 10) catch {
-                std.log.err("bling: bad --oled-width '{s}'", .{v});
+                std.log.err("oled: bad --oled-width '{s}'", .{v});
                 return error.Usage;
             };
         } else if (optArg(args, &i, "--oled-height")) |v| {
             oled_height = std.fmt.parseInt(u16, v, 10) catch {
-                std.log.err("bling: bad --oled-height '{s}'", .{v});
+                std.log.err("oled: bad --oled-height '{s}'", .{v});
                 return error.Usage;
             };
         } else {
-            std.log.err("bling: unknown argument '{s}'", .{args[i]});
+            std.log.err("oled: unknown argument '{s}'", .{args[i]});
             return error.Usage;
         }
     }
@@ -1102,12 +1133,16 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     // we decide whether a baked clip fits. A missing bus / bad size / OOM all mean
     // "no panel" and we exit 0 (like the C) so systemd does not respin us.
     var panel = oled.Panel.open(gpa, oled_width, oled_height) orelse {
-        std.log.warn("bling: no OLED panel, nothing to do", .{});
+        std.log.warn("oled: no OLED panel, nothing to do", .{});
         return;
     };
     defer panel.close();
+    // Memory guard (#30): the fix Engine (ScreenSet, ~72 MB) is only stood up
+    // below, AFTER this. A panel that is absent NAKs the SSD1306 init write, so we
+    // exit 0 here and never pay for the Engine on a display-less config. (systemd
+    // does not respin on exit 0.)
     panel.init() catch {
-        std.log.err("bling: SSD1306 init failed", .{});
+        std.log.warn("oled: no OLED responding at 0x{x:0>2}; skipping (fix Engine not started)", .{oled.i2c_addr});
         return;
     };
 
@@ -1139,55 +1174,69 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     }
     defer if (clip) |*c| c.deinit();
 
-    // Optionally open the pure-Nix eval screen: a compiled-once lambda applied
-    // per frame (fixeval), decoded to page-major bytes. Only on an eval build
-    // (aarch64) with a readable pattern; any failure just leaves it out (the
-    // other screens still run). Its framebuffer is heap-sized to the panel.
-    var eval_pat: ?fixeval.Pattern = null;
+    // Open the pure-Nix eval screens: ALL `--eval-screen` paths compiled into ONE
+    // shared fix Engine (a ScreenSet), each a lambda applied per frame and decoded
+    // to page-major bytes. Only on an eval build (aarch64); a screen that fails to
+    // compile is skipped but the rest load. When at least one loads we get a set
+    // and a shared framebuffer; otherwise `set` is null and we use the Zig
+    // fallback registry below (also the riscv path, where eval is not built in).
+    var eval_set: ?fixeval.ScreenSet = null;
     var eval_fb: ?[]u8 = null;
-    if (eval_screen_path) |path| {
+    if (eval_screen_count > 0) {
         if (fixeval.have_fix) {
-            if (fixeval.Pattern.open(gpa, path)) |p| {
+            if (fixeval.ScreenSet.open(gpa, eval_screen_paths[0..eval_screen_count])) |s| {
                 const fb = gpa.alloc(u8, @as(usize, panel.width) * (panel.height / 8)) catch blk: {
-                    std.log.warn("bling: cannot allocate eval-screen framebuffer; skipping", .{});
+                    std.log.warn("oled: cannot alloc eval framebuffer; using computed", .{});
                     break :blk null;
                 };
                 if (fb) |b| {
-                    eval_pat = p;
+                    eval_set = s;
                     eval_fb = b;
-                    std.log.info("bling: eval screen {s} ready", .{path});
                 } else {
-                    var dead = p;
+                    var dead = s;
                     dead.deinit();
                 }
             }
         } else {
-            std.log.info("bling: --eval-screen {s} requested but eval unavailable on this arch", .{path});
+            std.log.info(
+                "oled: {d} --eval-screen(s) requested but eval unavailable on this arch",
+                .{eval_screen_count},
+            );
         }
     }
-    defer if (eval_pat) |*p| p.deinit();
+    defer if (eval_set) |*s| s.deinit();
     defer if (eval_fb) |b| gpa.free(b);
 
-    // Build the screen registry. badapple leads (and is the default) when loaded;
-    // the eval screen (when present) is an additional cyclable entry.
-    var registry: [6]Screen = undefined;
+    // Build the screen registry. Two branches, one loop shape:
+    //   - eval on  -> the cyclable screens are the N pure-Nix eval screens (their
+    //     set carries badapple-live + the info screens), rendered via the shared
+    //     Engine. The badapple BLOB is not used here (badapple-live supersedes it).
+    //   - eval off -> the fallback: the badapple blob (when it loaded and fits)
+    //     followed by the computed Zig info screens, so the riscv core and any
+    //     eval failure still shows screens.
+    // The array is sized for the larger of the two (the eval set, capped) plus the
+    // blob lead.
+    var registry: [max_eval_screens + 1]Screen = undefined;
     var n: usize = 0;
-    if (clip != null) {
-        registry[n] = .{ .name = "badapple", .render = screenBadapple };
+    if (eval_set) |*s| {
+        for (0..s.count()) |ix| {
+            registry[n] = .{ .name = s.name(ix), .body = .{ .eval = ix } };
+            n += 1;
+        }
+    } else {
+        if (clip != null) {
+            registry[n] = .{ .name = "badapple", .body = .{ .zig = screenBadapple } };
+            n += 1;
+        }
+        registry[n] = .{ .name = "battery", .body = .{ .zig = screens.battery } };
+        n += 1;
+        registry[n] = .{ .name = "load", .body = .{ .zig = screens.load } };
+        n += 1;
+        registry[n] = .{ .name = "power", .body = .{ .zig = screens.power } };
+        n += 1;
+        registry[n] = .{ .name = "clock", .body = .{ .zig = screens.clock } };
         n += 1;
     }
-    if (eval_pat != null) {
-        registry[n] = .{ .name = "nixapple", .render = screenEval };
-        n += 1;
-    }
-    registry[n] = .{ .name = "battery", .render = screens.battery };
-    n += 1;
-    registry[n] = .{ .name = "load", .render = screens.load };
-    n += 1;
-    registry[n] = .{ .name = "power", .render = screens.power };
-    n += 1;
-    registry[n] = .{ .name = "clock", .render = screens.clock };
-    n += 1;
     var active_screens = registry[0..n];
 
     installHandler(.TERM, onStop);
@@ -1196,63 +1245,112 @@ fn cmdBling(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
     installHandler(.USR2, onUser);
 
     // Request the USER button once as a polled INPUT (the RTC/PWR gpio has no edge
-    // IRQ, so the edge path ENXIOs); blingWait samples its level. Null when the DT
+    // IRQ, so the edge path ENXIOs); oledWait samples its level. Null when the DT
     // exposes no line by this name, in which case only SIGUSR1/2 drive the
     // screens/patterns.
     var button = sysfs.Button.openPolled(button_name);
     defer if (button) |*b| b.close();
-    if (button == null) std.log.info("bling: button '{s}' not found; SIGUSR1/2 only", .{button_name});
+    if (button == null) std.log.info("oled: button '{s}' not found; SIGUSR1/2 only", .{button_name});
 
-    std.log.info("bling up on {s} @ 0x{x:0>2}, {d} screens, first {s}", .{
+    std.log.info("oled up on {s} @ 0x{x:0>2}, {d} screens, first {s}", .{
         oled.i2c_bus, oled.i2c_addr, n, active_screens[0].name,
     });
 
     var screen_ix: usize = restoreScreen(active_screens);
-    if (screen_ix != 0) std.log.info("bling: resuming screen {s}", .{active_screens[screen_ix].name});
+    if (screen_ix != 0) std.log.info("oled: resuming screen {s}", .{active_screens[screen_ix].name});
     var press: PressState = .{};
     var cpu = screens.CpuMeter.init();
+
+    // Effective-fps window: log the achieved rate every ~3 s so the sustained frame
+    // rate (esp. 60 fps Bad Apple) is visible in the journal without a per-frame log.
+    // Also sums the per-frame eval (render+decode+collect) and flush time so the
+    // window log shows WHERE the frame budget goes (eval-bound vs bus-bound).
+    var fps_frames: u64 = 0;
+    var fps_win_ms: u64 = 0;
+    var eval_ns_sum: i128 = 0;
+    var flush_ns_sum: i128 = 0;
 
     // The active clip is read inside screenBadapple via this file-scope pointer,
     // set for the duration of the loop. It is single-threaded and cleared on exit.
     active_clip = if (clip) |*c| c else null;
     defer active_clip = null;
 
-    // Likewise the eval screen reads its pattern + framebuffer via file-scope
-    // pointers (fixed screen fn signature). `eval_screen_failed` latches a render
-    // fault; the loop then drops the "nixapple" entry from the active set.
-    active_eval_pat = if (eval_pat) |*p| p else null;
-    active_eval_fb = eval_fb;
-    defer {
-        active_eval_pat = null;
-        active_eval_fb = null;
-    }
+    // Sensors (battery = a median-of-33 SARADC read, plus /proc load/cpu/mem/uptime and
+    // the VBUS gpio) move on a human timescale, not per frame. Reading them every frame
+    // cost ~15 ms/frame -- the true ~46 fps ceiling, NOT eval (~1 ms) or I2C flush
+    // (~5 ms), which is why raising the bus to 1 MHz changed nothing. Refresh on a slow
+    // tick and carry the snapshot between refreshes; only now_ms (the animation clock +
+    // the frame-rate-limiter anchor) updates every frame.
+    const sensor_refresh_ms: u64 = 500;
+    var ctx = oledGather(&cpu);
+    var last_gather_ms: u64 = ctx.now_ms;
 
     while (!stop_requested.load(.monotonic)) {
-        const ctx = blingGather(&cpu);
-        const want_ms = active_screens[screen_ix].render(&panel, &ctx);
-        panel.flush() catch std.log.warn("bling: flush failed", .{});
+        const now_ms = linux.monotonicMsec();
+        if (now_ms - last_gather_ms >= sensor_refresh_ms) {
+            ctx = oledGather(&cpu);
+            last_gather_ms = now_ms;
+        }
+        ctx.now_ms = now_ms;
+        const cur = active_screens[screen_ix];
+        // Render the current screen. A computed screen paints directly; an eval
+        // screen applies its lambda (ScreenSet) into the shared framebuffer and
+        // blits it. A NULL return means the eval screen faulted -> drop it by name
+        // so the loop falls back to the remaining screens (never spins the log,
+        // the fault is logged once inside renderOled).
+        const set_ptr = if (eval_set) |*s| s else null;
+        const t_eval0 = linux.monotonicNsec();
+        const rendered = renderScreen(cur, &panel, &ctx, set_ptr, eval_fb) orelse blk: {
+            active_screens = dropScreen(active_screens, cur.name, &screen_ix);
+            std.log.warn("oled: eval screen '{s}' dropped after render fault", .{cur.name});
+            break :blk fixeval.OledFrame{ .next_ms = 100, .dirty = .{ .full = true } };
+        };
+        const t_eval1 = linux.monotonicNsec();
+        // A delta frame flushes only its changed columns (a few dozen bytes); a full
+        // frame (keyframe / info screen) flushes the whole panel. This partial flush
+        // is what keeps 60 fps Bad Apple under the 400 kHz I2C bandwidth.
+        flushDirty(&panel, rendered.dirty) catch std.log.warn("oled: flush failed", .{});
+        const t_flush1 = linux.monotonicNsec();
 
-        // A latched eval-screen fault (logged once inside renderOled): remove the
-        // "nixapple" entry so the loop falls back to the remaining screens.
-        if (eval_screen_failed) {
-            eval_screen_failed = false;
-            active_screens = dropScreen(active_screens, "nixapple", &screen_ix);
-            std.log.warn("bling: eval screen dropped after render fault", .{});
+        // Effective fps over a ~3 s window (measured before the wait, so it reflects
+        // the true achieved rate whether render- or wait-bound), plus the average
+        // eval and flush split so the log shows what the frame budget is spent on.
+        fps_frames += 1;
+        eval_ns_sum += t_eval1 - t_eval0;
+        flush_ns_sum += t_flush1 - t_eval1;
+        if (fps_win_ms == 0) fps_win_ms = ctx.now_ms;
+        if (ctx.now_ms - fps_win_ms >= 3000) {
+            const denom = @as(i128, @intCast(fps_frames)) * 1_000_000;
+            const evms = @divTrunc(eval_ns_sum, denom);
+            const flms = @divTrunc(flush_ns_sum, denom);
+            // Collect time is a SUBSET of eval (it runs inside renderScreen); shown
+            // separately so eval-minus-collect = the per-frame apply+decode cost.
+            const collms = @divTrunc(fixeval.takeCollectNs(), denom);
+            std.log.info("oled: {d} fps ({s}) eval~{d}ms (collect~{d}ms) flush~{d}ms", .{
+                fps_frames * 1000 / (ctx.now_ms - fps_win_ms), cur.name, evms, collms, flms,
+            });
+            fps_frames = 0;
+            fps_win_ms = ctx.now_ms;
+            eval_ns_sum = 0;
+            flush_ns_sum = 0;
         }
 
-        blingWait(want_ms, button, &press);
+        // Frame-rate limit against the frame START (ctx.now_ms), so the period is
+        // nextMs total, not nextMs on top of the render+flush time (which halved the
+        // effective rate). A frame that overran nextMs makes this a no-op.
+        oledWait(ctx.now_ms + rendered.next_ms, button, &press);
 
-        if (want_next_pattern.swap(false, .monotonic)) ledsNextPattern();
+        if (want_next_pattern.swap(false, .monotonic)) blingNextPattern();
         if (want_next_screen.swap(false, .monotonic)) {
             screen_ix = (screen_ix + 1) % active_screens.len;
             persistScreen(active_screens[screen_ix].name);
-            std.log.info("bling: screen -> {s}", .{active_screens[screen_ix].name});
+            std.log.info("oled: screen -> {s}", .{active_screens[screen_ix].name});
         }
     }
 
     // Leave the panel dark on a clean stop; a flush fault here is only cosmetic
     // (we are exiting anyway), so log it rather than fail the exit.
-    panel.blankOff() catch |err| std.log.warn("bling: blank-off failed: {s}", .{@errorName(err)});
+    panel.blankOff() catch |err| std.log.warn("oled: blank-off failed: {s}", .{@errorName(err)});
 }
 
 /// Remove the screen named `name` from `active` in place (shifting the tail down
@@ -1277,7 +1375,7 @@ fn dropScreen(active: []Screen, name: []const u8, cur_ix: *usize) []Screen {
     return shorter;
 }
 
-// The clip the badapple screen plays. Set only while the bling loop runs (single
+// The clip the badapple screen plays. Set only while the oled loop runs (single
 // threaded); the screen fn signature is fixed by the registry so it cannot take
 // the clip as a parameter, hence this scoped pointer rather than a parameter.
 var active_clip: ?*badapple.Clip = null;
@@ -1288,21 +1386,82 @@ fn screenBadapple(panel: *oled.Panel, ctx: *const screens.Context) u32 {
     return clip.frameMs();
 }
 
-// The pure-Nix eval screen's state, set only while the bling loop runs (single
-// threaded); the screen fn signature is fixed so it cannot take these as params.
-// `active_eval_pat`/`active_eval_fb` are the compiled pattern and its panel-sized
-// page-major framebuffer; `eval_screen_failed` latches a render fault so the loop
-// drops the screen and never spins the log.
-var active_eval_pat: ?*fixeval.Pattern = null;
-var active_eval_fb: ?[]u8 = null;
-var eval_screen_failed: bool = false;
+/// Render the current screen and return its nextMs hint + dirty region, or null
+/// when an eval screen faulted (the caller drops it). A computed `.zig` screen
+/// paints the panel directly (always a full flush); an `.eval` screen applies its
+/// ScreenSet lambda into the shared `fb` (a delta screen mutates it in place),
+/// then blits it and returns the changed region so the caller flushes minimally.
+fn renderScreen(
+    screen: Screen,
+    panel: *oled.Panel,
+    ctx: *const screens.Context,
+    set: ?*fixeval.ScreenSet,
+    fb: ?[]u8,
+) ?fixeval.OledFrame {
+    switch (screen.body) {
+        .zig => |f| return .{ .next_ms = f(panel, ctx), .dirty = .{ .full = true } },
+        .eval => |idx| {
+            // eval screens only exist when the set + framebuffer were created;
+            // both null-out together, so a missing one is a bug, not a fault.
+            const s = set orelse return .{ .next_ms = 100, .dirty = .{ .full = true } };
+            const b = fb orelse return .{ .next_ms = 100, .dirty = .{ .full = true } };
+            const r = s.renderOled(idx, evalFields(panel, ctx), b) catch return null;
+            panel.blit(b);
+            return r;
+        },
+    }
+}
 
-fn screenEval(panel: *oled.Panel, ctx: *const screens.Context) u32 {
-    const pat = active_eval_pat orelse return 100;
-    const fb = active_eval_fb orelse return 100;
-    // Reuse the sensor block the loop already gathered into `ctx`. The eval scope
-    // wants full-range fields; brightness is not applied on the 1-bit panel.
-    const fields: fixeval.Fields = .{
+/// Push a rendered frame's dirty region to the panel: the whole panel for a full
+/// frame (keyframe / computed screen), else only the changed column span of each
+/// dirty page (a few dozen bytes at 60 fps Bad Apple). Clamped to the panel's page
+/// count so a `Dirty` sized for 64 rows is safe on a 32-row panel.
+fn flushDirty(panel: *oled.Panel, dirty: fixeval.Dirty) !void {
+    if (dirty.full) return panel.flush();
+    const pages = @min(panel.pages(), @as(u16, fixeval.Dirty.max_pages));
+    // The changed bitmap holds 128 columns; cap the scan so colBit never shifts >= 128
+    // (SSD1306 panels are <= 128 wide, so this only guards a misconfiguration).
+    const width = @min(panel.width, @as(u16, 128));
+    // Merge two changed-runs separated by <= this many unchanged columns into one
+    // flush: re-sending a few clean bytes is cheaper than a fresh addressing command +
+    // I2C transaction (~2 syscalls, tens of us of bus framing). 8 columns of data at
+    // 400 kHz (~0.18 ms) is well under that, so coalescing small gaps is a net win.
+    const gap_merge: u16 = 8;
+    var p: u16 = 0;
+    while (p < pages) : (p += 1) {
+        const bits = dirty.changed[p];
+        if (bits == 0) continue;
+        // Walk the columns, flushing each run of changed columns (small gaps absorbed).
+        var col: u16 = 0;
+        while (col < width and (bits & colBit(col)) == 0) col += 1;
+        if (col >= width) continue;
+        var run_start = col;
+        var run_end = col;
+        col += 1;
+        while (col < width) : (col += 1) {
+            if (bits & colBit(col) == 0) continue;
+            if (col - run_end <= gap_merge) {
+                run_end = col; // absorb the small gap into the current run
+            } else {
+                try panel.flushPageSpan(p, run_start, run_end);
+                run_start = col;
+                run_end = col;
+            }
+        }
+        try panel.flushPageSpan(p, run_start, run_end);
+    }
+}
+
+/// One-bit mask for column `c` in a `Dirty.changed` page bitmap (c < 128).
+inline fn colBit(c: u16) u128 {
+    return @as(u128, 1) << @intCast(c);
+}
+
+/// Build the per-frame `Fields` an eval screen's scope wants from the snapshot the
+/// loop already gathered. `t_ms`/width/height are per-frame; the sensor block is
+/// carried in `ctx`. Brightness is not applied on the 1-bit panel.
+fn evalFields(panel: *const oled.Panel, ctx: *const screens.Context) fixeval.Fields {
+    return .{
         .t_ms = ctx.now_ms,
         .width = panel.width,
         .height = panel.height,
@@ -1314,13 +1473,6 @@ fn screenEval(panel: *oled.Panel, ctx: *const screens.Context) u32 {
         .mem_pct = ctx.mem_pct,
         .uptime_s = @intCast(@min(ctx.uptime_s, @as(u64, std.math.maxInt(u32)))),
     };
-    const want_ms = pat.renderOled(fields, fb) catch {
-        // Logged once inside renderOled; latch so the loop drops this screen.
-        eval_screen_failed = true;
-        return 100;
-    };
-    panel.blit(fb);
-    return want_ms;
 }
 
 // ================================================================= bootswap ===
@@ -1329,7 +1481,7 @@ fn screenEval(panel: *oled.Panel, ctx: *const screens.Context) u32 {
 // continuous hold (>= HOLD_MS) it latches the OTHER core and reboots, so a user
 // can flip ARM<->RISC-V from the button alone (board switch on AUTO). A short press
 // does nothing. The button is watched by name (portb, gpiochip renumbers), request-
-// once + edge poll() like the bling USER button.
+// once + edge poll() like the oled USER button.
 
 const bootswap_hold_ms = 3000;
 
@@ -1410,14 +1562,14 @@ fn doBootswap(io: std.Io) void {
 }
 
 /// Watch the BOOT button for a long continuous hold and, on one, swap the boot
-/// core and reboot. Request-once + edge poll() so no press is dropped; the hold is
-/// measured by polling with a timeout of "time remaining until HOLD_MS" after a
-/// press edge — if that timeout elapses with no release edge, the hold completed.
+/// core and reboot. The BOOT gpio (portb) delivers no edge IRQ -- an edge poll()
+/// there blocks forever -- so LEVEL-POLL it like the USER button: sample the line,
+/// and a continuous hold reaching bootswap_hold_ms fires the swap ONCE.
 fn cmdBootswap(io: std.Io) void {
     installHandler(.TERM, onStop);
     installHandler(.INT, onStop);
 
-    var button = sysfs.Button.open("btn-boot-n") orelse {
+    var button = sysfs.Button.openPolled("btn-boot-n") orelse {
         std.log.info("bootswap: no btn-boot-n line; nothing to do", .{});
         return; // non-fatal, exit 0 so systemd does not respin
     };
@@ -1425,30 +1577,26 @@ fn cmdBootswap(io: std.Io) void {
 
     std.log.info("bootswap: watching BOOT button, hold {d} ms to swap core", .{bootswap_hold_ms});
 
+    // Active-low: 0 = pressed. `fired` latches so one continuous hold triggers at
+    // most one swap; it clears on release, so the user must let go and re-hold.
+    const poll_ms: u64 = 50;
     var press: PressState = .{};
+    var fired = false;
     while (!stop_requested.load(.monotonic)) {
-        // When idle, block indefinitely on the button; when a press is in progress,
-        // only until the hold threshold so we can act while it is still held.
-        var timeout_ms: i32 = -1;
-        if (press.down) {
+        const pressed = if (button.level()) |lvl| lvl == 0 else false;
+        if (pressed and !press.down) {
+            press = .{ .start_ms = linux.monotonicMsec(), .down = true };
+            fired = false;
+        } else if (pressed and press.down and !fired) {
             const held = linux.monotonicMsec() - press.start_ms;
             if (held >= bootswap_hold_ms) {
-                doBootswap(io); // returns only if we did not reboot (not AUTO, etc.)
-                press.down = false;
-                continue;
+                fired = true;
+                doBootswap(io); // returns only if it did not reboot (not AUTO, etc.)
             }
-            timeout_ms = @intCast(bootswap_hold_ms - held);
+        } else if (!pressed and press.down) {
+            press.down = false; // released: a short press does nothing
         }
-
-        var fds = [_]linux.pollfd{.{ .fd = button.pollFd(), .events = linux.POLLIN, .revents = 0 }};
-        const ready = linux.poll(&fds, timeout_ms) orelse continue; // EINTR: re-check stop flag
-        if (ready == 0) continue; // hold-threshold timeout: loop re-checks `held`
-        if (fds[0].revents & linux.POLLIN == 0) continue;
-
-        while (button.nextEdge()) |edge| switch (edge) {
-            .press => press = .{ .start_ms = linux.monotonicMsec(), .down = true },
-            .release => press.down = false, // a short press: nothing happens
-        };
+        linux.sleepNsec(poll_ms * std.time.ns_per_ms);
     }
 }
 
@@ -1494,14 +1642,14 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    const result: CmdError!void = if (std.mem.eql(u8, cmd, "leds"))
-        cmdLeds(gpa, &out, rest)
+    const result: CmdError!void = if (std.mem.eql(u8, cmd, "bling"))
+        cmdBling(gpa, &out, rest)
     else if (std.mem.eql(u8, cmd, "core"))
         cmdCore(&out, rest)
     else if (std.mem.eql(u8, cmd, "power"))
         cmdPower(&out)
-    else if (std.mem.eql(u8, cmd, "bling"))
-        cmdBling(gpa, rest)
+    else if (std.mem.eql(u8, cmd, "oled"))
+        cmdOled(gpa, rest)
     else if (std.mem.eql(u8, cmd, "mmio"))
         cmdMmio(&out, rest)
     else

@@ -29,7 +29,7 @@
 
       hardware.deviceTree.enable = true;
 
-      # SPI3 drives the WS2812 LED ring through spidev (see modules/duo-s/leds.nix).
+      # SPI3 drives the WS2812 LED ring through spidev (see modules/duo-s/bling.nix).
       # nixpkgs leaves SPIDEV off and builds the DesignWare SPI glue as modules.
       # The LED service starts in the initrd, so build all of it in (=y) to avoid
       # early module load ordering. Without SPIDEV the spidev@0 node in the DTS

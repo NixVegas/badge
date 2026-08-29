@@ -40,15 +40,17 @@
   #   "crop"  - center-crop to the panel aspect, then scale (loses top/bottom)
   scale ? "stretch",
 
-  # The source video. Pinned Internet Archive copy of the original Touhou
-  # "Bad Apple!!" PV (480x360 h.264, ~219.5 s). Override `src` to swap footage.
+  # The source video. Pinned Internet Archive copy of "Bad Apple!!" at native
+  # resolution and a TRUE 60 fps (bad_apple@60fps.mp4, h.264, ~219.5 s). The delta
+  # codec runs at 60 fps, so the source must have real 60 fps motion -- the older
+  # TouhouBadApple mp4 is only 30 fps, and baking that at 60 just duplicated every
+  # frame (empty deltas, no extra motion). Override `src` to swap footage.
   src ?
     pkgs.fetchurl {
-      # https://archive.org/details/TouhouBadApple  (item "TouhouBadApple")
-      # file: "Touhou - Bad Apple.mp4" (h.264 derivative of the original .flv)
-      url = "https://archive.org/download/TouhouBadApple/Touhou%20-%20Bad%20Apple.mp4";
-      name = "bad-apple.mp4";
-      sha256 = "0b5e74f6607ad1562bdabd8c95317685fa83b811716d1dba0dce3bf6719752d3";
+      # https://archive.org/details/bad-apple-resources  (file bad_apple@60fps.mp4)
+      url = "https://archive.org/download/bad-apple-resources/bad_apple%4060fps.mp4";
+      name = "bad-apple-60fps.mp4";
+      sha256 = "94d47ffcb5b8b045e257a52afb931059095a1b1d87c0da84e9e2a25a2c373517";
     },
 }:
 

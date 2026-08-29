@@ -78,8 +78,8 @@
             ./modules/duo-s/common.nix
             ./modules/duo-s/base.nix
             ./modules/duo-s/wifi.nix
-            ./modules/duo-s/leds.nix
             ./modules/duo-s/bling.nix
+            ./modules/duo-s/oled.nix
             ./modules/duo-s/bootswap.nix
             ./modules/duo-s/deploy.nix
             ./modules/duo-s/core-${core}.nix
@@ -271,13 +271,13 @@
             fix = (pkgs.extend (import inputs.fix { }).overlay).fix;
             # A pure-Nix OLED animation baked to a BADA blob by `fix` -- the
             # proof that the badge's screens can be authored in Nix. Play with
-            # `nix-badge bling --badapple <result>/bling-anim.bin`.
+            # `nix-badge oled --badapple <result>/bling-anim.bin`.
             bling-demo = import ./pkgs/badge/bling-content {
               inherit pkgs;
               fix = (pkgs.extend (import inputs.fix { }).overlay).fix;
             };
             # A pure-Nix LED ring pattern (rotating rainbow, f(t)->[rgb]) baked to
-            # a BLED blob by fix. Play it with `nix-badge leds set --blob <path>`.
+            # a BLED blob by fix. Play it with `nix-badge bling set --blob <path>`.
             bling-leds-demo = import ./pkgs/badge/bling-content {
               inherit pkgs;
               fix = (pkgs.extend (import inputs.fix { }).overlay).fix;
@@ -287,12 +287,23 @@
             # Bad Apple as a PURE-NIX per-frame pattern the embedded fix
             # evaluator applies once per frame on the OLED (compile-once +
             # native applyValue, decoded to page-major bytes by renderOled).
-            # Point the runtime at it with `nix-badge bling --eval-screen
+            # Point the runtime at it with `nix-badge oled --eval-screen
             # <result>/badapple-live.nix`. durationSeconds defaults small (a fast
             # test file); override for the whole song. The frames are re-encoded
             # from the deterministic ffmpeg-baked BADA blob, so build it on the
             # build host (buildPackages) -- the output is arch-neutral Nix text.
             bling-badapple-live = import ./pkgs/badge/bling-content/badapple-live.nix {
+              pkgs = pkgs.buildPackages;
+            };
+            # The pure-Nix OLED INFO screens (battery/load/power/clock +
+            # currentsystem, in the Sun Gallant font) installed to ONE store dir
+            # with their draw.nix lib + Gallant glyph table + oled.nix, structure
+            # preserved so the runtime fix resolves each screen's relative imports
+            # (`import ./draw.nix`, `../oled.nix`) off the store path. the oled engine cycles
+            # these + badapple-live through one shared fix Engine (a ScreenSet).
+            # Point the runtime at "''${bling-screens}/screens/battery.nix" etc.
+            # Arch-neutral Nix text -> build on the build host (buildPackages).
+            bling-screens = import ./pkgs/badge/bling-content/screens-install.nix {
               pkgs = pkgs.buildPackages;
             };
           };

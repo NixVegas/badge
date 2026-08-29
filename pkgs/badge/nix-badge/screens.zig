@@ -1,4 +1,4 @@
-//! The bling screen model: a screen is a pure function of a per-frame snapshot
+//! The oled screen model: a screen is a pure function of a per-frame snapshot
 //! (`Context`) that paints the OLED framebuffer and returns how many ms until it
 //! wants to run again (its own frame-rate hint). That lets a static meter idle at
 //! 2 Hz while Bad Apple runs at its baked fps under one loop.

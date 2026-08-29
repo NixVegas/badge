@@ -1,0 +1,329 @@
+diff --git a/src/base/deque.zig b/src/base/deque.zig
+index 993adc3..954aa6f 100644
+--- a/src/base/deque.zig
++++ b/src/base/deque.zig
+@@ -25,6 +25,10 @@ inline fn seqCstFence() void {
+     switch (builtin.cpu.arch) {
+         .x86_64 => asm volatile ("mfence" ::: .{ .memory = true }),
+         .aarch64 => asm volatile ("dmb ish" ::: .{ .memory = true }),
++        // RISC-V: `fence rw, rw` orders all prior loads+stores before all
++        // subsequent loads+stores — the full StoreLoad barrier a C11
++        // `atomic_thread_fence(seq_cst)` lowers to on this arch.
++        .riscv64 => asm volatile ("fence rw, rw" ::: .{ .memory = true }),
+         else => @compileError("deque: no seq_cst StoreLoad fence for this arch"),
+     }
+ }
+diff --git a/src/base/fiber.zig b/src/base/fiber.zig
+index ab3b9f7..56fd10c 100644
+--- a/src/base/fiber.zig
++++ b/src/base/fiber.zig
+@@ -8,8 +8,8 @@
+ //!
+ //! Stack switching is done by `contextSwitch`, an inline-asm routine
+ //! vendored from Zig's `std.Io.fiber`. It saves the stack pointer, frame
+-//! pointer and resume address into a `Context`. AArch64 also saves the link
+-//! register explicitly; every other register
++//! pointer and resume address into a `Context`. AArch64 and RISC-V also save
++//! the link register (x30 / x1) explicitly; every other register
+ //! — callee-saved GPRs, the vector file, and the FP/flags control state
+ //! (`mxcsr`/`fpcr`/direction flag) — is listed as clobbered, so the compiler
+ //! spills whatever is live around each swap site. Being `inline` is required:
+@@ -55,8 +55,8 @@ const tsan = if (tsan_enabled) struct {
+ 
+ comptime {
+     switch (builtin.cpu.arch) {
+-        .x86_64, .aarch64 => {},
+-        else => @compileError("fiber.zig only supports x86_64 and aarch64"),
++        .x86_64, .aarch64, .riscv64 => {},
++        else => @compileError("fiber.zig only supports x86_64, aarch64 and riscv64"),
+     }
+ }
+ 
+@@ -115,13 +115,16 @@ pub inline fn censusNow() u64 {
+ }
+ 
+ /// Minimal saved state for an inactive fiber. The offsets are load-bearing —
+-/// `contextSwitch` reads them directly. AArch64 also saves x30 explicitly:
+-/// LLVM may allocate a live value there across inline asm even when x30 is
+-/// listed as clobbered. Everything else the swap needs to preserve rides the
+-/// clobber list, not this struct.
++/// `contextSwitch` reads them directly. AArch64 also saves x30 (lr) explicitly,
++/// and RISC-V x1 (ra), for the same reason: LLVM may allocate a live value in
++/// the link register across inline asm even when it is listed as clobbered.
++/// Everything else the swap needs to preserve rides the clobber list, not this
++/// struct. RISC-V matches AArch64's field order/offsets: sp@0, fp@8, pc@16,
++/// ra@24 (`fp` = s0/x8, `ra` = x1).
+ pub const Context = switch (builtin.cpu.arch) {
+     .x86_64 => extern struct { rsp: u64 = 0, rbp: u64 = 0, rip: u64 = 0 },
+     .aarch64 => extern struct { sp: u64 = 0, fp: u64 = 0, pc: u64 = 0, lr: u64 = 0 },
++    .riscv64 => extern struct { sp: u64 = 0, fp: u64 = 0, pc: u64 = 0, ra: u64 = 0 },
+     else => unreachable, // gated by the comptime block above
+ };
+ 
+@@ -144,6 +147,29 @@ const aarch64_switch_asm =
+     \\0:
+ ;
+ 
++// RISC-V LP64D. `a1` (x11) carries the `Switch*` message; t0–t2 are asm
++// scratch. `old`/`new` are read from the message reg; `sp`, `fp` (s0) and the
++// resume address are stored into `old`, and `ra` (x1) is stored explicitly
++// (like AArch64 x30 — see `Context` doc); then the same fields are loaded from
++// `new` and we `jr` to `new.pc`. `a1` is the in/out operand and survives the
++// jump untouched, so the resumed fiber reads its own resumer's `Switch*`
++// from it.
++const riscv64_switch_asm =
++    \\ ld t0, 0(a1)
++    \\ ld t1, 8(a1)
++    \\ lla t2, 0f
++    \\ sd sp, 0(t0)
++    \\ sd fp, 8(t0)
++    \\ sd t2, 16(t0)
++    \\ sd ra, 24(t0)
++    \\ ld sp, 0(t1)
++    \\ ld fp, 8(t1)
++    \\ ld ra, 24(t1)
++    \\ ld t2, 16(t1)
++    \\ jr t2
++    \\0:
++;
++
+ /// Save the current CPU state into `s.old`, restore `s.new`, and continue at
+ /// `s.new`'s resume address. Based on Zig 0.16 `std.Io.fiber`, with the message
+ /// register removed from each architecture's clobber list: it is already an
+@@ -318,6 +344,126 @@ inline fn contextSwitch(s: *const Switch) *const Switch {
+               .fpsr = true,
+               .memory = true,
+             }),
++        .riscv64 => asm volatile (riscv64_switch_asm
++            : [received_message] "={a1}" (-> *const Switch),
++            : [message_to_send] "{a1}" (s),
++            : .{
++              // x1 (ra) is saved/restored explicitly and x11 (a1) is the
++              // in/out message operand — both omitted here (ziglang/zig#35724),
++              // like AArch64 omits x30/x1. Everything else the compiler could
++              // keep a live value in across the swap is clobbered so it spills
++              // to the OLD stack before the switch and reloads after resume
++              // (when `sp` points back). x2 (sp) and x8 (fp/s0) are saved into
++              // the Context, so they are omitted too.
++              .x3 = true,
++              .x4 = true,
++              .x5 = true,
++              .x6 = true,
++              .x7 = true,
++              .x9 = true,
++              .x10 = true,
++              .x12 = true,
++              .x13 = true,
++              .x14 = true,
++              .x15 = true,
++              .x16 = true,
++              .x17 = true,
++              .x18 = true,
++              .x19 = true,
++              .x20 = true,
++              .x21 = true,
++              .x22 = true,
++              .x23 = true,
++              .x24 = true,
++              .x25 = true,
++              .x26 = true,
++              .x27 = true,
++              .x28 = true,
++              .x29 = true,
++              .x30 = true,
++              .x31 = true,
++              // The whole FP file (LP64D `d`): both caller-saved (ft*/fa*) and
++              // callee-saved (fs*) must be preserved across the swap.
++              .f0 = true,
++              .f1 = true,
++              .f2 = true,
++              .f3 = true,
++              .f4 = true,
++              .f5 = true,
++              .f6 = true,
++              .f7 = true,
++              .f8 = true,
++              .f9 = true,
++              .f10 = true,
++              .f11 = true,
++              .f12 = true,
++              .f13 = true,
++              .f14 = true,
++              .f15 = true,
++              .f16 = true,
++              .f17 = true,
++              .f18 = true,
++              .f19 = true,
++              .f20 = true,
++              .f21 = true,
++              .f22 = true,
++              .f23 = true,
++              .f24 = true,
++              .f25 = true,
++              .f26 = true,
++              .f27 = true,
++              .f28 = true,
++              .f29 = true,
++              .f30 = true,
++              .f31 = true,
++              // The vector file and its control state. baseline_rv64 has no V
++              // extension so nothing lives here today, but LLVM accepts these
++              // clobbers regardless and listing them (as Zig's own
++              // `std.Io.fiber` does) keeps the swap correct should a future
++              // core enable V.
++              .v0 = true,
++              .v1 = true,
++              .v2 = true,
++              .v3 = true,
++              .v4 = true,
++              .v5 = true,
++              .v6 = true,
++              .v7 = true,
++              .v8 = true,
++              .v9 = true,
++              .v10 = true,
++              .v11 = true,
++              .v12 = true,
++              .v13 = true,
++              .v14 = true,
++              .v15 = true,
++              .v16 = true,
++              .v17 = true,
++              .v18 = true,
++              .v19 = true,
++              .v20 = true,
++              .v21 = true,
++              .v22 = true,
++              .v23 = true,
++              .v24 = true,
++              .v25 = true,
++              .v26 = true,
++              .v27 = true,
++              .v28 = true,
++              .v29 = true,
++              .v30 = true,
++              .v31 = true,
++              .vtype = true,
++              .vl = true,
++              .vxsat = true,
++              .vxrm = true,
++              .vcsr = true,
++              // FP control/status (rounding mode + accrued flags) rides the
++              // swap like x86_64 mxcsr / AArch64 fpcr/fpsr.
++              .fflags = true,
++              .frm = true,
++              .memory = true,
++            }),
+         else => unreachable,
+     };
+ }
+@@ -367,6 +513,14 @@ fn bootstrapContext(stack: []u8) Context {
+             const sp_start = top & ~@as(usize, 15);
+             return .{ .sp = sp_start, .fp = 0, .pc = @intFromPtr(&trampoline) };
+         },
++        .riscv64 => {
++            // The RISC-V ELF psABI wants sp 16-byte aligned; `top` is already
++            // 16-aligned (page-aligned mmap end minus 16-aligned headroom). The
++            // switch `jr`s to `pc`, so no return slot is pushed. `ra` is seeded
++            // 0 — the trampoline never returns (it swaps out permanently).
++            const sp_start = top & ~@as(usize, 15);
++            return .{ .sp = sp_start, .fp = 0, .pc = @intFromPtr(&trampoline), .ra = 0 };
++        },
+         else => unreachable,
+     }
+ }
+diff --git a/src/base/hugetlb.zig b/src/base/hugetlb.zig
+index 04055dd..4f17d0d 100644
+--- a/src/base/hugetlb.zig
++++ b/src/base/hugetlb.zig
+@@ -23,6 +23,24 @@ pub const huge_page_size: usize = 2 << 20;
+ // Linux 5.14+. Zig's std.os.linux.MADV does not expose this newer value yet.
+ const madv_populate_write: u32 = 23;
+ 
++/// PRIVATE|ANONYMOUS|NORESERVE|FIXED for re-asserting a mapping over a target.
++/// Zig's `std.posix.MAP` names `NORESERVE` on x86_64/aarch64 but not on riscv64
++/// (its layout leaves bit 14 in an anonymous padding field), so we set the
++/// named fields and OR in the numeric NORESERVE bit where it has no name. Both
++/// paths produce `MAP_NORESERVE = 0x4000`. Byte-identical to the old literal on
++/// x86_64/aarch64.
++const private_anon_noreserve_fixed: std.posix.MAP = blk: {
++    const base: std.posix.MAP = .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .FIXED = true };
++    if (@hasField(std.posix.MAP, "NORESERVE")) {
++        var m = base;
++        m.NORESERVE = true;
++        break :blk m;
++    }
++    // MAP_NORESERVE == 0x4000 (asm-generic/mman.h; bit 14). riscv64 uses the
++    // generic ABI value, matching x86_64/aarch64's NORESERVE bit position.
++    break :blk @bitCast(@as(u32, @bitCast(base)) | 0x4000);
++};
++
+ /// `auto` engagement floor: the unreserved pool must cover at least this
+ /// much before auto turns hugetlb on. Sized to fit the flat store's first
+ /// grow-ahead chunk plus a couple of class blocks — below it the win is
+@@ -224,7 +242,7 @@ pub fn overlayFixed(policy: *Policy, target: [*]u8, len: usize) bool {
+         aligned,
+         len,
+         .{ .READ = true, .WRITE = true },
+-        .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .NORESERVE = true, .FIXED = true },
++        private_anon_noreserve_fixed,
+         -1,
+         0,
+     ) catch @panic("hugetlb: cannot restore mapping after failed overlay move");
+diff --git a/src/base/segments.zig b/src/base/segments.zig
+index 5dbf8b7..540ab93 100644
+--- a/src/base/segments.zig
++++ b/src/base/segments.zig
+@@ -20,6 +20,25 @@ const builtin = @import("builtin");
+ const BlockingMutex = @import("sync.zig").BlockingMutex;
+ const hugetlb = @import("hugetlb.zig");
+ 
++/// PRIVATE|ANONYMOUS|NORESERVE flags for the big self-managed reservations.
++/// Zig's `std.posix.MAP` names `NORESERVE` on x86_64/aarch64 but not on
++/// riscv64 (its layout leaves bit 14 in an anonymous padding field), so we set
++/// the field where it exists and OR in the numeric bit otherwise. Both paths
++/// produce the identical `MAP_NORESERVE = 0x4000` bit — a NORESERVE mapping
++/// only costs physical pages as they are touched. Byte-identical to the old
++/// literal on x86_64/aarch64.
++const private_anon_noreserve: std.posix.MAP = blk: {
++    const base: std.posix.MAP = .{ .TYPE = .PRIVATE, .ANONYMOUS = true };
++    if (@hasField(std.posix.MAP, "NORESERVE")) {
++        var m = base;
++        m.NORESERVE = true;
++        break :blk m;
++    }
++    // MAP_NORESERVE == 0x4000 (asm-generic/mman.h; bit 14). riscv64 uses the
++    // generic ABI value, matching x86_64/aarch64's NORESERVE bit position.
++    break :blk @bitCast(@as(u32, @bitCast(base)) | 0x4000);
++};
++
+ /// `StableSegments` parameters, generic over the injected `Vma`
+ /// instantiation so `vma_tag` can name the app's attribution enum without
+ /// this generic store depending on the taxonomy (see runtime/vma.zig,
+@@ -520,7 +539,7 @@ pub fn StableSegments(comptime T: type, comptime params_in: anytype, comptime Vm
+                 null,
+                 bytes + hugetlb.huge_page_size,
+                 .{ .READ = true, .WRITE = true },
+-                .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .NORESERVE = true },
++                private_anon_noreserve,
+                 -1,
+                 0,
+             ) catch return false;
+@@ -760,7 +779,7 @@ pub fn FlatStore(comptime T: type, comptime params_in: anytype, comptime Vma: ty
+                 null,
+                 byte_count,
+                 .{ .READ = true, .WRITE = true },
+-                .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .NORESERVE = true },
++                private_anon_noreserve,
+                 -1,
+                 0,
+             ) catch return error.OutOfMemory;
+@@ -775,7 +794,7 @@ pub fn FlatStore(comptime T: type, comptime params_in: anytype, comptime Vma: ty
+                 null,
+                 byte_count + hugetlb.huge_page_size,
+                 .{ .READ = true, .WRITE = true },
+-                .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .NORESERVE = true },
++                private_anon_noreserve,
+                 -1,
+                 0,
+             ) catch return null;

@@ -3,7 +3,7 @@
 # reboots -- but only when the board switch is on AUTO (it re-reads the strap and
 # reverts if the switch overrides the latch). btn-boot-n is dual-purpose (it's
 # also the ROM recovery strap), so this makes the boot button useful in Linux;
-# the dedicated USER button (PWR_GPIO1) drives the bling engine separately.
+# the dedicated USER button (PWR_GPIO1) drives the oled engine separately.
 { pkgs, lib, config, badgeFixSrc, ... }:
 let
   nixBadge = import ../../pkgs/badge/nix-badge.nix {

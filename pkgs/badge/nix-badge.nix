@@ -26,11 +26,11 @@
 # is a local store path, and fix's fetchers are stubbed to error.FetchUnsupported
 # so there is NO curl/libgit2/network in the closure.
 #
-# fix's evaluator is aarch64/x86_64 only: its fiber-based VM (src/base/fiber.zig)
-# hard-@compileError()s on any other arch, and src/base/segments.zig uses a
-# MAP.NORESERVE field that Zig's riscv64 std lacks. So on riscv64 we DROP fixSrc
-# and build eval-less (`fix-selftest` reports eval unavailable); the badge's
-# riscv boot chain keeps a working nix-badge. aarch64 gets the full evaluator.
+# fix's evaluator runs natively on aarch64/x86_64; riscv64 is added by a vendored
+# patch (fix-stub/riscv64-fiber.patch: a riscv64 fiber contextSwitch asm + Context,
+# MAP_NORESERVE, a seq_cst fence, and hugetlb NORESERVE), qemu-proven via
+# fix-selftest. So BOTH badge cores get the full evaluator; only other host arches
+# (for which we do not ship) fall back to eval-less.
 {
   pkgs,
   fixSrc ? null,
@@ -45,8 +45,9 @@ let
     else
       throw "nix-badge: unsupported target ${hp.system}";
 
-  # Only aarch64 can link fix (see the arch note above); ignore fixSrc elsewhere.
-  effectiveFixSrc = if hp.isAarch64 then fixSrc else null;
+  # aarch64 + riscv64 both link fix (riscv via the vendored fiber patch, see the
+  # arch note above); ignore fixSrc on any other host arch.
+  effectiveFixSrc = if (hp.isAarch64 || hp.isRiscV64) then fixSrc else null;
 
   # Overlay the vendored fetch-less fetchers stub onto the pinned fix source.
   # The stub files use relative imports (@import("fetch/types.zig")), so they
@@ -68,6 +69,11 @@ let
         # (chunks are permanent GC roots, never collected -- compile-per-frame
         # would leak). The flake pin (2b23db57) matches the patch's base exactly.
         patch -p1 -d $out < ${./nix-badge/fix-stub/native-apply.patch}
+        # riscv64 support: a riscv64 fiber contextSwitch + MAP_NORESERVE + seq_cst
+        # fence + hugetlb NORESERVE, so the RISC-V core gets the full evaluator too.
+        # Source-only + arch-gated at comptime, so the hunks are inert on aarch64 /
+        # x86_64; applies on every build. (qemu-proven via fix-selftest.)
+        patch -p1 -d $out < ${./nix-badge/fix-stub/riscv64-fiber.patch}
       '';
 
   fixArg = pkgs.lib.optionalString (patchedFixSrc != null) "-Dfix-src=${patchedFixSrc}";

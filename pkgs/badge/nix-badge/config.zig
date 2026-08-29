@@ -1,7 +1,7 @@
 //! The LED ring configuration model and the `leds.conf` key=value format.
 //!
 //! The declarative base config (from the Nix module) is read first; the runtime
-//! file `/var/lib/nix-badge/leds.conf`, written by `leds set` and the bling
+//! file `/var/lib/nix-badge/leds.conf`, written by `bling set` and the oled
 //! button handler, is layered on top so a user change wins. Unknown keys are
 //! ignored so a stale runtime file can never block a boot.
 
@@ -192,7 +192,7 @@ pub fn parseBuffer(c: *Config, text: []const u8) ConfigError!void {
 /// header comment marks the file as machine-written; the service reads it after
 /// the declarative config, so these values win.
 pub fn writeRuntime(w: *std.Io.Writer, c: *const Config) std.Io.Writer.Error!void {
-    try w.writeAll("# Written by nixbadge-leds set. The service reads this\n");
+    try w.writeAll("# Written by nixbadge-bling set. The service reads this\n");
     try w.writeAll("# after the declarative config, so these values win.\n");
     try w.print("pattern = {s}\n", .{c.pattern.name()});
     try w.print("brightness = {d}\n", .{c.brightness});
@@ -203,7 +203,7 @@ pub fn writeRuntime(w: *std.Io.Writer, c: *const Config) std.Io.Writer.Error!voi
     try w.writeAll("colors = ");
     try writeColorList(w, c);
     try w.writeByte('\n');
-    // Always emit the blob line (possibly empty) so `leds set --blob ''` clears a
+    // Always emit the blob line (possibly empty) so `bling set --blob ''` clears a
     // previously-set blob rather than leaving a stale one from the base config.
     try w.print("blob = {s}\n", .{c.blob()});
     // Same for the eval pattern path (always emitted so it can be cleared).

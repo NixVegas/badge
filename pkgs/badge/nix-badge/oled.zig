@@ -144,6 +144,32 @@ pub const Panel = struct {
         if (n != self.buf.len) return error.Io;
     }
 
+    /// Flush ONE page's column span [c0, c1] (inclusive) to GDDRAM. A page's bytes
+    /// `fb[page*width + c0 .. + span]` are contiguous, so this points the column/page
+    /// window at just that span and streams it behind one 0x40 control byte -- no
+    /// gather. The delta render path calls this once per dirty page, pushing only the
+    /// changed columns (a few dozen bytes) instead of the whole ~1 KiB panel, which
+    /// is what lets 60 fps Bad Apple fit the 400 kHz bus. In horizontal addressing a
+    /// single-page window wraps back to (page, c0) after c1, but we write exactly
+    /// `span` bytes so it fills (page, c0..c1) and stops.
+    pub fn flushPageSpan(self: *Panel, page: u16, c0: u16, c1: u16) linux.Error!void {
+        std.debug.assert(page < self.pages());
+        std.debug.assert(c0 <= c1 and c1 < self.width);
+        try self.sendCommands(&.{
+            Cmd.column_addr, @intCast(c0),   @intCast(c1),
+            Cmd.page_addr,   @intCast(page), @intCast(page),
+        });
+        const span: usize = @as(usize, c1 - c0) + 1;
+        // 0x40 data control byte + up to a full 128-column SSD1306 row.
+        var tmp: [1 + 128]u8 = undefined;
+        std.debug.assert(1 + span <= tmp.len);
+        tmp[0] = 0x40;
+        const start = @as(usize, page) * self.width + c0;
+        @memcpy(tmp[1 .. 1 + span], self.fb()[start .. start + span]);
+        const n = try linux.write(self.fd, tmp[0 .. 1 + span]);
+        if (n != 1 + span) return error.Io;
+    }
+
     /// The Adafruit power-on sequence, generalised to the runtime height: multiplex
     /// = height-1, COM pins = 0x02 for 32 rows / 0x12 for 64, page window = pages-1,
     /// charge pump on, horizontal addressing, segment remap + reversed COM scan so

@@ -217,6 +217,14 @@
 
 &i2c1 {
 	status = "okay";
+	/* 400 kHz standard fast-mode. We tried 1 MHz fast-mode-plus for 60 fps Bad Apple
+	 * headroom, but (a) it gave no fps gain -- the delta player is fix-eval-bound at
+	 * ~46 fps, NOT I2C-bandwidth-bound, so a faster bus doesn't lift the ceiling --
+	 * and (b) it was marginal for the SAO wiring: single-byte i2cdetect still ACKs at
+	 * 1 MHz but the multi-byte SSD1306 init sequence intermittently NAKs, so some
+	 * boots came up with a blank panel (the #30 no-OLED guard skipped it). 400 kHz
+	 * inits reliably every boot; the path to true 60 fps is cutting per-frame eval
+	 * cost, not the bus. */
 	clock-frequency = <400000>;
 	/* i2c1_cfg (VIVO_D4/D3 -> IIC1, mux 5) is defined per-core: the arm and
 	 * riscv pin-macro names differ (PIN_VIVO_* vs DUOS_VIVO_*), like sdhci1_cfg.

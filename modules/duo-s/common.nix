@@ -63,6 +63,15 @@
     wants = [ "systemd-growfs-root.service" ];
   };
 
+  # No coredumps. The embedded fix evaluator aborts on the known GC bug (draw-heavy
+  # OLED screens); capturing a core of the ~80 MB Engine on every crash is wasteful
+  # I/O and could fill the 351 MB badge's rootfs. Turn off the systemd-coredump
+  # handler AND override its `core_pattern = "core"` default: pointing core_pattern
+  # at /dev/null disables dumping entirely -- the kernel refuses to write a core to
+  # a non-regular file, so nothing is generated (no program/store-path dependency).
+  systemd.coredump.enable = false;
+  boot.kernel.sysctl."kernel.core_pattern" = "/dev/null";
+
   # (The SARADC auto-calibration service was removed with the Zig rewrite: the
   # tool no longer does userspace calibration -- it reads battery + rails straight
   # from the kernel sysfs power_supply + iio-rescale meters (VSEL/VBAT dividers,
@@ -83,26 +92,60 @@
 
   # 24 WS2812 LEDs on the SPI3 MOSI line (40-pin header pin 19). The service
   # starts in the initrd and keeps running after switch_root, so the ring shows
-  # life from very early boot. See modules/duo-s/leds.nix for the option set and
-  # the nixbadge-leds CLI.
-  nixbadge.leds = {
+  # life from very early boot. See modules/duo-s/bling.nix for the option set and
+  # the nixbadge-bling CLI.
+  nixbadge.bling = {
     enable = true;
     count = 24;
   };
 
-  # OLED bling engine: play the FULL Bad Apple song as a pure-Nix pattern that
-  # the embedded fix evaluator applies per frame (the cyclable "nixapple" screen)
-  # -- the marquee "it's the Nix Badge" demo. aarch64 only (the evaluator is
-  # ARM-side; the riscv core accepts the flag but skips the screen). Measured on
-  # the badge: ~81 MB RSS while shown (plateaus -- frames are chunk constants),
-  # 8.5% CPU at 20 fps. buildPackages so the ffmpeg transcode + Nix generation
-  # run on the build host, not under target emulation.
-  nixbadge.oled.evalScreen = "${
-    import ../../pkgs/badge/bling-content/badapple-live.nix {
-      pkgs = pkgs.buildPackages;
-      durationSeconds = null;
-    }
-  }/badapple-live.nix";
+  # OLED engine: a SET of pure-Nix screens the embedded fix evaluator
+  # applies per frame, ALL sharing ONE fix Engine (a ScreenSet -- one Value/chunk
+  # heap for the whole set, not one per screen; five separate Engines would OOM
+  # the 351 MB badge). The USER long-press / SIGUSR2 cycles through them:
+  #   1. the FULL Bad Apple song (the marquee "it's the Nix Badge" demo)
+  #   2-5. the Gallant-font info screens: battery, load, power, clock
+  #   6. currentsystem -- renders builtins.currentSystem, an on-theme readout
+  #      (the ARM<->RISC-V core swap IS which system fix reports: "aarch64-linux")
+  # aarch64 only (the evaluator is ARM-side; the riscv core accepts the flags but
+  # skips them, falling back to the computed Zig screens). Bad Apple alone measured
+  # ~81 MB RSS while shown (frames are chunk constants -- it plateaus); the info
+  # screens are tiny lambdas sharing that same Engine, so the set's steady-state
+  # RSS is dominated by whichever heavy screen (Bad Apple) has been evaluated.
+  # buildPackages so the ffmpeg transcode + Nix generation run on the build host.
+  #
+  # 128x64 panel (swapped in on the bench). The screens read scope.height, so they
+  # lay out to the taller panel; the SSD1306 init parameterises for 64 rows.
+  nixbadge.oled.height = 64;
+  nixbadge.oled.evalScreens =
+    let
+      # Bake Bad Apple for the 128x64 panel at 60 fps using the DELTA codec
+      # (pkgs/badge/bling-content/badapple-delta.md): each frame stores only the
+      # (offset,byte) changes vs the previous frame, packed 2/int; the runtime
+      # applies them to a persistent framebuffer and flushes ONLY the changed
+      # columns. That fits 60 fps under the 400 kHz I2C bus (a full-frame flush is
+      # ~23 ms => a ~43 fps ceiling) AND keeps memory well below a full-frame 60 fps
+      # bake (~13140 full frames would be ~27 MB of fix Values). keyframeInterval=60
+      # emits one full frame per second for glitch self-heal + future seeking.
+      badappleLive = import ../../pkgs/badge/bling-content/badapple-live.nix {
+        pkgs = pkgs.buildPackages;
+        durationSeconds = null;
+        height = 64;
+        fps = 60;
+        keyframeInterval = 60;
+      };
+      screens = import ../../pkgs/badge/bling-content/screens-install.nix {
+        pkgs = pkgs.buildPackages;
+      };
+    in
+    [
+      "${badappleLive}/badapple-live.nix"
+      "${screens}/screens/battery.nix"
+      "${screens}/screens/load.nix"
+      "${screens}/screens/power.nix"
+      "${screens}/screens/clock.nix"
+      "${screens}/screens/currentsystem.nix"
+    ];
 
   # Networking via NetworkManager: it manages eth0 (auto-connects wired) and
   # wlan0 once the AIC8800 WiFi comes up. wpa_supplicant backend because the
@@ -145,7 +188,7 @@
   };
 
   # /dev/i2c-1 for the SAO SSD1306 OLED (IIC1, enabled in the common dtsi). The
-  # bling engine and `nix-badge oled` drive the panel from userspace via i2c-dev.
+  # oled engine and `nix-badge oled` drive the panel from userspace via i2c-dev.
   boot.kernelModules = [ "i2c-dev" ];
 
   environment.systemPackages = with pkgs; [

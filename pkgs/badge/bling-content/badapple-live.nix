@@ -1,26 +1,33 @@
-# Bad Apple!! as a PURE-NIX PATTERN FILE the badge's embedded fix evaluator
+# Bad Apple!! as a PURE-NIX DELTA PATTERN FILE the badge's embedded fix evaluator
 # applies once per frame (compile-once + native applyValue, the same path proven
-# for LEDs -- see pkgs/badge/nix-badge/fixeval.zig). Unlike the baked "BADA" blob
-# (pkgs/badge/badapple, which the runtime mmaps), this emits a Nix FUNCTION:
+# for LEDs -- see pkgs/badge/nix-badge/fixeval.zig decodeOled). Unlike the baked
+# "BADA" blob (pkgs/badge/badapple, which the runtime mmaps), this emits a Nix
+# FUNCTION whose per-frame `frames` list mixes KEYFRAMES and DELTAS:
 #
 #   scope:
-#   let frames = [ [ <128 ints> ] ... ]; nframes = N; fps = 20;
+#   let frames = [
+#         { k = true;  b = [ <fbLen/4 ints> ]; }                  # keyframe
+#         { k = false; n = <count>; b = [ <ceil(count/2) ints> ]; }  # delta
+#         ... ]; nframes = N;
 #       mod = a: b: a - (a / b) * b;
-#   in { bitmap = builtins.elemAt frames (mod (scope.t * fps / 1000) nframes);
-#        nextMs = 50; }
+#   in let fr = builtins.elemAt frames (mod scope.frameIndex nframes);
+#      in { bitmap = fr.b; delta = !fr.k; n = fr.n or 0; nextMs = <1000/fps>; }
 #
-# Each frame is the 512 page-major GDDRAM bytes (128x32) packed into 128 ints, 4
-# consecutive page-bytes per int LITTLE-ENDIAN (int = b0 | b1<<8 | b2<<16 |
-# b3<<24). renderOled decodes each int back to those 4 bytes and blits.
+# A KEYFRAME is the full frame packed like the old flat format: fbLen/4 ints, 4
+# consecutive page-major GDDRAM bytes per int LITTLE-ENDIAN (int = b0 | b1<<8 |
+# b2<<16 | b3<<24). A DELTA carries only the (offset,byte) changes vs the exactly
+# reconstructed previous frame: 2 entries per int, E = offset*256+byte, packed
+# int = E0*262144 + E1 (E0 = high 18 bits). Frame f is a keyframe iff f % K == 0
+# (K = keyframeInterval), so frame 0 is always a keyframe. The exact byte/int
+# contract -- and the runtime decode side -- live in badapple-delta.md.
 #
 # The frames come from the EXISTING Bad Apple pipeline: import ../badapple to get
 # the ffmpeg-baked "BADA" blob (deterministic: pinned video, gray8 -> threshold
-# -> page-major pack), then a tiny C program (emit_nix.c) reads the 512-byte
-# frames past the 16-byte header and emits the Nix text.
+# -> page-major pack), then a tiny C program (emit_delta.c) reads the fbLen-byte
+# frames past the 16-byte header and emits the delta Nix text.
 #
 # durationSeconds defaults SMALL (20 s ~= 400 frames) so the test build + the
-# on-badge parse stay fast; set it to null for the whole song (~4379 frames,
-# ~6 MB of Nix source).
+# on-badge parse stay fast; set it to null for the whole song (~4379 frames).
 {
   pkgs,
 
@@ -37,6 +44,11 @@
   # a few hundred KiB (fast host test + fast on-badge parse). null = full song
   # (~219 s, ~4379 frames, ~6 MB) -- valid but heavy.
   durationSeconds ? 20,
+
+  # Keyframe interval K: frame f is a full keyframe iff f % K == 0 (so frame 0
+  # always is). 60 -> a self-healing keyframe once per second at 60 fps. K=1
+  # degenerates to an all-keyframe (flat full-frame) stream. See badapple-delta.md.
+  keyframeInterval ? 60,
 
   # The badapple blob builder (ffmpeg + pack.c). Passed the geometry/fps/duration
   # so its frames are exactly what we re-encode as Nix ints.
@@ -67,18 +79,19 @@ pkgs.stdenv.mkDerivation {
   buildPhase = ''
     runHook preBuild
 
-    gcc -O2 -Wall -Wextra -std=c11 -o emit_nix ${./emit_nix.c}
+    gcc -O2 -Wall -Wextra -std=c11 -o emit_delta ${./emit_delta.c}
 
-    # Feed the baked BADA blob through the emitter -> the pure-Nix pattern.
-    ./emit_nix < ${badapple}/badapple.bin > badapple-live.nix
+    # Feed the baked BADA blob through the delta emitter -> the pure-Nix pattern.
+    ./emit_delta ${toString keyframeInterval} < ${badapple}/badapple.bin > badapple-live.nix
 
     runHook postBuild
   '';
 
   # Self-test: the emitted Nix must declare the frame count the blob's header
-  # claims, and every frame line must carry exactly wordsPerFrame ints. A
-  # mismatch (a dropped/short frame, a geometry skew) fails the build, not the
-  # badge. The header's frame_count is the u32 at blob offset 12 (LE).
+  # claims (one frame line per frame), and the keyframe lines must fall exactly
+  # at indices 0, K, 2K, ... -> ceil(fc/K) of them. A mismatch (a dropped/short
+  # frame, a geometry skew, a keyframe miscount) fails the build, not the badge.
+  # The header's frame_count is the u32 at blob offset 12 (LE).
   doCheck = true;
   checkPhase = ''
     runHook preCheck
@@ -87,23 +100,24 @@ pkgs.stdenv.mkDerivation {
     fc=$(od -An -tu4 -j12 -N4 "$blob" | tr -d ' ')
     echo "badapple-live: blob declares $fc frames"
 
-    # Count the emitted frame lines (each begins with 4 spaces + '[').
-    lines=$(grep -c '^    \[' badapple-live.nix)
+    # Count the emitted frame lines. Each frame -- keyframe or delta -- begins
+    # with 4 spaces + '{ ' (keyframe: '{ k = true;', delta: '{ k = false;').
+    lines=$(grep -c '^    { ' badapple-live.nix)
     [ "$lines" -eq "$fc" ] || {
       echo "SELF-TEST FAIL: $lines frame lines != $fc header frames" >&2; exit 1; }
 
-    # The total int count across all frame lines must equal fc*wordsPerFrame. The
-    # ints are exactly the non-'[' / non-']' whitespace tokens on the frame lines,
-    # so grep the frame lines, strip the brackets, and count words.
-    want_ints=$(( fc * ${toString wordsPerFrame} ))
-    got_ints=$(grep '^    \[' badapple-live.nix | tr -d '[]' | wc -w)
-    [ "$got_ints" -eq "$want_ints" ] || {
-      echo "SELF-TEST FAIL: $got_ints ints != $fc*${toString wordsPerFrame} = $want_ints" >&2
+    # Keyframes are exactly the frames at indices 0, K, 2K, ... -> ceil(fc/K).
+    K=${toString keyframeInterval}
+    want_keys=$(( ( fc + K - 1 ) / K ))
+    got_keys=$(grep -c '^    { k = true;' badapple-live.nix)
+    [ "$got_keys" -eq "$want_keys" ] || {
+      echo "SELF-TEST FAIL: $got_keys keyframe lines != ceil($fc/$K) = $want_keys" >&2
       exit 1; }
 
-    echo "SELF-TEST PASS: $fc frames x ${toString wordsPerFrame} ints = $want_ints ints"
+    echo "SELF-TEST PASS: $fc frames ($got_keys keyframes @ K=$K, $(( fc - got_keys )) deltas)"
 
     echo "$fc" > .fc
+    echo "$got_keys" > .keys
 
     runHook postCheck
   '';
@@ -114,11 +128,16 @@ pkgs.stdenv.mkDerivation {
     install -Dm644 badapple-live.nix "$out/badapple-live.nix"
 
     fc=$(cat .fc)
+    keys=$(cat .keys)
     size=$(stat -c%s "$out/badapple-live.nix")
     {
-      echo "badapple-live.nix -- pure-Nix Bad Apple pattern (fix applyValue per frame)"
+      echo "badapple-live.nix -- pure-Nix Bad Apple DELTA pattern (fix applyValue per frame)"
+      echo "format:       delta codec v1 (see badapple-delta.md)"
       echo "geometry:     ${toString width}x${toString height} (${toString fbLen} bytes/frame)"
-      echo "ints/frame:   ${toString wordsPerFrame} (4 page-bytes/int, LE)"
+      echo "keyframe:     ${toString wordsPerFrame} ints (4 page-bytes/int, LE)"
+      echo "delta:        variable ints/frame (2 change entries/int, E = offset*256+byte)"
+      echo "keyframe_K:   ${toString keyframeInterval} (frame f is a keyframe iff f % K == 0)"
+      echo "keyframes:    $keys"
       echo "fps:          ${toString fps}"
       echo "frame_count:  $fc"
       echo "duration_cap: ${if durationSeconds == null then "none (full song)" else toString durationSeconds + " s"}"
@@ -129,12 +148,16 @@ pkgs.stdenv.mkDerivation {
   '';
 
   meta = {
-    description = "Bad Apple!! as a pure-Nix per-frame pattern for the badge OLED (fix applyValue)";
+    description = "Bad Apple!! as a pure-Nix per-frame DELTA pattern for the badge OLED (fix applyValue)";
     longDescription = ''
       A single Nix function ($out/badapple-live.nix) the badge's embedded fix
-      evaluator compiles once and applies every frame to a fresh scope, decoding
-      the returned flat int list into SSD1306 page-major bytes (renderOled). The
-      frames are re-encoded from the deterministic ffmpeg-baked "BADA" blob.
+      evaluator compiles once and applies every frame to a fresh scope. Each frame
+      is either a keyframe (full SSD1306 page-major bytes, packed 4/int LE) or a
+      delta carrying only the changed (offset,byte) pairs vs the previous frame
+      (2 entries/int); decodeOled applies it and flushes just the dirty page spans.
+      Keyframes recur every keyframeInterval frames. The frames are re-encoded from
+      the deterministic ffmpeg-baked "BADA" blob; see badapple-delta.md for the
+      exact byte/int contract.
     '';
     platforms = pkgs.lib.platforms.all; # build-host tool; output is arch-neutral Nix text
   };

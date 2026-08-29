@@ -1,0 +1,33 @@
+Sun Gallant 12x22 console font -- attribution and license
+==========================================================
+
+The glyph data in gallant-font.nix is GENERATED (by gallant-bdf-to-nix.awk, run
+from gallant-font.nix) from the Sun Gallant Demi 12x22 bitmap font as vendored in
+the illumos-gate source tree:
+
+    usr/src/data/consfonts/Gallant19.bdf
+
+pinned to illumos-gate commit
+    4b529e40b9b8c5bcd0a4bc923a168c7988b72748
+    (sha256-SkAjTLzO+UY8Gb+W7wShLSVC7VEQONpIAwqqU3IGZSY=)
+fetched from
+    https://raw.githubusercontent.com/illumos/illumos-gate/4b529e40b9b8c5bcd0a4bc923a168c7988b72748/usr/src/data/consfonts/Gallant19.bdf
+
+The BDF header records its provenance:
+
+    COMMENT Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+    COMMENT Use is subject to license terms.
+    COMMENT This is a derivation of a BDF font from the X consolidation
+    COMMENT Originally a BSD vfont.
+    COMMENT Re-built BDF and ISO10646-1 from hex code originally in
+    COMMENT illumos usr/src/uts/common/font/12x22.c
+    FONT -Sun-Gallant-Demi-R-Normal--19-190-72-72-C-120-ISO10646-1
+    FONTBOUNDINGBOX 12 22 0 -5
+
+illumos-gate is distributed under the Common Development and Distribution License
+(CDDL) Version 1.0. This font file, like the rest of that tree, is Copyright 2006
+Sun Microsystems, Inc.; use is subject to the CDDL. The generated gallant-font.nix
+is a mechanical re-encoding of that bitmap data (12x22 cell -> 22 row ints per
+glyph) and carries the same terms and attribution.
+
+CDDL v1.0: https://opensource.org/licenses/CDDL-1.0
