@@ -20,6 +20,7 @@ const badapple = @import("badapple.zig");
 const bled = @import("bled.zig");
 const screens = @import("screens.zig");
 const fixeval = @import("fixeval.zig");
+const nixeval = @import("nixeval.zig");
 const eval = @import("eval.zig");
 
 const Config = config.Config;
@@ -1640,6 +1641,18 @@ pub fn main(init: std.process.Init) !void {
             out.flush();
             std.process.exit(1);
         };
+        return;
+    }
+
+    // nix-selftest: the equivalent smoke test for the upstream Nix C API backend -- the
+    // first real exercise of the C++ static link (libnixexpr + libstdc++). Exits non-zero
+    // on any failure (or a nix-less build) so a broken link is caught loudly.
+    if (std.mem.eql(u8, cmd, "nix-selftest")) {
+        if (!nixeval.selftest()) {
+            out.flush();
+            std.process.exit(1);
+        }
+        std.log.info("nix-selftest: OK", .{});
         return;
     }
 

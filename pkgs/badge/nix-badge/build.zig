@@ -13,6 +13,17 @@ pub fn build(b: *std.Build) void {
     const fix_src = b.option([]const u8, "fix-src", "Path to a pinned, fetch-less fix source tree; enables the embedded expr evaluator");
     const have_fix = fix_src != null;
 
+    // Nix C API backend (upstream libnixexpr via nix_api_*): a SECOND per-frame evaluator
+    // alongside fix, for an A/B comparison. Linked when `-Dnix-include` is provided (aarch64
+    // only; see nix-badge.nix). The libs are C++/libstdc++, so we link libstdc++.a + libgcc.a
+    // by full path (`-Dnix-objs`) and linkLibC (musl) -- NOT linkLibCpp (LLVM libc++ is
+    // ABI-incompatible with gcc libstdc++). Proven end-to-end by the spike.
+    const nix_include = b.option([]const u8, "nix-include", "colon-list of Nix C API include dirs");
+    const nix_libdirs = b.option([]const u8, "nix-libdirs", "colon-list of -L dirs for the nix static libs");
+    const nix_libs = b.option([]const u8, "nix-libs", "comma-list of -l names for the nix static libs");
+    const nix_objs = b.option([]const u8, "nix-objs", "colon-list of full-path .a objects (libstdc++.a, libgcc.a)");
+    const have_nix = nix_include != null;
+
     // When eval is linked, force the LLVM backend: fix's threaded VM dispatcher
     // relies on `@call(.always_tail)`, which only LLVM implements. When eval is
     // absent, leave the backend unset (null) so Zig keeps its default choice --
@@ -25,7 +36,16 @@ pub fn build(b: *std.Build) void {
     // eval was compiled in (`@import("build_options").have_fix`).
     const nb_build_options = b.addOptions();
     nb_build_options.addOption(bool, "have_fix", have_fix);
+    nb_build_options.addOption(bool, "have_nix", have_nix);
     const nb_build_options_mod = nb_build_options.createModule();
+
+    // The host test build cannot link the aarch64 nix static libs, so have_nix is FALSE for
+    // tests (the shared decode is host-tested in eval.zig; the nix backend is integration-
+    // tested on the badge via the fps/RSS harness + `nix-badge nix-selftest`).
+    const nb_test_options = b.addOptions();
+    nb_test_options.addOption(bool, "have_fix", have_fix);
+    nb_test_options.addOption(bool, "have_nix", false);
+    const nb_test_options_mod = nb_test_options.createModule();
 
     const root = b.createModule(.{
         .root_source_file = b.path("nix-badge.zig"),
@@ -47,6 +67,35 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // Link the upstream Nix C API per the proven recipe (see the module doc). Only on the
+    // target exe (never the host test build); gated on `-Dnix-include`.
+    if (have_nix) {
+        // @cImport in nixeval.zig needs the headers on the module; the exe needs the libs.
+        var incs = std.mem.tokenizeScalar(u8, nix_include.?, ':');
+        while (incs.next()) |dir| root.addIncludePath(.{ .cwd_relative = dir });
+        // NB: library paths / system libs / object files are Build.Module methods (on
+        // `root`), not Build.Step.Compile methods (on `exe`), in Zig 0.16.
+        if (nix_libdirs) |dirs| {
+            var it = std.mem.tokenizeScalar(u8, dirs, ':');
+            while (it.next()) |dir| root.addLibraryPath(.{ .cwd_relative = dir });
+        }
+        // Link the nix static libs TWICE (poor-man's --start-group) to resolve the circular
+        // nix-expr <-> nix-store <-> nix-util references without a raw linker group flag.
+        if (nix_libs) |libs| {
+            var pass: u8 = 0;
+            while (pass < 2) : (pass += 1) {
+                var it = std.mem.tokenizeScalar(u8, libs, ',');
+                while (it.next()) |name| root.linkSystemLibrary(name, .{});
+            }
+        }
+        // libstdc++.a + libgcc.a (the C++ runtime + _Unwind_*) by full path.
+        if (nix_objs) |objs| {
+            var it = std.mem.tokenizeScalar(u8, objs, ':');
+            while (it.next()) |p| root.addObjectFile(.{ .cwd_relative = p });
+        }
+        root.link_libc = true; // musl -- NOT libc++ (LLVM libc++ is ABI-incompatible with gcc libstdc++)
+    }
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
@@ -60,7 +109,7 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = optimize,
     });
-    test_root.addImport("build_options", nb_build_options_mod);
+    test_root.addImport("build_options", nb_test_options_mod);
     if (fix_src) |src| {
         const graph = fixExprGraph(b, src, b.graph.host, optimize);
         test_root.addImport("expr", graph.expr);

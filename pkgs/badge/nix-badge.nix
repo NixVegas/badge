@@ -34,9 +34,15 @@
 {
   pkgs,
   fixSrc ? null,
+  # Link the upstream Nix C API (libnixexpr) as a SECOND per-frame evaluator backend
+  # alongside fix, for an A/B comparison. aarch64 only (the evaluator runs on the arm core;
+  # riscv stays fix-only). The static-link recipe is proven -- see
+  # docs/superpowers/plans/2026-08-29-nix-c-api-backend.md.
+  nixEval ? true,
 }:
 let
   hp = pkgs.stdenv.hostPlatform;
+  lib = pkgs.lib;
   zigTarget =
     if hp.isAarch64 then
       "aarch64-linux-musl"
@@ -77,6 +83,43 @@ let
       '';
 
   fixArg = pkgs.lib.optionalString (patchedFixSrc != null) "-Dfix-src=${patchedFixSrc}";
+
+  # ---- Nix C API backend (aarch64 only) --------------------------------------------------
+  wantNix = nixEval && hp.isAarch64;
+  # The split C API components (aarch64-musl-static): nix-expr-c pulls in nix-expr/store/util
+  # + boost + boehm-gc; the -c siblings carry the other nix_api_*.h.
+  nixComps = pkgs.pkgsStatic.nixVersions.nixComponents_2_34;
+  nixExprC = nixComps."nix-expr-c";
+  nixStoreC = nixComps."nix-store-c";
+  nixUtilC = nixComps."nix-util-c";
+  nixFetchersC = nixComps."nix-fetchers-c";
+  # closureInfo over the C-API dev+out captures every referenced static-lib + pkgconfig dir
+  # (the .pc files reference the sibling component/dep lib dirs).
+  nixClosure = pkgs.buildPackages.closureInfo {
+    rootPaths = [ nixExprC nixExprC.dev nixStoreC nixStoreC.dev nixUtilC nixUtilC.dev nixFetchersC ];
+  };
+  # gcc C++ runtime archives (full path): libstdc++.a lives in the cc `lib` output; libgcc.a
+  # (with _Unwind_*) in the cc's main output under lib/gcc/<triple>/<ver>/.
+  nixCcLib = pkgs.pkgsStatic.stdenv.cc.cc.lib;
+  nixCcMain = pkgs.pkgsStatic.stdenv.cc.cc;
+  # The 4 static libs whose -L pkg-config --static omits. Use getLib: these packages'
+  # DEFAULT output is `bin` (no /lib); the .a lives in the `lib`/`out` output.
+  nixExtraLibDirs = map (p: "${lib.getLib p}/lib") [
+    pkgs.pkgsStatic.acl
+    pkgs.pkgsStatic.bzip2
+    pkgs.pkgsStatic.libunistring
+    pkgs.pkgsStatic.llhttp
+  ];
+  # nix_api_{value,expr}.h use C23 `[[deprecated("...")]]` attributes on a couple of typedefs
+  # that zig's translate-c (aro) cannot parse ("expected external declaration"). They are
+  # pure deprecation markers -- copy the nix-expr-c headers and strip the attributes so
+  # @cImport succeeds. (nix-store-c / nix-util-c headers carry no such attributes.)
+  nixExprCHeaders = pkgs.buildPackages.runCommand "nix-expr-c-headers-nodeprecated" { } ''
+    mkdir -p $out/include
+    cp -r ${nixExprC.dev}/include/. $out/include/
+    chmod -R +w $out/include
+    sed -i 's/\[\[deprecated([^]]*)\]\]//g' $out/include/*.h
+  '';
 in
 pkgs.buildPackages.stdenv.mkDerivation {
   pname = "nix-badge";
@@ -84,6 +127,10 @@ pkgs.buildPackages.stdenv.mkDerivation {
 
   src = ./nix-badge;
 
+  # pkg-config is invoked by full store path in the buildPhase (below), not via
+  # nativeBuildInputs -- its cross setup hook prefixes the binary name and rewrites
+  # PKG_CONFIG_PATH, both of which fight the manual, absolute-path invocation we need
+  # to read the aarch64 nix .pc files.
   nativeBuildInputs = [ pkgs.buildPackages.zig ];
 
   dontConfigure = true;
@@ -96,7 +143,42 @@ pkgs.buildPackages.stdenv.mkDerivation {
     runHook preBuild
     export HOME="$TMPDIR"
     export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
-    zig build -Dtarget=${zigTarget} -Doptimize=ReleaseSafe ${fixArg} --prefix "$out"
+
+    nixArgs=""
+    ${lib.optionalString wantNix ''
+      # Nix C API link flags from pkg-config + the closure (the proven static-link recipe).
+      PC_DIRS=""
+      for p in $(cat ${nixClosure}/store-paths); do
+        for d in "$p/lib/pkgconfig" "$p/share/pkgconfig"; do [ -d "$d" ] && PC_DIRS="$PC_DIRS:$d"; done
+      done
+      export PKG_CONFIG_PATH="''${PC_DIRS#:}"
+
+      NIX_INC="${nixExprCHeaders}/include:${nixStoreC.dev}/include:${nixUtilC.dev}/include"
+      # -l names only (the full --libs also carries -Wl,--wrap, which zig cc rejects).
+      # A plain NATIVE pkg-config (pkgsBuildBuild -> unprefixed bin/pkg-config); the .pc
+      # files carry absolute store paths so no cross/target awareness is needed. The cross
+      # buildPackages.pkg-config only ships a target-prefixed binary.
+      PKGCONFIG="${pkgs.pkgsBuildBuild.pkg-config}/bin/pkg-config"
+      NIX_LIBS=$("$PKGCONFIG" --libs-only-l --static nix-expr-c | tr ' ' '\n' | sed -n 's/^-l//p' | grep . | paste -sd,)
+      # -L dirs from pkg-config + the 4 it omits (acl/bz2/unistring/llhttp).
+      NIX_LIBDIRS=$( {
+        "$PKGCONFIG" --libs-only-L --static nix-expr-c | tr ' ' '\n' | sed -n 's/^-L//p'
+        for d in ${builtins.concatStringsSep " " nixExtraLibDirs}; do echo "$d"; done
+      } | grep . | sort -u | paste -sd:)
+      # Some deps (boost_url, the aws-c-* / aws-crt-cpp S3 stack) appear in the .pc as
+      # FULL-PATH .a files, not -l/-L flags, so they must be linked as objects. Preserve
+      # pkg-config's order + repeats (circular aws deps). Then the C++ runtime archives:
+      # libstdc++.a + libgcc.a (has _Unwind_*).
+      NIX_ARCHIVES=$("$PKGCONFIG" --libs --static nix-expr-c | tr ' ' '\n' | grep -E '^/.*\.a$' | paste -sd:)
+      STDCPP=$(find ${nixCcLib} -name libstdc++.a 2>/dev/null | head -1)
+      LIBGCC=$(find ${nixCcMain} -name libgcc.a 2>/dev/null | head -1)
+      NIX_OBJS="$NIX_ARCHIVES:$STDCPP:$LIBGCC"
+
+      nixArgs="-Dnix-include=$NIX_INC -Dnix-libdirs=$NIX_LIBDIRS -Dnix-libs=$NIX_LIBS -Dnix-objs=$NIX_OBJS"
+      echo "nix-badge: linking Nix C API backend ($NIX_LIBS)"
+    ''}
+
+    zig build -Dtarget=${zigTarget} -Doptimize=ReleaseSafe ${fixArg} $nixArgs --prefix "$out"
     runHook postBuild
   '';
 
