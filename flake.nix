@@ -310,6 +310,17 @@
 
           devShells = {
             v1 = pkgs.nixbadge-v1.shell;
+            # `nix develop` -> the deploy shell: deploy-rs (the native dev-host binary) on
+            # PATH so you can `deploy .#nixbadge-duos-arm --hostname <ip> --ssh-user badge`
+            # without the `nix run github:serokell/deploy-rs --` dance. sshpass is here too
+            # for the `sshpass -p nixbadge` badge login path.
+            default = pkgs.mkShellNoCC {
+              packages = [
+                deploy-rs.packages.${system}.default
+                pkgs.sshpass
+                pkgs.openssh
+              ];
+            };
           };
         };
     };
