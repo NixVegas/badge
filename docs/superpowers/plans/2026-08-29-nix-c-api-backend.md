@@ -282,6 +282,64 @@ Run (host, binfmt): `qemu-aarch64 $(find result -name nix-badge) nix-selftest` �
 - [ ] **Step 4:** Build + deploy; verify `nix-badge oled --backend fix` still 60fps, and `--backend nix` renders Bad Apple (camera + journal). Expected: both render; nix fps/RSS TBD.
 - [ ] **Step 5: Commit** (`nix-badge: runtime --backend fix|nix selection over an eval.Backend union`).
 
+### Task 3.1b: `scope.backend` + `scope.fps` into `Fields` (on-panel stats)
+
+**Files:** `eval.zig` (Fields), `fixeval.zig` + `nixeval.zig` (scope build), `nix-badge.zig` (feed last-window fps + active backend name into Fields each frame).
+
+**Interfaces:** `Fields` gains `backend: []const u8 = "fix"` and `fps: u32 = 0`. Both backends add `backend` (string) + `fps` (int) to the per-frame scope attrset (fix: intern via the Engine's string API in `makeAttrs`; nix: `nix_init_string`/`nix_init_int` + `nix_bindings_builder_insert`). The loop sets `Fields.fps = <last 3s-window fps>` and `Fields.backend = <active backend name>` before each `applyFrame`.
+
+- [ ] **Step 1:** Add the two fields to `eval.Fields` (host `zig test` still green — no decode change).
+- [ ] **Step 2:** fix `applyFrame` adds `{ backend = <string>; fps = <int>; }` to `makeAttrs`; nix `applyFrame` the equivalent. The info screens can now read `scope.backend`/`scope.fps`.
+- [ ] **Step 3:** Loop threads the measured fps (already computed in the 3s window; carry it forward each frame) + the backend name into `Fields`.
+- [ ] **Step 4:** Update one info screen (e.g. `currentsystem.nix` or a new `stats.nix`) to draw `scope.backend` + `scope.fps`; deploy + camera-verify it renders on both backends.
+- [ ] **Step 5: Commit** (`nix-badge: expose scope.backend + scope.fps to screens`).
+
+### Task 3.1c: >5s button hold switches the backend live
+
+**Files:** `nix-badge.zig` (`oledWait` press tiers + a `want_switch_backend` flag + the loop's swap).
+
+**Interfaces:** a third press tier: release with `held >= backend_switch_ms (5000)` sets `want_switch_backend`. The loop, on that flag, `deinit`s the active `eval.ScreenSet`/`Pattern` and re-`open`s the OTHER backend (recompiles the chunk; a few-second freeze is acceptable). Persist the chosen backend to `/var/lib/nix-badge/*.backend` so it survives a service restart (like the screen-index persistence).
+
+- [ ] **Step 1:** Extend the `oledWait` release logic: `held >= 5000` -> `want_switch_backend.store(true)`, else the existing 400ms next-screen / next-pattern tiers.
+- [ ] **Step 2:** In the loop, on `want_switch_backend.swap(false)`, rebuild the eval holder with the toggled backend enum; log the switch; persist it.
+- [ ] **Step 3:** Deploy; on the badge, hold the button >5s and confirm the backend flips (journal `oled: backend -> nix`, and the on-panel `scope.backend` stat changes).
+- [ ] **Step 4: Commit** (`nix-badge: >5s button hold switches the evaluator backend live`).
+
+### Task 3.1d: contract `overlay` field — Nix overwrites arbitrary framebuffer bytes on top of any frame
+
+**Contract extension (backward-compatible):** a frame may carry, in addition to `bitmap`,
+an optional `overlay = [ packed (offset,byte) entries ]` (+ `overlayN = count`), packed
+exactly like a delta (2 entries/int, `E = offset*256+byte`, high 18 bits first). The
+runtime, AFTER decoding the main `bitmap` (full frame OR delta) into the framebuffer,
+applies the `overlay` entries on top (same apply as `decodeOledFrame`'s delta path) and
+ORs the touched columns into the returned `Dirty`. So a screen can overwrite arbitrary
+bytes on top of any frame -- keyframe, delta, or full frame -- from Nix. Absent `overlay`
+-> no-op (info screens/LED patterns unaffected).
+
+`badapple-live.nix` computes the overlay each frame from `scope.backend`/`scope.fps` via a
+small INLINED font (screens are self-contained; reuse the draw.nix/Spleen 5x8 glyph table
+shape) rendering `[<backend>] <fps>fps` into (offset,byte) entries at a fixed corner
+region. Corruption-safety: outside the corner the main delta accumulates cleanly; inside
+the corner the accumulator collects garbage from the main delta but the overlay re-stamps
+it every frame before flush.
+
+**Files:** `eval.zig` (`Frame` gains `overlay: []const i64 = &.{}`, `overlay_n: u32 = 0`;
+a shared `applyOverlay(bitmap, out, width, dirty) void` that applies + OR's into `dirty`),
+`fixeval.zig`/`nixeval.zig` (`applyFrame` reads `overlay`/`overlayN` into a SECOND reused
+`[]i64`), `nix-badge.zig` (call `applyOverlay` after `decodeOledFrame`), and a new
+`pkgs/badge/bling-content/overlay-font.nix` (5x8 digits + a few letters) inlined into
+`badapple-live.nix` + a `renderStats scope` helper.
+
+- [ ] **Step 1: Host test** in `eval.zig`: `applyOverlay` writes the overlay entries over a
+  framebuffer and marks exactly those columns dirty (mirror the delta decode test).
+- [ ] **Step 2:** `Frame` + `applyFrame` (both backends) read the optional `overlay`/`overlayN`
+  into a second `[]i64` buffer; `nix-badge.zig` applies it after the main decode.
+- [ ] **Step 3:** `overlay-font.nix` (open-licensed 5x8, or reuse Spleen 5x8 already vendored)
+  + `renderStats scope` in `badapple-live.nix` -> overlay entries from `scope.backend`/`scope.fps`.
+- [ ] **Step 4:** Deploy; confirm `[fix] 60fps` renders in the corner over clean Bad Apple, the
+  number updates each 3 s, and >5s hold flips it to `[nix] ...`.
+- [ ] **Step 5: Commit** (`nix-badge: contract overlay field -- Nix draws arbitrary bytes over any frame`).
+
 ### Task 3.2: RSS + backend-tagged window log
 
 **Files:**

@@ -20,6 +20,7 @@ const badapple = @import("badapple.zig");
 const bled = @import("bled.zig");
 const screens = @import("screens.zig");
 const fixeval = @import("fixeval.zig");
+const eval = @import("eval.zig");
 
 const Config = config.Config;
 const Rgb = ws2812.Rgb;
@@ -385,7 +386,7 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8) CmdError!void {
     // built in, always takes that path).
     var eval_pat: ?fixeval.Pattern = openEval(gpa, &cfg);
     defer if (eval_pat) |*p| p.deinit();
-    var sensors: fixeval.Fields = .{};
+    var sensors: eval.Fields = .{};
     var last_sensor_ms: u64 = 0;
     var cpu_meter = screens.CpuMeter.init();
 
@@ -533,7 +534,7 @@ fn openEval(gpa: std.mem.Allocator, cfg: *const Config) ?fixeval.Pattern {
 
 /// Snapshot the slow sensor inputs for the eval scope. Called on the sensor tick,
 /// not every frame; `t`/width/height/brightness are filled per frame by the caller.
-fn gatherSensors(cpu: *screens.CpuMeter) fixeval.Fields {
+fn gatherSensors(cpu: *screens.CpuMeter) eval.Fields {
     const bat = sysfs.readBattery();
     var l1: f64 = 0;
     var l5: f64 = 0;
@@ -1303,7 +1304,7 @@ fn cmdOled(gpa: std.mem.Allocator, args: []const []const u8) CmdError!void {
         const rendered = renderScreen(cur, &panel, &ctx, set_ptr, eval_fb) orelse blk: {
             active_screens = dropScreen(active_screens, cur.name, &screen_ix);
             std.log.warn("oled: eval screen '{s}' dropped after render fault", .{cur.name});
-            break :blk fixeval.OledFrame{ .next_ms = 100, .dirty = .{ .full = true } };
+            break :blk eval.OledFrame{ .next_ms = 100, .dirty = .{ .full = true } };
         };
         const t_eval1 = linux.monotonicNsec();
         // A delta frame flushes only its changed columns (a few dozen bytes); a full
@@ -1397,7 +1398,7 @@ fn renderScreen(
     ctx: *const screens.Context,
     set: ?*fixeval.ScreenSet,
     fb: ?[]u8,
-) ?fixeval.OledFrame {
+) ?eval.OledFrame {
     switch (screen.body) {
         .zig => |f| return .{ .next_ms = f(panel, ctx), .dirty = .{ .full = true } },
         .eval => |idx| {
@@ -1416,9 +1417,9 @@ fn renderScreen(
 /// frame (keyframe / computed screen), else only the changed column span of each
 /// dirty page (a few dozen bytes at 60 fps Bad Apple). Clamped to the panel's page
 /// count so a `Dirty` sized for 64 rows is safe on a 32-row panel.
-fn flushDirty(panel: *oled.Panel, dirty: fixeval.Dirty) !void {
+fn flushDirty(panel: *oled.Panel, dirty: eval.Dirty) !void {
     if (dirty.full) return panel.flush();
-    const pages = @min(panel.pages(), @as(u16, fixeval.Dirty.max_pages));
+    const pages = @min(panel.pages(), @as(u16, eval.Dirty.max_pages));
     // The changed bitmap holds 128 columns; cap the scan so colBit never shifts >= 128
     // (SSD1306 panels are <= 128 wide, so this only guards a misconfiguration).
     const width = @min(panel.width, @as(u16, 128));
@@ -1460,7 +1461,7 @@ inline fn colBit(c: u16) u128 {
 /// Build the per-frame `Fields` an eval screen's scope wants from the snapshot the
 /// loop already gathered. `t_ms`/width/height are per-frame; the sensor block is
 /// carried in `ctx`. Brightness is not applied on the 1-bit panel.
-fn evalFields(panel: *const oled.Panel, ctx: *const screens.Context) fixeval.Fields {
+fn evalFields(panel: *const oled.Panel, ctx: *const screens.Context) eval.Fields {
     return .{
         .t_ms = ctx.now_ms,
         .width = panel.width,
