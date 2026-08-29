@@ -1,0 +1,76 @@
+--- a/src/runtime/heap/collector.zig
++++ b/src/runtime/heap/collector.zig
+@@ -212,6 +212,19 @@
+     // lists; the discarded tails are recorded so the heap census keeps
+     // excluding them (they stay pinned but forever unfilled).
+     heap.discardObjectTLABs();
++    // Seed the remembered set for old→young edges that already exist across the
++    // just-established tracking boundary. Before arming, `collect_enabled` was
++    // false and every object was treated as young, so the write barrier
++    // (`gcRecordEdge`) recorded nothing. Arming reclassifies every existing
++    // object (id < track_from) as OLD while any object it references at id ≥
++    // track_from stays YOUNG — retroactively creating old→young edges the
++    // barrier never saw. Without seeding these, the next minor mark (which
++    // reaches the young generation only via roots + the remembered set) never
++    // traces those young referents and sweeps them out from under a live old
++    // parent (use-after-free; the detector reports it as a "missed edge"). Runs
++    // AFTER discardObjectTLABs so the reserved-but-unfilled TLAB tails (which
++    // hold uninitialized slot memory) are already recorded and can be skipped.
++    seedArmingRemset(heap);
+     // Detector build: pre-size the alloc bitmap to the whole object id
+     // space so the incremental per-fill bit-set never reallocs (which
+     // would free the array under a concurrent reader/setter at
+@@ -222,6 +235,53 @@
+     if (comptime gc_debug) if (!heap.collection.root_always) heap.gcPresizeAllocBits();
+ }
+ 
++/// Seed the remembered set with the old→young edges that already exist when
++/// the tracking boundary is drawn. Objects below `track_from` are now old; any
++/// they reference at or above it are young. The pre-arming write barrier was a
++/// no-op (nothing was tracked), so these edges are invisible to the first minor
++/// unless recorded here — the young referent is swept out from under a live old
++/// parent (use-after-free; the detector reports it as a "missed edge").
++///
++/// The ONLY mutable old→young edge that can predate tracking is a THUNK that
++/// was RESOLVED before arming: its `payload.result` now names a young value.
++/// (Immutable objects — attrs / lists / closures — capture their references at
++/// birth from same-generation values, and any post-arming mutation of a thunk
++/// slot goes through the live write barrier.) So we scan only for resolved
++/// thunks and record the one direct `result` reference. This deliberately reads
++/// no side-store range, so it never touches a reserved-but-unfilled slot or an
++/// unmapped values segment — walking the full object graph here is both
++/// unnecessary and unsafe at the arming safepoint (a thunk the triggering fiber
++/// is still forcing has an in-flux `target` union).
++///
++/// STW-only (the arming safepoint): the world is stopped and worker 0's
++/// remembered set is the collector's own, matching the shard the mark seeds
++/// from.
++fn seedArmingRemset(heap: *ObjectHeap) void {
++    const boundary = heap.collection.track_from;
++    var id: ObjectId = 0;
++    while (id < boundary) : (id += 1) {
++        // Skip reserved-but-unfilled TLAB tail slots (uninitialized Object
++        // memory), recorded by the preceding `discardObjectTLABs`.
++        if (idInDiscardedTail(heap, id)) continue;
++        const obj = heap.objects.get(id);
++        if (obj.* != .thunk) continue;
++        const t = &obj.thunk;
++        const state: future_mod.FutureState = @enumFromInt(future_mod.stateFieldRaw(t.future.state.load(.acquire)));
++        if (state != .resolved) continue; // only a terminal result is a live value edge
++        const ref = ObjectHeap.gcHeapId(t.payload.result) orelse continue;
++        if (!heap.gcIsYoung(ref)) continue; // old→old / non-heap: no barrier needed
++        heap.worker_locals[0].gc_remset.append(heap.allocator, id) catch
++            @panic("gc arming remembered-set seed exhausted");
++    }
++}
++
++fn idInDiscardedTail(heap: *const ObjectHeap, id: ObjectId) bool {
++    for (heap.discarded_object_tails.items) |r| {
++        if (id >= r[0] and id < r[1]) return true;
++    }
++    return false;
++}
++
+ /// The `armLineBytes` STW safepoint under the lazy policy: arm tracking and
+ /// re-arm the threshold to the full budget. No mark, no sweep, no token bump —
+ /// nothing allocated so far is tracked, so there is nothing to reclaim yet.

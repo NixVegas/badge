@@ -1,0 +1,269 @@
+test
++- run test 32 pass, 1 crash (33 total)
+error: 'fixeval.test.gc missed-edge repro: draw-heavy battery screen, frequent minor GC' terminated with signal KILL with stderr:
+       GC MISSED EDGE: thunk 149 -> unmarked young attrs 39783
+       GC MISSED EDGE: closure 173 -> unmarked young attrs 39783
+       GC MISSED EDGE: thunk 986 -> unmarked young merge_attrs 36592
+       GC MISSED EDGE: thunk 994 -> unmarked young attrs 39783
+       GC MISSED EDGE: thunk 1007 -> unmarked young merge_attrs 39737
+       GC MISSED EDGE: thunk 1021 -> unmarked young attrs 39739
+       GC MISSED EDGE: thunk 1022 -> unmarked young attrs 39747
+       GC MISSED EDGE: thunk 1023 -> unmarked young attrs 39755
+       thread 2408724 panic: gc: minor mark not closed — missed edge (see MISSED EDGE lines)
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/runtime/heap/collector.zig:456:20: 0x128de9e in verifyMinorClosure (test)
+           if (shown > 0) @panic("gc: minor mark not closed — missed edge (see MISSED EDGE lines)");
+                          ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/runtime/heap/collector.zig:471:23: 0x128a2d3 in minorCollect (test)
+           verifyMinorClosure(heap, mark_bits);
+                             ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/runtime/heap/collector.zig:258:43: 0x1109c5a in runCollect (test)
+           if (heap.collection.hook) |h| h.sample(h.ctx, collector_id);
+                                                 ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:283:26: 0x1115753 in forceValueImpl (test)
+           return forceThunkImpl(self, value, demand);
+                                ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:1062:44: 0x110b46c in evalThunkTarget (test)
+               .attr_access => access.getAttrValue(self, target.attr_access.base, target.attr_access.name),
+                                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:283:26: 0x122a0f8 in forceValueImpl (test)
+           return forceThunkImpl(self, value, demand);
+                                ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:772:28: 0x10d7042 in callValuePartial (test)
+           return runIsolatedFrame(self, ch, closure.chunk_id, ch.arity, closure.upvalues, closure.owner, true);
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins/lists.zig:619:70: 0x1205491 in builtinFoldlStrict (test)
+               acc = try vm_force.forceValue(self, try vm_closures.callValue(self, partial, item));
+                                                                            ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins.zig:85:49: 0x111bfa7 in applyBuiltin (test)
+               .foldlStrict => lists.builtinFoldlStrict(self, args[0], args[1], args[2]),
+                                                       ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/access.zig:66:36: 0x1229c1a in applyBuiltin (test)
+           return vm_builtins.applyBuiltin(self, builtin_id, args);
+                                          ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:1095:37: 0x110c0c4 in runBytecodeChunk (test)
+           return closures.runIsolatedFrame(self, ch, chunk_id, 0, upvalues, null, false);
+                                           ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:283:26: 0x122a0f8 in forceValueImpl (test)
+           return forceThunkImpl(self, value, demand);
+                                ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:772:28: 0x10d7042 in callValuePartial (test)
+           return runIsolatedFrame(self, ch, closure.chunk_id, ch.arity, closure.upvalues, closure.owner, true);
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins/lists.zig:619:70: 0x1205491 in builtinFoldlStrict (test)
+               acc = try vm_force.forceValue(self, try vm_closures.callValue(self, partial, item));
+                                                                            ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins.zig:85:49: 0x111bfa7 in applyBuiltin (test)
+               .foldlStrict => lists.builtinFoldlStrict(self, args[0], args[1], args[2]),
+                                                       ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/access.zig:66:36: 0x1229c1a in applyBuiltin (test)
+           return vm_builtins.applyBuiltin(self, builtin_id, args);
+                                          ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:1095:37: 0x110c0c4 in runBytecodeChunk (test)
+           return closures.runIsolatedFrame(self, ch, chunk_id, 0, upvalues, null, false);
+                                           ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:283:26: 0x122a0f8 in forceValueImpl (test)
+           return forceThunkImpl(self, value, demand);
+                                ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:772:28: 0x10d7042 in callValuePartial (test)
+           return runIsolatedFrame(self, ch, closure.chunk_id, ch.arity, closure.upvalues, closure.owner, true);
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins/lists.zig:619:70: 0x1205491 in builtinFoldlStrict (test)
+               acc = try vm_force.forceValue(self, try vm_closures.callValue(self, partial, item));
+                                                                            ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins.zig:85:49: 0x111bfa7 in applyBuiltin (test)
+               .foldlStrict => lists.builtinFoldlStrict(self, args[0], args[1], args[2]),
+                                                       ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/access.zig:66:36: 0x1229c1a in applyBuiltin (test)
+           return vm_builtins.applyBuiltin(self, builtin_id, args);
+                                          ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:1095:37: 0x110c0c4 in runBytecodeChunk (test)
+           return closures.runIsolatedFrame(self, ch, chunk_id, 0, upvalues, null, false);
+                                           ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:283:26: 0x122a0f8 in forceValueImpl (test)
+           return forceThunkImpl(self, value, demand);
+                                ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:772:28: 0x10d7042 in callValuePartial (test)
+           return runIsolatedFrame(self, ch, closure.chunk_id, ch.arity, closure.upvalues, closure.owner, true);
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins/lists.zig:619:70: 0x1205491 in builtinFoldlStrict (test)
+               acc = try vm_force.forceValue(self, try vm_closures.callValue(self, partial, item));
+                                                                            ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins.zig:85:49: 0x111bfa7 in applyBuiltin (test)
+               .foldlStrict => lists.builtinFoldlStrict(self, args[0], args[1], args[2]),
+                                                       ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/access.zig:66:36: 0x1229c1a in applyBuiltin (test)
+           return vm_builtins.applyBuiltin(self, builtin_id, args);
+                                          ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:736:32: 0x10d6982 in callValue (test)
+               return runIsolatedFrame(self, ch, closure.chunk_id, 1, closure.upvalues, closure.owner, true);
+                                      ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:708:28: 0x1229ce3 in doTailCallN (test)
+               acc = try callValue(self, acc, self.stack[base + i]);
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:1095:37: 0x110c0c4 in runBytecodeChunk (test)
+           return closures.runIsolatedFrame(self, ch, chunk_id, 0, upvalues, null, false);
+                                           ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:283:26: 0x122a0f8 in forceValueImpl (test)
+           return forceThunkImpl(self, value, demand);
+                                ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:772:28: 0x10d7042 in callValuePartial (test)
+           return runIsolatedFrame(self, ch, closure.chunk_id, ch.arity, closure.upvalues, closure.owner, true);
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins/lists.zig:619:70: 0x1205491 in builtinFoldlStrict (test)
+               acc = try vm_force.forceValue(self, try vm_closures.callValue(self, partial, item));
+                                                                            ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins.zig:85:49: 0x111bfa7 in applyBuiltin (test)
+               .foldlStrict => lists.builtinFoldlStrict(self, args[0], args[1], args[2]),
+                                                       ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/access.zig:66:36: 0x1229c1a in applyBuiltin (test)
+           return vm_builtins.applyBuiltin(self, builtin_id, args);
+                                          ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:772:28: 0x10d7042 in callValuePartial (test)
+           return runIsolatedFrame(self, ch, closure.chunk_id, ch.arity, closure.upvalues, closure.owner, true);
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:672:28: 0x122ac53 in doCallN (test)
+               acc = try callValue(self, acc, self.stack[base + i]);
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:1095:37: 0x110c0c4 in runBytecodeChunk (test)
+           return closures.runIsolatedFrame(self, ch, chunk_id, 0, upvalues, null, false);
+                                           ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:283:26: 0x123dd16 in forceValueImpl (test)
+           return forceThunkImpl(self, value, demand);
+                                ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:772:28: 0x10d7042 in callValuePartial (test)
+           return runIsolatedFrame(self, ch, closure.chunk_id, ch.arity, closure.upvalues, closure.owner, true);
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins/lists.zig:619:70: 0x1205491 in builtinFoldlStrict (test)
+               acc = try vm_force.forceValue(self, try vm_closures.callValue(self, partial, item));
+                                                                            ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins.zig:85:49: 0x111bfa7 in applyBuiltin (test)
+               .foldlStrict => lists.builtinFoldlStrict(self, args[0], args[1], args[2]),
+                                                       ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/access.zig:66:36: 0x1229c1a in applyBuiltin (test)
+           return vm_builtins.applyBuiltin(self, builtin_id, args);
+                                          ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:736:32: 0x10d6982 in callValue (test)
+               return runIsolatedFrame(self, ch, closure.chunk_id, 1, closure.upvalues, closure.owner, true);
+                                      ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:1052:46: 0x110b65c in evalThunkTarget (test)
+                       break :blk closures.callValue(self, ups[0], ups[1]);
+                                                    ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:283:26: 0x12107fc in forceValueImpl (test)
+           return forceThunkImpl(self, value, demand);
+                                ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/builtins.zig:71:39: 0x111b819 in applyBuiltin (test)
+               .elemAt => lists.builtinElemAt(self, args[0], args[1]),
+                                             ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/access.zig:66:36: 0x122ab7b in applyBuiltin (test)
+           return vm_builtins.applyBuiltin(self, builtin_id, args);
+                                          ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/run.zig:95:83: 0x121af0a in dispatch (test)
+           return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+                                                                                         ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:787:28: 0x121ae05 in runIsolatedFrame (test)
+           return run_mod.runUntil(self, stop_depth) catch |err| {
+                                  ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/closures.zig:736:32: 0x10d6982 in callValue (test)
+               return runIsolatedFrame(self, ch, closure.chunk_id, 1, closure.upvalues, closure.owner, true);
+                                      ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:1052:46: 0x110b65c in evalThunkTarget (test)
+                       break :blk closures.callValue(self, ups[0], ups[1]);
+                                                    ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/expr/vm/force.zig:283:26: 0x11070b7 in forceValueImpl (test)
+           return forceThunkImpl(self, value, demand);
+                                ^
+       /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched/src/base/fiber.zig:592:10: 0x134452e in trampoline (test)
+           entry(arg);
+                ^
+failed command: ./.zig-cache/o/1f6b693691920bd6691aead778d56c16/test --cache-dir=./.zig-cache --seed=0xc55525c --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 32/33 tests passed (1 crashed)
+test transitive failure
++- run test 32 pass, 1 crash (33 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/0318a006b9186b6bfc7d1506f4d42d18/build /nix/store/nkvldkrhcm1k7zn2xh4jp32ajxq8scay-zig-0.16.0/bin/zig /nix/store/nkvldkrhcm1k7zn2xh4jp32ajxq8scay-zig-0.16.0/lib/zig /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/nb-gc .zig-cache /tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/zigcache --seed 0xc55525c -Z5e44a52e14df4a76 test -Dfix-src=/tmp/claude-1000/-home-numinit-chipclanker/aa55da95-a814-4082-b8a5-9b29f1075fb5/scratchpad/fix-patched -Doptimize=ReleaseSafe

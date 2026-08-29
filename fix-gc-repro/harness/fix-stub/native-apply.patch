@@ -1,0 +1,40 @@
+diff --git a/src/expr/evaluator.zig b/src/expr/evaluator.zig
+index f51eab7e..cc990bb7 100644
+--- a/src/expr/evaluator.zig
++++ b/src/expr/evaluator.zig
+@@ -2078,6 +2078,35 @@ pub const Engine = struct {
+         return self.evaluateTop(source, self.sources.base_path, null, null);
+     }
+ 
++    /// Apply a function Value to an argument Value NATIVELY -- no source parse
++    /// or compile, so a lambda compiled once can be applied every frame without
++    /// minting a fresh chunk per call (chunks are permanent GC roots and are
++    /// never collected, so compile-per-frame leaks). `runWithVm` roots `func`,
++    /// `arg`, and the result across any collection the call triggers. Hold
++    /// `func` across calls with `gcSetExternalRoots` so it survives collections
++    /// between applications.
++    pub fn applyValue(self: *Engine, func: Value, arg: Value) !Value {
++        return self.runWithVm(vm_mod.closures.callValue, .{ func, arg });
++    }
++
++    /// Build an attrset Value from name->Value pairs. Names are interned; the
++    /// entries are sorted+deduped by `addAttrs`. Inline values (ints, bools)
++    /// need no rooting; only pass heap-object members from within an active
++    /// root scope. Lets a caller construct a small per-frame argument attrset
++    /// for `applyValue` without going through the source compiler.
++    pub fn makeAttrs(self: *Engine, pairs: []const ScopeBinding) !Value {
++        var inline_entries: [16]runtime.heap.AttrEntry = undefined;
++        const entries = if (pairs.len <= inline_entries.len)
++            inline_entries[0..pairs.len]
++        else
++            try self.allocator.alloc(runtime.heap.AttrEntry, pairs.len);
++        defer if (pairs.len > inline_entries.len) self.allocator.free(entries);
++        for (pairs, entries) |p, *e| {
++            e.* = .{ .name = try self.intern.intern(p.name), .value = p.value };
++        }
++        return Value.attrs(try self.heap.addAttrs(entries));
++    }
++
+     /// `evaluate`, attributing the top-level source to `source_path` — source
+     /// spans and the disasm file sidecar then carry the entry file's name, the
+     /// same way imported files do. Used by `fix disasm --eval`.

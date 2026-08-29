@@ -1,0 +1,237 @@
+diff --git a/src/expr/eval/gc_controller.zig b/src/expr/eval/gc_controller.zig
+index 6b8a3352..934ea614 100644
+--- a/src/expr/eval/gc_controller.zig
++++ b/src/expr/eval/gc_controller.zig
+@@ -138,7 +138,7 @@ pub fn collect(ev: Context, collector_id: u8) void {
+     };
+     if (ev.worker_count > 1) {
+         const marker_count = @min(@as(u32, ev.worker_count), ev.parallel_cap);
+-        tr.resetParallelMinor(ev.heap.counts().objects, marker_count) catch {
++        tr.resetParallelMinor(ev.heap.gcObjectFrontier(), marker_count) catch {
+             heap_collector.afterCollect(ev.heap, ev.heap.totalReservedBytes());
+             return;
+         };
+@@ -168,7 +168,7 @@ pub fn collect(ev: Context, collector_id: u8) void {
+                 ctx.tr.markRemsetSource(ctx.heap, source);
+             }
+         };
+-        tr.resetMinor(ev.heap.counts().objects) catch {
++        tr.resetMinor(ev.heap.gcObjectFrontier()) catch {
+             heap_collector.afterCollect(ev.heap, ev.heap.totalReservedBytes());
+             return;
+         };
+@@ -242,7 +242,7 @@ pub fn collectMajor(ev: Context, collector_id: u8) void {
+     };
+     if (ev.worker_count > 1) {
+         const marker_count = @min(@as(u32, ev.worker_count), ev.parallel_cap);
+-        tr.resetParallel(ev.heap.counts().objects, marker_count) catch {
++        tr.resetParallel(ev.heap.gcObjectFrontier(), marker_count) catch {
+             heap_collector.afterCollect(ev.heap, ev.heap.totalReservedBytes());
+             return;
+         };
+@@ -263,7 +263,7 @@ pub fn collectMajor(ev: Context, collector_id: u8) void {
+         ev.scheduler.gcCloseMark();
+         tr.sumStats();
+     } else {
+-        tr.resetMajor(ev.heap.counts().objects) catch {
++        tr.resetMajor(ev.heap.gcObjectFrontier()) catch {
+             heap_collector.afterCollect(ev.heap, ev.heap.totalReservedBytes());
+             return;
+         };
+diff --git a/src/runtime/gc.zig b/src/runtime/gc.zig
+index 59bf0e70..821d5ecd 100644
+--- a/src/runtime/gc.zig
++++ b/src/runtime/gc.zig
+@@ -1787,3 +1787,104 @@ test "gc policy and reports are isolated per heap" {
+     try std.testing.expectEqual(@as(u64, 1), liveReport(&left.collection.report).collections);
+     try std.testing.expectEqual(@as(u64, 0), liveReport(&right.collection.report).collections);
+ }
++
++// Drive one serial (worker_count<=1) minor exactly like gc_controller.collect's
++// w=1 branch, but sized to `frontier`: reset over it, seed the remembered set,
++// drain, verify the closure (the missed-edge detector), then sweep. Returns
++// freed count. Passing a frontier below a live young child id models the
++// undersized-bitmap bug (Layer 2): the mark silently drops and verify panics.
++fn repro_runMinorSized(heap: *ObjectHeap, tr: *Tracer, frontier: u32) !u64 {
++    try tr.resetMinor(frontier);
++    heap_collector.forEachRemsetSource(heap, RS{ .tr = tr, .heap = heap }, RS.cb);
++    tr.drainMinor(heap);
++    // gc_debug: panics "minor mark not closed" if a live young child is unmarked.
++    heap_collector.verifyMinorClosure(heap, tr.mark_bits);
++    const st = heap_collector.minorCollect(heap, tr.mark_bits);
++    heap_collector.remsetClear(heap);
++    return st.freed;
++}
++const RS = struct {
++    tr: *Tracer,
++    heap: *ObjectHeap,
++    fn cb(self: RS, source: ObjectId) void {
++        self.tr.markRemsetSource(self.heap, source);
++    }
++};
++
++test "gc: old->young closure-upvalue edge survives a minor (write-barrier path)" {
++    const allocator = std.testing.allocator;
++    var heap = try ObjectHeap.init(allocator, 1);
++    defer heap.deinit();
++    heap_collector.enableBudget(&heap, 64 << 20, false);
++
++    // Pre-arming closure with one upvalue slot. It is OLD after arming.
++    const closure_id = try heap.addClosure(0, &.{Value.int(0)});
++    heap_collector.armLazy(&heap);
++    try std.testing.expect(closure_id < heap.collection.track_from);
++
++    // Post-arming YOUNG child, referenced ONLY by mutating the OLD closure's
++    // upvalue slot — exactly what writebackUpvalue does in SOLO mode: the store
++    // into the slot plus the old→young write barrier.
++    const child = try heap.addList(&.{ Value.int(7), Value.int(8) });
++    try std.testing.expect(heap.gcIsYoung(child));
++    {
++        const c = try heap.getClosure(closure_id);
++        @constCast(c.upvalues)[0] = Value.list(child);
++    }
++    heap.gcRecordEdge(closure_id, Value.list(child));
++
++    var tr = Tracer.init(allocator);
++    defer tr.deinit();
++    _ = try repro_runMinorSized(&heap, &tr, heap.gcObjectFrontier());
++    try std.testing.expect(!heap.gcIsYoung(child)); // promoted, not swept
++    const c2 = try heap.getClosure(closure_id);
++    try std.testing.expect(c2.upvalues[0].bits == Value.list(child).bits);
++}
++
++test "gc: object-id frontier bounds every live young id (bitmap sizing)" {
++    // The frontier the GC sizes its mark/old bitmaps to MUST be >= every id it
++    // could hand out, or markObject/gcSetOld silently no-op past the bitmap end
++    // and a live young child is swept from under an old parent (use-after-free,
++    // caught by verifyMinorClosure as "minor mark not closed"). This asserts the
++    // invariant across the whole allocation surface: object store cursor, each
++    // worker's TLAB reserved tail, and every live young slot.
++    const allocator = std.testing.allocator;
++    var heap = try ObjectHeap.init(allocator, 2);
++    defer heap.deinit();
++    heap_collector.enableBudget(&heap, 64 << 20, false);
++
++    const saved = containers.worker_id.state();
++    defer containers.worker_id.set(saved.id, saved.is_worker);
++
++    // Bootstrap allocation on both workers, then arm.
++    containers.worker_id.set(0, saved.is_worker);
++    _ = try heap.addList(&.{Value.int(1)});
++    containers.worker_id.set(1, saved.is_worker);
++    _ = try heap.addList(&.{Value.int(2)});
++    heap_collector.armLazy(&heap);
++
++    // Young allocations on BOTH workers: each refills its own object TLAB from
++    // the shared store, so ids interleave and a worker's TLAB end can sit at
++    // the store cursor.
++    var max_young: u32 = 0;
++    var w: u8 = 0;
++    while (w < 2) : (w += 1) {
++        containers.worker_id.set(w, saved.is_worker);
++        var i: usize = 0;
++        while (i < 5000) : (i += 1) {
++            const id = try heap.addList(&.{ Value.int(@intCast(i)), Value.int(@intCast(w)) });
++            if (id > max_young) max_young = id;
++        }
++    }
++
++    const frontier = heap.gcObjectFrontier();
++    // Every id ever handed out is strictly below the frontier, so a bitmap of
++    // `frontier` bits has room for its mark/old bit.
++    try std.testing.expect(frontier > max_young);
++    try std.testing.expect(frontier >= heap.objects.count());
++    // And every worker's reserved TLAB tail is covered.
++    for (heap.worker_locals) |*l| {
++        if (l.object.end == 0) continue;
++        try std.testing.expect(l.object.end <= frontier);
++    }
++}
+diff --git a/src/runtime/heap.zig b/src/runtime/heap.zig
+index 2bd3fba1..aab2eb13 100644
+--- a/src/runtime/heap.zig
++++ b/src/runtime/heap.zig
+@@ -2010,6 +2010,31 @@ pub const ObjectHeap = struct {
+         _ = @atomicRmw(u64, &self.collection.old_bits[word], .Or, @as(u64, 1) << @intCast(id & 63), .monotonic);
+     }
+ 
++    /// The true object-id frontier: one past the highest id that has been (or
++    /// can still be) handed out. `objects.count()` is the FlatStore commit
++    /// cursor, advanced a whole chunk at a time under `write_mu`; individual
++    /// ids are then handed out lock-free from per-worker TLABs *within* an
++    /// already-committed chunk. The cursor therefore covers every reserved
++    /// chunk (hence every handed-out id) — but a TLAB whose reserved tail sits
++    /// exactly at the cursor makes `end == count()`. Taking the max over the
++    /// cursor and every worker's TLAB end yields a frontier that is guaranteed
++    /// `>=` every live id even if a future allocation path lets a TLAB run past
++    /// the observed cursor. GC bitmaps (mark/old) MUST be sized from this, not
++    /// from `count()` alone: a mark/promote of an id beyond the bitmap silently
++    /// no-ops (`testAndSet`/`gcSetOld` bounds-check to false), turning a live
++    /// young child into a swept use-after-free. STW only (reads TLAB state).
++    pub fn gcObjectFrontier(self: *const ObjectHeap) u32 {
++        var frontier = self.objects.count();
++        for (self.worker_locals) |*l| {
++            // A zero-cap TLAB (never refilled, or discarded at arming) has
++            // end == 0 and contributes nothing.
++            if (l.object.end == 0) continue;
++            const tlab_frontier = ObjectStore.globalIdOf(l.object.segment, l.object.end);
++            if (tlab_frontier > frontier) frontier = tlab_frontier;
++        }
++        return frontier;
++    }
++
+     /// Grow the generation bitmap to cover `[0, count)` (new words zeroed ⇒
+     /// young). STW only, so plain (non-atomic).
+     pub fn gcGrowOldBits(self: *ObjectHeap, count: u32) void {
+@@ -2072,7 +2097,7 @@ pub const ObjectHeap = struct {
+     /// restarts empty: no live young objects, hence no old→young edges, hence
+     /// the caller can drop the remembered set. STW-only.
+     pub fn gcMajorReconcile(self: *ObjectHeap, mark_bits: []const u64) void {
+-        const n = self.objects.count();
++        const n = self.gcObjectFrontier();
+         self.gcGrowOldBits(n);
+         // Clear the whole generation bitmap first, THEN re-tenure survivors: a
+         // just-freed OLD slot must lose its old bit, or when the allocator reuses
+diff --git a/src/runtime/heap/collector.zig b/src/runtime/heap/collector.zig
+index 5305f408..f77d3ab4 100644
+--- a/src/runtime/heap/collector.zig
++++ b/src/runtime/heap/collector.zig
+@@ -357,7 +357,10 @@ pub fn verifyMinorClosure(heap: *ObjectHeap, mark_bits: []const u64) void {
+     var shown: u32 = 0;
+     // Include pinned objects because they may point into the young generation.
+     var id: ObjectId = 0;
+-    const n = heap.objects.count();
++    // The handed-out-id frontier, not the commit cursor: a live young child can
++    // sit at an id below the cursor but above another store's lagging view —
++    // the frontier bounds every id the sweep could touch.
++    const n = heap.gcObjectFrontier();
+     const pinned_floor = if (heap.collection.root_always)
+         heap.collection.bootstrap_end
+     else
+@@ -387,7 +390,7 @@ pub fn verifyMinorClosure(heap: *ObjectHeap, mark_bits: []const u64) void {
+ /// place; unmarked objects return their slots and owned ranges to free lists.
+ pub fn minorCollect(heap: *ObjectHeap, mark_bits: []const u64) ObjectHeap.MinorStats {
+     var st: ObjectHeap.MinorStats = .{};
+-    heap.gcGrowOldBits(heap.objects.count());
++    heap.gcGrowOldBits(heap.gcObjectFrontier());
+     verifyMinorClosure(heap, mark_bits);
+     // Return each dead allocation to its originating worker's shard. This
+     // keeps mutator reuse local and lock-free even though the coordinator is
+@@ -437,7 +440,7 @@ fn sweepYoungListInto(heap: *ObjectHeap, src_ids: []const ObjectId, dst: *HeapLo
+ 
+ /// Arm the young-list work queue while the object count is quiescent.
+ pub fn beginMinorSweep(heap: *ObjectHeap, worker_count: u8) void {
+-    heap.gcGrowOldBits(heap.objects.count());
++    heap.gcGrowOldBits(heap.gcObjectFrontier());
+     heap.collection.mark_slot.store(0, .release);
+     heap.collection.minor_sweep_count = worker_count;
+     heap.collection.minor_sweep_next.store(0, .monotonic);
+@@ -497,7 +500,7 @@ pub fn finishMinorSweep(heap: *ObjectHeap) ObjectHeap.MinorStats {
+ pub fn verifyMarkClosed(heap: *ObjectHeap, mark_bits: []const u64) void {
+     var shown: u32 = 0;
+     var id: ObjectId = 0;
+-    const n = heap.objects.count();
++    const n = heap.gcObjectFrontier();
+     while (id < n and shown < 8) : (id += 1) {
+         if (!bitSet(heap.collection.alloc_bits, id) or !bitSet(mark_bits, id)) continue;
+         var sink = ClosureSink{ .heap = heap, .mark_bits = mark_bits, .parent = id, .shown = &shown, .check = .full };
