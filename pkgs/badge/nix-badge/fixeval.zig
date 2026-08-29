@@ -86,20 +86,24 @@ pub const FixBackend = struct {
     /// at once. Skips (logs once) a path that cannot be read / does not compile / is not a
     /// function; the rest still load. Returns null when eval is unavailable or none loaded.
     ///
-    /// `io` is the file-IO backend fed to the Engine so a screen's runtime `import`/
-    /// `builtins.readFile` of an on-disk path (e.g. /etc/nixbadge/lib/font.nix) works; the
-    /// vendored fetch-less stub still errors on network fetchers, so this is LOCAL reads only.
-    pub fn open(gpa: std.mem.Allocator, io: std.Io, paths: []const []const u8) ?FixBackend {
+    /// `opts.io` is the file-IO backend fed to the Engine so a screen's runtime `import`/
+    /// `builtins.readFile` of an on-disk path works; the vendored fetch-less stub still errors
+    /// on network fetchers, so this is LOCAL reads only. `opts.nix_path`, when set, registers
+    /// the `<name>` search path (e.g. "nixbadge=/etc/nixbadge") so content can
+    /// `import <nixbadge/lib/font.nix>` regardless of where the screen file lives.
+    pub fn open(gpa: std.mem.Allocator, opts: eval.Opts, paths: []const []const u8) ?FixBackend {
         if (comptime !have_fix) {
             std.log.info("fix: eval requested but unavailable on this arch", .{});
             return null;
         }
         if (paths.len == 0) return null;
 
-        var ev = Engine.init(gpa, .{ .worker_count = 0, .compile_cache = .off, .io = io }) catch |err| {
+        var ev = Engine.init(gpa, .{ .worker_count = 0, .compile_cache = .off, .io = opts.io }) catch |err| {
             std.log.err("fix: eval engine init failed: {s}", .{@errorName(err)});
             return null;
         };
+        if (opts.nix_path) |np| ev.setNixPath(np) catch |err|
+            std.log.warn("fix: setNixPath('{s}') failed: {s}; <name> imports unavailable", .{ np, @errorName(err) });
 
         var lambdas = gpa.alloc(Value, paths.len) catch {
             ev.deinit();
@@ -383,7 +387,7 @@ test "FixBackend.applyFrame extracts bitmap ints, nextMs, delta, and overlay" {
     ;
     const path = try writeTmpScreen(&abuf, dir, "s.nix", src);
 
-    var be = FixBackend.open(gpa, std.testing.io,&.{path}) orelse return error.OpenFailed;
+    var be = FixBackend.open(gpa, .{ .io = std.testing.io },&.{path}) orelse return error.OpenFailed;
     defer be.deinit();
     try std.testing.expectEqual(@as(usize, 1), be.count());
     try std.testing.expectEqualStrings("s", be.name(0));
@@ -416,10 +420,34 @@ test "FixBackend runtime import of an absolute path works with io wired" {
     const src = try std.fmt.allocPrint(gpa, "scope: {{ bitmap = [ (import {s}).v ]; nextMs = 10; }}", .{lib});
     const screen = try writeTmpScreen(&sbuf, dir, "imp.nix", src);
 
-    var be = FixBackend.open(gpa, std.testing.io, &.{screen}) orelse return error.OpenFailed;
+    var be = FixBackend.open(gpa, .{ .io = std.testing.io }, &.{screen}) orelse return error.OpenFailed;
     defer be.deinit();
     const f = try be.applyFrame(0, .{});
     try std.testing.expectEqual(@as(i64, 7), f.bitmap[0]);
+}
+
+// A screen's `import <nixbadge/lib.nix>` resolves through the search path set from
+// opts.nix_path -- content is location-independent (this is what /etc/nixbadge/lib uses).
+test "FixBackend resolves <nixbadge/...> search-path imports" {
+    if (comptime !have_fix) return;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+
+    var dbuf: [256]u8 = undefined;
+    const dir = try tmpScreenDir(&dbuf);
+    var lbuf: [512]u8 = undefined;
+    var sbuf: [512]u8 = undefined;
+    // <nixbadge> -> `dir`; the screen imports <nixbadge/val.nix>.
+    _ = try writeTmpScreen(&lbuf, dir, "val.nix", "{ v = 9; }");
+    const screen = try writeTmpScreen(&sbuf, dir, "s.nix", "scope: { bitmap = [ (import <nixbadge/val.nix>).v ]; nextMs = 10; }");
+
+    var npbuf: [320]u8 = undefined;
+    const np = try std.fmt.bufPrint(&npbuf, "nixbadge={s}", .{dir});
+    var be = FixBackend.open(gpa, .{ .io = std.testing.io, .nix_path = np }, &.{screen}) orelse return error.OpenFailed;
+    defer be.deinit();
+    const f = try be.applyFrame(0, .{});
+    try std.testing.expectEqual(@as(i64, 9), f.bitmap[0]);
 }
 
 // applyFrame sees scope.backend (the backend id) + scope.fps: a screen that echoes them
@@ -436,7 +464,7 @@ test "FixBackend.applyFrame exposes scope.backend + scope.fps" {
     const src = "scope: { bitmap = [ scope.backend scope.fps ]; nextMs = 10; }";
     const path = try writeTmpScreen(&abuf, dir, "bf.nix", src);
 
-    var be = FixBackend.open(gpa, std.testing.io,&.{path}) orelse return error.OpenFailed;
+    var be = FixBackend.open(gpa, .{ .io = std.testing.io },&.{path}) orelse return error.OpenFailed;
     defer be.deinit();
     const f = try be.applyFrame(0, .{ .backend_id = 1, .fps = 59 });
     try std.testing.expectEqual(@as(i64, 1), f.bitmap[0]);
@@ -460,11 +488,11 @@ test "FixBackend skips a bad screen but loads the rest" {
     const ok = try writeTmpScreen(&okbuf, dir, "ok.nix", "scope: { bitmap = [ 7 ]; nextMs = 33; }");
 
     const paths: []const []const u8 = &.{ ok, "/nonexistent/nope.nix" };
-    var be = FixBackend.open(gpa, std.testing.io,paths) orelse return error.OpenFailed;
+    var be = FixBackend.open(gpa, .{ .io = std.testing.io },paths) orelse return error.OpenFailed;
     defer be.deinit();
     try std.testing.expectEqual(@as(usize, 1), be.count());
     try std.testing.expectEqualStrings("ok", be.name(0));
 
-    try std.testing.expect(FixBackend.open(gpa, std.testing.io,&.{"/nonexistent/a.nix"}) == null);
-    try std.testing.expect(FixBackend.open(gpa, std.testing.io,&.{}) == null);
+    try std.testing.expect(FixBackend.open(gpa, .{ .io = std.testing.io },&.{"/nonexistent/a.nix"}) == null);
+    try std.testing.expect(FixBackend.open(gpa, .{ .io = std.testing.io },&.{}) == null);
 }

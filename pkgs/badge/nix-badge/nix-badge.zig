@@ -121,7 +121,7 @@ const usage_text =
     \\  nix-badge bling show
     \\  nix-badge core <arm|riscv|status>
     \\  nix-badge power
-    \\  nix-badge oled [--badapple PATH] [--eval-screen PATH ...] [--eval-dir DIR] [--oled-width W] [--oled-height H] [--backend fix|nix]
+    \\  nix-badge oled [--badapple PATH] [--eval-screen PATH ...] [--eval-dir DIR] [--content-root DIR] [--oled-width W] [--oled-height H] [--backend fix|nix]
     \\  nix-badge bootswap
     \\  nix-badge mmio <read ADDR | write ADDR VALUE>
     \\  nix-badge fix-selftest              (smoke-test the embedded fix evaluator)
@@ -552,9 +552,15 @@ const sensor_interval_ms: u64 = 1000;
 /// Open the configured eval pattern, or null when none is set or eval is not
 /// built in (riscv). A bad pattern logs inside `open` and also yields null, so
 /// the painter transparently falls back to the blob/computed source.
+// The badge content root + its `<nixbadge>` search-path entry (so LED/OLED content can
+// `import <nixbadge/lib/...>`). oled takes an optional `--content-root` override; the LED
+// painter uses the fixed default.
+const default_content_root = "/etc/nixbadge";
+const default_nix_path = "nixbadge=" ++ default_content_root;
+
 fn openEval(gpa: std.mem.Allocator, cfg: *const Config, kind: backend.Kind, io: std.Io) ?backend.Pattern {
     if (cfg.eval().len == 0) return null;
-    return backend.Pattern.open(gpa, io, kind, cfg.eval());
+    return backend.Pattern.open(gpa, .{ .io = io, .nix_path = default_nix_path }, kind, cfg.eval());
 }
 
 /// Snapshot the slow sensor inputs for the eval scope. Called on the sensor tick,
@@ -1175,12 +1181,16 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     // The starting evaluator backend (default fix). A >5 s button hold flips it live; the
     // choice persists across restarts (see restoreBackend/persistBackend).
     var backend_kind: backend.Kind = .fix;
+    // Root for the `<nixbadge>` search path, so a screen can `import <nixbadge/lib/font.nix>`.
+    var content_root: []const u8 = default_content_root;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (optArg(args, &i, "--badapple")) |v| {
             badapple_path = v;
         } else if (optArg(args, &i, "--backend")) |v| {
             backend_kind = parseBackendKind(v);
+        } else if (optArg(args, &i, "--content-root")) |v| {
+            content_root = v;
         } else if (optArg(args, &i, "--eval-dir")) |v| {
             // Drop-in dir-based content: scan v for *.nix, sorted by name (NN- prefix =
             // cycle order). Appends to any explicit --eval-screen already collected.
@@ -1264,12 +1274,19 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     // compile is skipped but the rest load. When at least one loads we get a set
     // and a shared framebuffer; otherwise `set` is null and we use the Zig
     // fallback registry below (also the riscv path, where eval is not built in).
+    // Shared eval options: the file-IO backend (screen `import`/`readFile`) + the
+    // `<nixbadge>` search path so a screen can `import <nixbadge/lib/font.nix>`. Held at
+    // function scope so the live backend-switch reopen below reuses it.
+    var nix_path_buf: [512]u8 = undefined;
+    const nix_path = std.fmt.bufPrint(&nix_path_buf, "nixbadge={s}", .{content_root}) catch "nixbadge=/etc/nixbadge";
+    const eval_opts = eval.Opts{ .io = io, .nix_path = nix_path };
+
     var eval_set: ?backend.ScreenSet = null;
     var eval_fb: ?[]u8 = null;
     if (eval_screen_count > 0) {
         // A live backend switch persists its choice; honour it over the ExecStart default.
         backend_kind = restoreBackend(backend_kind);
-        if (backend.ScreenSet.open(gpa, io, backend_kind, eval_screen_paths[0..eval_screen_count])) |s| {
+        if (backend.ScreenSet.open(gpa, eval_opts, backend_kind, eval_screen_paths[0..eval_screen_count])) |s| {
             const fb = gpa.alloc(u8, @as(usize, panel.width) * (panel.height / 8)) catch blk: {
                 std.log.warn("oled: cannot alloc eval framebuffer; using computed", .{});
                 break :blk null;
@@ -1448,8 +1465,8 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
                     backendName(cur_kind), backendName(new_kind), eval_screen_count,
                 });
                 s.deinit();
-                eval_set = backend.ScreenSet.open(gpa, io, new_kind, eval_screen_paths[0..eval_screen_count]) orelse
-                    backend.ScreenSet.open(gpa, io, cur_kind, eval_screen_paths[0..eval_screen_count]);
+                eval_set = backend.ScreenSet.open(gpa, eval_opts, new_kind, eval_screen_paths[0..eval_screen_count]) orelse
+                    backend.ScreenSet.open(gpa, eval_opts, cur_kind, eval_screen_paths[0..eval_screen_count]);
                 if (eval_set) |*ns| {
                     backend_kind = ns.kind();
                     persistBackend(backend_kind);

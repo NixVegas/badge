@@ -140,11 +140,12 @@ pub const NixBackend = struct {
     /// ONCE and keep it rooted. Skips (logs once) a path that cannot be read / does not
     /// compile / is not a function. Returns null when nix is not linked or none loaded.
     ///
-    /// `io` is accepted for signature parity with FixBackend but ignored: upstream Nix does
-    /// its own filesystem `import`/`readFile` natively (no injected io), so a screen's
-    /// absolute-path import resolves without it.
-    pub fn open(gpa: std.mem.Allocator, io: std.Io, paths: []const []const u8) ?NixBackend {
-        _ = io;
+    /// `opts.io` is accepted for signature parity with FixBackend but ignored: upstream Nix
+    /// does its own filesystem `import`/`readFile` natively. `opts.nix_path` (e.g.
+    /// "nixbadge=/etc/nixbadge") becomes the eval state's `lookupPath`, so content can
+    /// `import <nixbadge/lib/font.nix>` the same as under fix.
+    pub fn open(gpa: std.mem.Allocator, opts: eval.Opts, paths: []const []const u8) ?NixBackend {
+        _ = opts.io;
         if (comptime !have_nix) {
             std.log.info("nix: eval requested but not built on this arch", .{});
             return null;
@@ -163,7 +164,17 @@ pub const NixBackend = struct {
             c.nix_c_context_free(ctx);
             return null;
         }
-        const state = c.nix_state_create(ctx, null, store);
+        // lookupPath = a null-terminated array of "name=path" entries (nix copies them, so a
+        // stack array + a transient dupeZ is fine). One entry: opts.nix_path.
+        var lp_storage: [2][*c]const u8 = .{ null, null };
+        var np_z: ?[:0]u8 = null;
+        if (opts.nix_path) |np| {
+            np_z = gpa.dupeZ(u8, np) catch null;
+            if (np_z) |z| lp_storage[0] = z.ptr;
+        }
+        defer if (np_z) |z| gpa.free(z);
+        const lookup: [*c][*c]const u8 = if (np_z != null) &lp_storage else null;
+        const state = c.nix_state_create(ctx, lookup, store);
         if (state == null) {
             std.log.err("nix: nix_state_create failed", .{});
             c.nix_store_free(store);

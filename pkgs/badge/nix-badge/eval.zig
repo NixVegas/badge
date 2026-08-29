@@ -16,6 +16,17 @@ pub const Rgb = ws2812.Rgb;
 /// id, `backend_id` below) so it can label the active evaluator without string interning.
 pub const BackendKind = enum(u8) { fix = 0, nix = 1 };
 
+/// Options common to both evaluator backends' `open`.
+pub const Opts = struct {
+    /// The file-IO backend. fix reads a screen's runtime `import`/`readFile` through it
+    /// (the fetch-less stub still blocks network fetchers); nix ignores it (native IO).
+    io: std.Io,
+    /// A NIX_PATH-style search path for `<name>` imports, e.g. "nixbadge=/etc/nixbadge", so
+    /// content can `import <nixbadge/lib/font.nix>` independent of its own location. null
+    /// leaves the evaluator default. fix: Engine.setNixPath; nix: nix_state_create lookupPath.
+    nix_path: ?[]const u8 = null,
+};
+
 /// The per-frame inputs fed to a content function's `scope`. Backend-agnostic; the
 /// backend turns these into its own attrset (fix `makeAttrs`, nix `BindingsBuilder`).
 pub const Fields = struct {
