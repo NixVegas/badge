@@ -124,11 +124,13 @@ pub const FixBackend = struct {
             gpa.destroy(ev);
             return null;
         };
-        // [#34] fix's young-gated MINOR collection has a remembered-set gap (a live young child
-        // reachable only from an old/pinned parent gets swept -> "missed edge" panic). Force
-        // MAJOR-only collection: a major rebuilds old/young from the true reachable set and
-        // cannot sweep a live object. Sound + memory-bounded (see gc-always-major.patch).
-        ev.setAlwaysMajor(true);
+        // Stock collection policy (minors + promotion-gated majors). The earlier
+        // setAlwaysMajor(true) here was a workaround for the #34 "missed edge" panics,
+        // which the Engine-move aliasing (see EnginePtr above) fully explains — and it
+        // never actually took effect anyway (written to the live Engine copy, read by
+        // the collector from the stale one). With the aliasing fixed, stock minors are
+        // correct (host suite passes with fix's ReleaseSafe missed-edge detector ON)
+        // and cheap (O(young) vs a major's O(live heap) per collect).
         // [#28] Cap the GC collection line. fix's automatic line is clamp(½·MemTotal, 256MB,
         // 32GB) -> on the 351MB badge it clamps to the 256MB FLOOR, so the heap grows into
         // swap before it ever collects (the "getting slow" symptom). An explicit budget makes

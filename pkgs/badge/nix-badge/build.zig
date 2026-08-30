@@ -55,7 +55,20 @@ pub fn build(b: *std.Build) void {
     root.addImport("build_options", nb_build_options_mod);
 
     if (fix_src) |src| {
-        const graph = fixExprGraph(b, src, target, optimize);
+        // The fix graph builds ReleaseFast even when nix-badge itself is ReleaseSafe:
+        // fix's `gc_debug` (= ReleaseSafe, heap.zig:28) enables its use-after-free
+        // detector, which DELIBERATELY never reuses freed OBJECT slots ("Detector
+        // leaves freed slots unused so use-after-free is caught",
+        // beginObjectSlot's `!gc_debug` reuse gate). Under the badge's
+        // compile-once/apply-per-frame loop that is ~160 leaked Object headers per
+        // frame -> reserved bytes grow ~4 MB/s and outgrow zram in minutes
+        // (host-measured: objects.count 16K -> 1.27M over 7900 applies in
+        // ReleaseSafe; FLAT in ReleaseFast). GC correctness for this embedding was
+        // separately witnessed with the detector ON (ReleaseSafe host suite, zero
+        // panics) after the Engine-move aliasing fix, so production drops the
+        // detector. nix-badge's own code keeps `optimize` (ReleaseSafe safety).
+        const fix_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .Debug else .ReleaseFast;
+        const graph = fixExprGraph(b, src, target, fix_optimize);
         root.addImport("expr", graph.expr);
         root.addImport("runtime", graph.runtime);
     }

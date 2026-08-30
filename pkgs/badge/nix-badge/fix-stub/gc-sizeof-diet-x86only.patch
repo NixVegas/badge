@@ -1,0 +1,30 @@
+fix: scope the Object-diet size asserts to x86_64.
+
+heap.zig's comptime block asserts sizeOf(Thunk)==40 / sizeOf(Object)==48 in
+ReleaseFast as a guard against fields creeping back in after the Object diet.
+The expected sizes hold on x86_64 (upstream's build arch) but NOT on
+aarch64-linux-musl, where alignment differs -- so an aarch64 ReleaseFast build
+(the badge's production fix graph; ReleaseFast is REQUIRED there because fix's
+gc_debug=ReleaseSafe detector deliberately never reuses freed object slots,
+leaking ~160 headers/frame under compile-once/apply-per-frame) fails to
+compile on this assert alone. Scope the diet guard to the arch it was written
+for; it keeps its full value on x86_64 CI while unblocking aarch64.
+
+--- a/src/runtime/heap.zig	2026-08-30 12:00:00.000000000 -0700
++++ b/src/runtime/heap.zig	2026-08-30 12:00:00.000000000 -0700
+@@ -163,10 +163,13 @@
+ comptime {
+     // The Object diet's whole point: Thunk 48->40 (flag word folded into the
+     // Future state word, effect_group in the side table) => Object 56->48.
+     // ReleaseFast only - Debug carries union safety tags, prof builds carry
+-    // census fields. If this fires, a field crept back in.
+-    if (@import("builtin").mode == .ReleaseFast and !@import("build_options").prof_main) {
++    // census fields. If this fires, a field crept back in. x86_64 only: the
++    // dieted sizes depend on that arch's alignment (aarch64 differs).
++    if (@import("builtin").mode == .ReleaseFast and !@import("build_options").prof_main and
++        @import("builtin").cpu.arch == .x86_64)
++    {
+         std.debug.assert(@sizeOf(Thunk) == 40);
+         std.debug.assert(@sizeOf(Object) == 48);
+     }
+ }
