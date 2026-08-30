@@ -14,14 +14,18 @@
 let
   data = import <nixbadge/lib/spleen-5x8-font-data.nix>; # { width=5; height=8; glyphs; }
 
-  # Codepoints for exactly the characters a HUD emits (digits, brackets, space, and the
-  # letters in fix/nix/fps). Anything else -> space (blank cell), never an eval error.
-  cp = {
-    " " = 32; "[" = 91; "]" = 93; "%" = 37; "." = 46; ":" = 58;
-    "0" = 48; "1" = 49; "2" = 50; "3" = 51; "4" = 52;
-    "5" = 53; "6" = 54; "7" = 55; "8" = 56; "9" = 57;
-    "f" = 102; "i" = 105; "x" = 120; "n" = 110; "p" = 112; "s" = 115;
-  };
+  # Codepoints for the full printable-ASCII range (the Spleen table carries all of
+  # them), built from a string laid out in codepoint order: char i is codepoint
+  # 32+i. A hand-picked HUD-only subset lived here once and silently blanked every
+  # other character (an effect's "WARM 3/32" overlay rendered as just the digits).
+  # Anything outside the range still falls back to space, never an eval error.
+  ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+  cp = builtins.listToAttrs (
+    builtins.genList (i: {
+      name = builtins.substring i 1 ascii;
+      value = 32 + i;
+    }) (builtins.stringLength ascii)
+  );
 
   glyphRows = c: data.glyphs.${toString (cp.${c} or 32)} or data.glyphs."32";
   chars = s: builtins.genList (i: builtins.substring i 1 s) (builtins.stringLength s);
