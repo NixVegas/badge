@@ -275,14 +275,24 @@ pub const FixBackend = struct {
         };
     }
 
-    /// Reclaim young Value garbage (the scope, result attrset, and bitmap/overlay lists of
-    /// the frames since the last collect). MUST be called only AFTER the caller has decoded
-    /// the frame (the ints are already extracted in `applyFrame`, so the sweep is safe).
-    /// The holder calls this on `eval.collect_every` cadence. No-op for the nix backend.
+    /// Reclaim Value garbage (the scope, result attrset, and bitmap/overlay lists of the
+    /// frames since the last collect). MUST be called only AFTER the caller has decoded the
+    /// frame (the ints are already extracted in `applyFrame`, so the sweep is safe). The
+    /// holder calls this on `eval.collect_every` cadence. No-op for the nix backend.
+    ///
+    /// Uses collectMAJORNow, not collectNow: fix's generational minor collection has an
+    /// unsound write-barrier fast-path (it drops young->young edges, heap.zig gcRecordEdge)
+    /// that misses an old->young edge when the parent tenures in the same cycle -> a live
+    /// young child is swept -> the "minor mark not closed / missed edge" panic OR a
+    /// death-spiral (per-frame eval climbs to tens of seconds) on draw-heavy screens (#34).
+    /// A MAJOR collection does a full non-gated mark from all roots + re-tenures from the
+    /// true reachable set (heap.zig gcMajorReconcile), so it does not depend on the
+    /// incomplete remembered set and cannot sweep a live object. Slightly more work per
+    /// collect, but it runs only every 64 frames and it is what unblocks the info screens.
     pub fn collect(self: *FixBackend) void {
         if (comptime !have_fix) return;
         const c0 = linux.monotonicNsec();
-        _ = self.ev.collectNow();
+        _ = self.ev.collectMajorNow();
         collect_ns_accum += linux.monotonicNsec() - c0;
     }
 };

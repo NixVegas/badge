@@ -142,7 +142,12 @@ int main(int argc, char **argv)
 	printf("# Keyframe: full frame, %zu ints (4 page-bytes/int LE). Delta: n change\n",
 		words);
 	printf("# entries, 2/int, E = offset*256+byte, int = E0*262144 + E1.\n");
-	printf("scope:\n");
+	// `frames`/`nframes`/`mod` are scope-INDEPENDENT constants, so they go in an OUTER
+	// let, BEFORE `scope:` -- the lambda then CAPTURES them and they are evaluated once.
+	// Inside the per-frame lambda body they would be a per-application `let`, so nix would
+	// rebuild the entire 13140-element list literal on EVERY frame (~26k allocations/frame,
+	// GC death spiral); fix compiles it as a chunk constant either way, so this is inert for
+	// fix and the fix for nix.
 	printf("let\n");
 	printf("  frames = [\n");
 
@@ -234,20 +239,19 @@ int main(int argc, char **argv)
 	printf("  nframes = %lu;\n", frames);
 	printf("  # a mod b (Nix has no builtins.mod; integer division floors for >= 0).\n");
 	printf("  mod = a: b: a - (a / b) * b;\n");
-	// A [backend] fps HUD stamped over EVERY frame (keyframe or delta) via the
-	// overlay contract (eval.zig applyOverlay), using the shared importable font
-	// lib. scope.backend is 0=fix / 1=nix; scope.fps is the loop's measured rate.
-	//
-	// The HUD is gated to the NIX backend (scope.backend == 1). Rendering the font
-	// in Nix every frame is ~25-40 ms of eval (the <nixbadge/lib/font.nix> import +
-	// renderText allocation); on fix that per-frame young-allocation trips the GC
-	// missed-edge bug (#34) into a death spiral (eval climbs to tens of seconds).
-	// Lazy eval means `hud` is NEVER forced when scope.backend != 1, so fix does
-	// zero HUD work and Bad Apple stays at its pre-HUD 60 fps; fix is still identified
-	// by the journal [fix] tag. nix (no such GC bug) renders the on-panel HUD.
-	printf("  # [backend] fps HUD via the overlay contract + <nixbadge/lib/font.nix>,\n");
-	printf("  # gated to nix: rendering the font per-frame in Nix is too costly for fix (#34).\n");
-	printf("  # Placed on the BOTTOM page (lower-left), fps zero-padded to 2 digits (01fps).\n");
+	// Close the outer (constant) let and open the per-frame lambda. The scope-DEPENDENT
+	// bindings (the HUD + the frame lookup) live in the INNER let, after `scope:`.
+	printf("in\n");
+	printf("scope:\n");
+	printf("let\n");
+	// A [backend] fps HUD stamped over EVERY frame (keyframe or delta) via the overlay
+	// contract (eval.zig applyOverlay), using the shared importable font lib. scope.backend
+	// is 0=fix / 1=nix; scope.fps is the loop's measured rate. Gated to the NIX backend
+	// (scope.backend == 1): rendering the font per-frame in Nix is ~25-40 ms of eval, and on
+	// fix that young-allocation trips the GC missed-edge bug (#34). Lazy eval means `hud` is
+	// never forced when scope.backend != 1, so fix does zero HUD work (Bad Apple stays 60fps;
+	// fix is still identified by the journal [fix] tag). Bottom page (lower-left), fps
+	// zero-padded to 2 digits (01fps).
 	printf("  font = import <nixbadge/lib/font.nix>;\n");
 	printf("  pad2 = n: if n < 10 then \"0\" + toString n else toString n;\n");
 	printf("  hud = font.renderText {\n");
@@ -257,11 +261,9 @@ int main(int argc, char **argv)
 	printf("    width = scope.width;\n");
 	printf("  };\n");
 	printf("  hudOn = scope.backend == 1;\n");
-	printf("in\n");
-	// frameIndex is a monotonic per-screen play counter (see badapple-delta.md
-	// "Playback model"); it wraps so the clip loops and resets to 0 (a keyframe)
-	// on screen entry.
-	printf("let fr = builtins.elemAt frames (mod scope.frameIndex nframes);\n");
+	// frameIndex is a monotonic per-screen play counter (see badapple-delta.md "Playback
+	// model"); it wraps so the clip loops and resets to 0 (a keyframe) on screen entry.
+	printf("  fr = builtins.elemAt frames (mod scope.frameIndex nframes);\n");
 	printf("in {\n");
 	printf("  bitmap   = fr.b;\n");
 	printf("  delta    = !fr.k;\n");
