@@ -1463,6 +1463,10 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
             if (flush_fail_count == 1) std.log.warn("oled: flush failed", .{});
             if (flush_fail_count % 8 == 0) {
                 std.log.warn("oled: {d} consecutive flush failures; re-initing panel", .{flush_fail_count});
+                // A panel swap always drops the bus first, so recovery is where a
+                // DIFFERENT controller may now be seated: re-probe before re-init
+                // (a dead-bus probe keeps the last known controller).
+                _ = panel.redetect();
                 if (panel.init()) |_| {
                     panel.flush() catch {};
                 } else |_| {}

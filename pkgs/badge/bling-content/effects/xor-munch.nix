@@ -71,17 +71,34 @@ let
       b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
     ) nInts
   ) 32;
+  # The warmup loader's text renderer (resolved via the runtime's <nixbadge>
+  # search path; hoisted so it costs nothing after warmup).
+  font = import <nixbadge/lib/font.nix>;
 in
 scope:
 let
-  # One phase per frame. t is ms; /24 -> a brisk march of the diamonds. Only the
-  # residue mod 32 matters; the whole frame for it is already tabled.
-  phase = builtins.bitAnd (scope.t / 24) mask5;
+  # WARMUP, honestly on the badge: the table frames are forced lazily, and each
+  # costs the full per-pixel compute ONCE. scope.frameIndex resets to 0 on screen
+  # entry and counts rendered frames, so the first 32 renders step the table IN
+  # ORDER -- one fresh frame forced per render, shown as it lands, with a
+  # "WARM n/32" counter overlaid. Re-entry replays the counter but the frames are
+  # already forced, so it zips by in ~a second. After warmup: phase follows t,
+  # no overlay, ~5 ms/frame.
+  warm = scope.frameIndex < 32;
+  phase = if warm then scope.frameIndex else builtins.bitAnd (scope.t / 24) mask5;
   f = builtins.elemAt frames phase;
+  hud = font.renderText {
+    text = "WARM ${toString (phase + 1)}/32";
+    x = 0;
+    page = 0;
+    width = 128;
+  };
 in
 {
   # A fresh (young, collectable) copy of the tabled frame, so the runtime's
   # bitmap force never pins per-frame garbage into the tabled constants.
   bitmap = builtins.genList (i: builtins.elemAt f i) nInts;
-  nextMs = 33; # ~30 fps
+  nextMs = if warm then 1 else 33; # warm as fast as compute allows; then ~30 fps
+  overlay = if warm then hud.overlay else [ ];
+  overlayN = if warm then hud.overlayN else 0;
 }

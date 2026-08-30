@@ -43,8 +43,11 @@ let
     { n = "60"; name = "currentsystem"; src = ./screens/currentsystem.nix; }
   ];
 
-  # Demoscene eye-candy screens (self-contained, 128x64-native). Copied verbatim
-  # (no <nixbadge/lib> import to rewrite) and self-tested at @64 (256 ints) only.
+  # Demoscene eye-candy screens (128x64-native). Copied verbatim (their one import,
+  # the warmup loader's <nixbadge/lib/font.nix>, is already in search-path form) and
+  # self-tested at @64 (256 ints) only. The phase-table effects (xor/plasma/rotozoom)
+  # warm up ON the badge: the first 32 renders force one table frame each (the
+  # honest, on-device eval) under a "WARM n/32" overlay, then play at ~30 fps.
   effects = [
     { n = "70"; name = "xor";       src = ./effects/xor-munch.nix; }
     { n = "72"; name = "plasma";    src = ./effects/plasma.nix; }

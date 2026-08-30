@@ -83,15 +83,15 @@ const sh1106_col_offset: u8 = 2;
 /// controllers (the SSD1306 resets into page mode), so the probe itself never
 /// corrupts state — and the caller re-inits + clears right after. Any I2C error
 /// ⇒ ssd1306 (the shipping default). `fd` must already be bound to the address.
-fn detectController(fd: linux.fd_t) Controller {
+fn detectController(fd: linux.fd_t) ?Controller {
     const magic = [_]u8{ 0xa5, 0x5a };
     const setcol = [_]u8{ 0x00, 0xb0, 0x02, 0x10 }; // cmd control, page 0, col RAM 2
     // Write the magic at page 0 col 2.
-    _ = linux.write(fd, &setcol) catch return .ssd1306;
+    _ = linux.write(fd, &setcol) catch return null;
     const data = [_]u8{ 0x40, magic[0], magic[1] };
-    _ = linux.write(fd, &data) catch return .ssd1306;
+    _ = linux.write(fd, &data) catch return null;
     // Point back at col 2 and read: control byte 0x40 (data), then dummy + 2 bytes.
-    _ = linux.write(fd, &setcol) catch return .ssd1306;
+    _ = linux.write(fd, &setcol) catch return null;
     var ctrl = [_]u8{0x40};
     var back: [3]u8 = @splat(0);
     var msgs = [_]linux.I2c.Msg{
@@ -99,7 +99,7 @@ fn detectController(fd: linux.fd_t) Controller {
         .{ .addr = i2c_addr, .flags = linux.I2c.M_RD, .len = back.len, .buf = &back },
     };
     var xfer = linux.I2c.RdwrData{ .msgs = &msgs, .nmsgs = msgs.len };
-    _ = linux.ioctl(fd, linux.I2c.RDWR, @intFromPtr(&xfer)) catch return .ssd1306;
+    _ = linux.ioctl(fd, linux.I2c.RDWR, @intFromPtr(&xfer)) catch return null;
     // back[0] is the SH1106 dummy read; the data follows.
     if (back[1] == magic[0] and back[2] == magic[1]) return .sh1106;
     return .ssd1306;
@@ -162,12 +162,32 @@ pub const Panel = struct {
             .ssd1306 => .ssd1306,
             .sh1106 => .sh1106,
             .auto => blk: {
-                const det = detectController(fd);
-                std.log.info("oled: controller autodetect -> {s}", .{@tagName(det)});
-                break :blk det;
+                if (detectController(fd)) |det| {
+                    std.log.info("oled: controller autodetect -> {s}", .{@tagName(det)});
+                    break :blk det;
+                }
+                std.log.warn("oled: controller probe failed; assuming ssd1306", .{});
+                break :blk .ssd1306;
             },
         };
         return .{ .alloc = alloc, .fd = fd, .width = width, .height = height, .controller = controller, .buf = buf };
+    }
+
+    /// Re-probe the controller (used by the flush-recovery path before re-init):
+    /// a hot-swapped panel always drops the bus mid-transaction first, so the
+    /// recovery that follows is exactly when the OTHER controller might now be
+    /// seated. Only a SUCCESSFUL probe updates the choice -- a dead bus keeps the
+    /// last known controller rather than clobbering it with the fallback default.
+    /// Returns true when the controller CHANGED (the caller re-inits + redraws
+    /// regardless, so this is informational/logging).
+    pub fn redetect(self: *Panel) bool {
+        const det = detectController(self.fd) orelse return false;
+        if (det == self.controller) return false;
+        std.log.info("oled: controller changed {s} -> {s} (panel swapped?)", .{
+            @tagName(self.controller), @tagName(det),
+        });
+        self.controller = det;
+        return true;
     }
 
     pub fn close(self: *Panel) void {
