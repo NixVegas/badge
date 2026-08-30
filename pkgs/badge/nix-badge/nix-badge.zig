@@ -27,8 +27,12 @@ const backend = @import("backend.zig");
 const Config = config.Config;
 const Rgb = ws2812.Rgb;
 
-const runtime_conf: [*:0]const u8 = "/var/lib/nix-badge/leds.conf";
-const runtime_dir: [*:0]const u8 = "/var/lib/nix-badge";
+// Mutable runtime state lives in /etc/nixbadge alongside the (symlinked) default
+// content, so the badge's whole hackable surface is one folder. The dir is created
+// declaratively (systemd.tmpfiles + nixbadge-content.service) but we mkdir it too so
+// early-boot / initrd paths don't depend on that ordering.
+const runtime_conf: [*:0]const u8 = "/etc/nixbadge/leds.conf";
+const runtime_dir: [*:0]const u8 = "/etc/nixbadge";
 
 // ISR-to-mainloop flags. Signal handlers are dispatched by the kernel to a fixed
 // address and cannot take a context parameter, so these are the one sanctioned
@@ -1093,11 +1097,11 @@ fn oledWait(deadline_ms: u64, button: ?sysfs.Button, press: *PressState) void {
 }
 
 // Where the current OLED screen is remembered across reboots. The LED pattern
-// already persists (the bling service layers /var/lib/nix-badge/leds.conf over the
+// already persists (the bling service layers /etc/nixbadge/leds.conf over the
 // declarative base at startup); this is the screen's equivalent. Persisted by
 // NAME, not index, so it survives a registry that changes shape (badapple present
 // or not).
-const oled_state_file: [*:0]const u8 = "/var/lib/nix-badge/oled.state";
+const oled_state_file: [*:0]const u8 = "/etc/nixbadge/oled.state";
 
 /// Restore the last-shown screen. A missing file or an unknown name (e.g. the
 /// saved screen is gone this boot) starts at screen 0.
@@ -1181,6 +1185,10 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     var backend_kind: backend.Kind = .fix;
     // Root for the `<nixbadge>` search path, so a screen can `import <nixbadge/lib/font.nix>`.
     var content_root: []const u8 = default_content_root;
+    // GC collection line for the fix Engine, in bytes (0 = evaluator default). CRITICAL on
+    // the 351MB badge: fix's auto line clamps to a 256MB floor and grows into swap before
+    // collecting, so the module passes an explicit --gc-budget-mb (see eval.Opts, #28).
+    var gc_budget_bytes: u64 = 0;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (optArg(args, &i, "--badapple")) |v| {
@@ -1189,6 +1197,12 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
             backend_kind = parseBackendKind(v);
         } else if (optArg(args, &i, "--content-root")) |v| {
             content_root = v;
+        } else if (optArg(args, &i, "--gc-budget-mb")) |v| {
+            const mb = std.fmt.parseInt(u32, v, 10) catch {
+                std.log.err("oled: bad --gc-budget-mb '{s}'", .{v});
+                return error.Usage;
+            };
+            gc_budget_bytes = @as(u64, mb) << 20;
         } else if (optArg(args, &i, "--eval-dir")) |v| {
             // Drop-in dir-based content: scan v for *.nix, sorted by name (NN- prefix =
             // cycle order). Appends to any explicit --eval-screen already collected.
@@ -1277,7 +1291,11 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     // function scope so the live backend-switch reopen below reuses it.
     var nix_path_buf: [512]u8 = undefined;
     const nix_path = std.fmt.bufPrint(&nix_path_buf, "nixbadge={s}", .{content_root}) catch "nixbadge=/etc/nixbadge";
-    const eval_opts = eval.Opts{ .io = io, .nix_path = nix_path };
+    const eval_opts = eval.Opts{
+        .io = io,
+        .nix_path = nix_path,
+        .gc_budget_bytes = if (gc_budget_bytes > 0) gc_budget_bytes else null,
+    };
 
     var eval_set: ?backend.ScreenSet = null;
     var eval_fb: ?[]u8 = null;
@@ -1630,7 +1648,7 @@ fn findScreen(active: []const Screen, name: []const u8) ?usize {
 
 // Where the live-chosen evaluator backend is remembered across restarts (like oled.state
 // for the screen). Persisted by name ("fix"/"nix").
-const backend_state_file: [*:0]const u8 = "/var/lib/nix-badge/oled.backend";
+const backend_state_file: [*:0]const u8 = "/etc/nixbadge/oled.backend";
 
 /// Restore the last live-chosen backend, or `dflt` when there is no saved choice. A saved
 /// "nix" on a fix-only build still falls back to fix at open(), so this is safe to honour.

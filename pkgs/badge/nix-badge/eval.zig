@@ -25,6 +25,13 @@ pub const Opts = struct {
     /// content can `import <nixbadge/lib/font.nix>` independent of its own location. null
     /// leaves the evaluator default. fix: Engine.setNixPath; nix: nix_state_create lookupPath.
     nix_path: ?[]const u8 = null,
+    /// GC collection line, in bytes: the heap-reserved size at which the evaluator collects.
+    /// CRITICAL on the memory-tight badge -- fix's automatic line is `clamp(½·MemTotal,
+    /// 256MB, 32GB)`, so on a 351MB board it clamps to the 256MB FLOOR and the heap grows
+    /// into swap before ever collecting (the "getting slow" symptom). An explicit cap here
+    /// makes fix collect at that size instead. null = evaluator default (the auto line).
+    /// fix: Engine.configureMemory(budget). nix ignores it (Boehm has its own policy).
+    gc_budget_bytes: ?u64 = null,
 };
 
 /// The per-frame inputs fed to a content function's `scope`. Backend-agnostic; the

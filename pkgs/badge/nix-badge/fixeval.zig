@@ -107,6 +107,13 @@ pub const FixBackend = struct {
         // MAJOR-only collection: a major rebuilds old/young from the true reachable set and
         // cannot sweep a live object. Sound + memory-bounded (see gc-always-major.patch).
         ev.setAlwaysMajor(true);
+        // [#28] Cap the GC collection line. fix's automatic line is clamp(½·MemTotal, 256MB,
+        // 32GB) -> on the 351MB badge it clamps to the 256MB FLOOR, so the heap grows into
+        // swap before it ever collects (the "getting slow" symptom). An explicit budget makes
+        // it collect at that heap size instead, holding RSS below the swap threshold. Paired
+        // with setAlwaysMajor above, each collection fully reclaims (old-gen too), so RSS
+        // stays tightly bounded around the live set. The badge passes ~160MB (see oled.nix).
+        if (opts.gc_budget_bytes) |b| ev.configureMemory(b, null, false);
         if (opts.nix_path) |np| ev.setNixPath(np) catch |err|
             std.log.warn("fix: setNixPath('{s}') failed: {s}; <name> imports unavailable", .{ np, @errorName(err) });
 

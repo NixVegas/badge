@@ -1,7 +1,7 @@
 //! The LED ring configuration model and the `leds.conf` key=value format.
 //!
 //! The declarative base config (from the Nix module) is read first; the runtime
-//! file `/var/lib/nix-badge/leds.conf`, written by `bling set` and the oled
+//! file `/etc/nixbadge/leds.conf`, written by `bling set` and the oled
 //! button handler, is layered on top so a user change wins. Unknown keys are
 //! ignored so a stale runtime file can never block a boot.
 

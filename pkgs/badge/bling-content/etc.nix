@@ -43,10 +43,30 @@ let
     { n = "60"; name = "currentsystem"; src = ./screens/currentsystem.nix; }
   ];
 
+  # Demoscene eye-candy screens (self-contained, 128x64-native). Copied verbatim
+  # (no <nixbadge/lib> import to rewrite) and self-tested at @64 (256 ints) only.
+  effects = [
+    { n = "70"; name = "xor";       src = ./effects/xor-munch.nix; }
+    { n = "72"; name = "plasma";    src = ./effects/plasma.nix; }
+    { n = "74"; name = "starfield"; src = ./effects/starfield.nix; }
+    { n = "76"; name = "rotozoom";  src = ./effects/rotozoom.nix; }
+  ];
+
   # `import ./draw.nix` -> `import <nixbadge/lib/draw.nix>` for each screen.
   screenCmds = lib.concatMapStringsSep "\n" (s: ''
     sed -E 's|import \./draw\.nix|import <nixbadge/lib/draw.nix>|g' ${s.src} > "$out/oled.d/${s.n}-${s.name}.nix"
   '') screens;
+
+  # Verbatim copy (self-contained: no import rewrite).
+  effectCmds = lib.concatMapStringsSep "\n" (e: ''
+    cp ${e.src} "$out/oled.d/${e.n}-${e.name}.nix"
+  '') effects;
+
+  # Self-test each effect at @64 only (they always emit 256 ints).
+  effectChecks = lib.concatMapStringsSep "\n" (e: ''
+    checkFrame "$out/oled.d/${e.n}-${e.name}.nix" 64 256
+    echo "nixbadge-content: effect ${e.name} -> valid 128x64 frame (256 ints)"
+  '') effects;
 
   # Build-time eval check per info screen at both supported panel heights (128 ints @32,
   # 256 @64). --impure: <nixbadge> comes from NIX_PATH and currentsystem reads currentSystem.
@@ -77,9 +97,11 @@ pkgs.runCommand "nixbadge-content"
       -e 's|import \./spleen-8x16-font-data\.nix|import <nixbadge/lib/spleen-8x16-font-data.nix>|g' \
       ${./screens/draw.nix} > "$out/lib/draw.nix"
 
-    # oled.d: Bad Apple lead (generated + already self-tested) + the info screens.
+    # oled.d: Bad Apple lead (generated + already self-tested) + the info screens
+    # + the demoscene effects (self-contained, copied verbatim).
     cp ${badappleLive}/badapple-live.nix "$out/oled.d/10-badapple.nix"
     ${screenCmds}
+    ${effectCmds}
 
     # bling.d: the live LED pattern.
     cp ${./leds-live.nix} "$out/bling.d/10-leds-live.nix"
@@ -103,6 +125,7 @@ pkgs.runCommand "nixbadge-content"
       " >/dev/null || { echo "SELFTEST FAIL: $f did not eval to a valid $want-int frame @h=$h" >&2; exit 1; }
     }
     ${checkCmds}
+    ${effectChecks}
 
     # Bad Apple: frame 0 (a keyframe) must eval AND carry a HUD overlay -- validates the
     # emitted `import <nixbadge/lib/font.nix>` + font.nix end-to-end (backend 1 = nix).

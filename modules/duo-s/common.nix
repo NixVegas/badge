@@ -2,6 +2,21 @@
 # Everything here is identical whether the ARM (aarch64) or RISC-V (riscv64)
 # large core boots. Nothing arch-specific belongs in this file.
 { pkgs, lib, ... }:
+let
+  # The default OLED/LED content tree (Bad Apple + info screens + demoscene
+  # effects under oled.d/, LED patterns under bling.d/, the shared font/draw
+  # library under lib/), baked into the store. /etc/nixbadge is seeded FROM this
+  # by nixbadge-content.service (below) as writable, hackable symlinks -- the
+  # store path is the symlink target, so `ls -l /etc/nixbadge/oled.d` shows each
+  # screen's exact Nix provenance.
+  contentTree = import ../../pkgs/badge/bling-content/etc.nix {
+    pkgs = pkgs.buildPackages;
+    height = 64;
+    fps = 60;
+    durationSeconds = null;
+    keyframeInterval = 60;
+  };
+in
 {
   networking.hostName = "nixbadge-duos";
 
@@ -120,21 +135,61 @@
 
   # Dir-based content at /etc/nixbadge: the runtime scans oled.d/*.nix (--eval-dir), and a
   # screen's `<nixbadge/lib/...>` imports resolve through nix-badge's `nixbadge=/etc/nixbadge`
-  # search path (both backends). This REPLACES the flat evalScreens list + the old
-  # inline-everything screens-install.nix: the font/draw library now lives once under lib/,
-  # imported by every screen. Bad Apple is baked for the 128x64 panel at 60 fps with the
-  # DELTA codec (badapple-delta.md: per-frame (offset,byte) changes, 2/int, applied to a
-  # persistent framebuffer, flushing only changed columns -> 60 fps under 400 kHz I2C);
-  # keyframeInterval=60 self-heals once/second. buildPackages so the ffmpeg transcode + Nix
-  # generation run on the build host.
-  environment.etc."nixbadge".source = import ../../pkgs/badge/bling-content/etc.nix {
-    pkgs = pkgs.buildPackages;
-    height = 64;
-    fps = 60;
-    durationSeconds = null;
-    keyframeInterval = 60;
-  };
+  # search path (both backends). The font/draw library lives once under lib/, imported by
+  # every screen. Bad Apple leads (baked for the 128x64 panel @60 fps, DELTA codec: per-frame
+  # (offset,byte) changes, 2/int, applied to a persistent framebuffer, flushing only changed
+  # columns -> 60 fps under 1 MHz I2C; keyframeInterval=60 self-heals once/second), then the
+  # info screens, then the demoscene effects.
+  #
+  # /etc/nixbadge is a REAL, writable, HACKABLE directory -- NOT a read-only store symlink.
+  # nixbadge-content.service seeds it from `contentTree` with a three-way rule per file that
+  # systemd-tmpfiles' L/L+ cannot express (plain L never repoints a symlink; L+ also clobbers
+  # a user's regular file):
+  #   * missing           -> symlink to the store default
+  #   * already a symlink  -> repoint to the (new) store path   [clobber the stale link]
+  #   * a regular FILE     -> LEFT ALONE (the user's own hacked screen/effect)
+  # So `cp` a default over its symlink, edit in place, and your copy survives every rebuild;
+  # `rm` your copy and the default symlink returns on the next boot. Defaults removed upstream
+  # leave a dangling symlink, which the seed prunes. The mutable runtime state (leds.conf,
+  # oled.state, oled.backend) also lives directly under /etc/nixbadge now (moved off
+  # /var/lib/nix-badge), so the badge's whole mutable surface is one hackable folder.
   nixbadge.oled.evalDir = "/etc/nixbadge/oled.d";
+
+  systemd.tmpfiles.rules = [ "d /etc/nixbadge 0755 root root -" ];
+
+  systemd.services.nixbadge-content = {
+    description = "Seed /etc/nixbadge with default OLED/LED content (hackable in place)";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "nixbadge-oled.service" ];
+    after = [ "systemd-tmpfiles-setup.service" ];
+    unitConfig.ConditionPathIsReadWrite = "/etc";
+    path = [ pkgs.coreutils pkgs.findutils ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      set -eu
+      src="${contentTree}"
+      dst=/etc/nixbadge
+      # Migration: earlier builds shipped /etc/nixbadge as a read-only store symlink
+      # (environment.etc). If one lingers, drop it so we can make a real writable dir.
+      [ -L "$dst" ] && rm -f "$dst"
+      mkdir -p "$dst"
+      # (Re)link every default file; never touch a user's regular-file override.
+      while IFS= read -r -d "" f; do
+        rel="''${f#"$src"/}"
+        target="$dst/$rel"
+        mkdir -p "$(dirname "$target")"
+        if [ -f "$target" ] && [ ! -L "$target" ]; then
+          continue          # user's own hacked file -> leave it
+        fi
+        ln -sfn "$f" "$target"   # missing or symlink -> point at the store default
+      done < <(find "$src" \( -type f -o -type l \) -print0)
+      # Prune defaults removed upstream (now-dangling symlinks); never touches regular files.
+      find "$dst" -type l ! -exec test -e {} \; -delete
+    '';
+  };
 
   # Networking via NetworkManager: it manages eth0 (auto-connects wired) and
   # wlan0 once the AIC8800 WiFi comes up. wpa_supplicant backend because the

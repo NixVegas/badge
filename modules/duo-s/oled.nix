@@ -6,7 +6,7 @@
 # It owns the OLED + USER button + signals. The WS2812 ring stays with the
 # leds.nix painter (which starts in the initrd and survives switch_root, the
 # flicker-free early-boot path) -- the oled daemon only rewrites
-# /var/lib/nix-badge/leds.conf to change the ring's pattern, and the painter
+# /etc/nixbadge/leds.conf to change the ring's pattern, and the painter
 # hot-reloads it. So this service does NOT touch spidev and cannot disturb the
 # ring's boot animation.
 #
@@ -71,10 +71,27 @@ in
         Which per-frame evaluator backend the eval screens use: "fix" (psyclyx
         fix's embedded `expr`) or "nix" (the upstream Nix C API, aarch64 only).
         This is only the STARTING choice -- a >5 s USER-button hold flips the
-        backend live and persists the new choice to /var/lib/nix-badge/oled.backend,
+        backend live and persists the new choice to /etc/nixbadge/oled.backend,
         which is then honoured over this default on the next start (like the screen
         index + LED pattern already persist). On riscv (or a build with nixEval
         off) "nix" transparently falls back to fix at open().
+      '';
+    };
+    gcBudgetMb = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 160;
+      description = ''
+        The fix Engine's GC collection line, in MiB: the heap-reserved size at which it
+        collects. CRITICAL on the memory-tight badge. fix's AUTOMATIC line is
+        clamp(1/2 x MemTotal, 256 MB, 32 GB), so on the 351 MB board it clamps to the
+        256 MB FLOOR -- larger than RAM -- and the shared ScreenSet Engine grows its heap
+        into swap before it EVER collects. That is the "getting slow" / "high swap util"
+        symptom. This passes an explicit `--gc-budget-mb` so fix collects at this size
+        instead, holding RSS below the swap threshold; paired with the major-only GC
+        (setAlwaysMajor, #34) each collection fully reclaims, so RSS stays bounded around
+        the live set (~80 MB with Bad Apple loaded). Lower = less RAM but more frequent
+        (major) collection pauses; raise if the badge has headroom. 0 is rejected (use the
+        evaluator default only by editing the flag out). aarch64 only (no Engine on riscv).
       '';
     };
     evalScreens = lib.mkOption {
@@ -114,7 +131,8 @@ in
         drop-in, dir-based content (add a file, get a screen, no rebuild of the tool).
         The screens may `import <nixbadge/lib/...>` (a shared font/draw library), resolved
         by nix-badge's `nixbadge=/etc/nixbadge` search path. The default config sets this to
-        "/etc/nixbadge/oled.d" (installed via environment.etc). Combines with evalScreens
+        "/etc/nixbadge/oled.d" (seeded as hackable symlinks by nixbadge-content.service).
+        Combines with evalScreens
         (explicit --eval-screen paths are appended alongside the scanned ones).
       '';
     };
@@ -129,7 +147,7 @@ in
       serviceConfig = {
         # Runs as root: opens /dev/i2c-1 (0x3c), medians the SARADC sysfs for the
         # battery/rail screens, reads the USER button, and rewrites
-        # /var/lib/nix-badge/leds.conf to cycle the ring's pattern.
+        # /etc/nixbadge/leds.conf to cycle the ring's pattern.
         ExecStart = lib.concatStringsSep " " (
           [
             "${nixBadge}/bin/nix-badge oled"
@@ -138,6 +156,8 @@ in
             "--button ${cfg.button}"
             "--badapple ${badApple}/badapple.bin"
             "--backend ${cfg.backend}"
+            # Cap the fix Engine's GC line so its heap collects instead of swapping (#28).
+            "--gc-budget-mb ${toString cfg.gcBudgetMb}"
           ]
           # The pure-Nix eval screens: one repeated `--eval-screen PATH` per
           # configured screen. All compile into ONE shared fix Engine (a
@@ -155,9 +175,10 @@ in
         # (mid-run i2c error) exits nonzero and we retry.
         Restart = "on-failure";
         RestartSec = 2;
-        # Shared with the leds painter; ensures /var/lib/nix-badge exists for the
-        # leds.conf rewrite.
-        StateDirectory = "nix-badge";
+        # Mutable state (leds.conf, oled.state, oled.backend) lives in /etc/nixbadge,
+        # created declaratively (systemd.tmpfiles + nixbadge-content.service, which is
+        # ordered Before= this unit) and by nix-badge's own mkdir at startup. The
+        # service runs as root with no ProtectSystem, so /etc is writable.
       };
     };
   };

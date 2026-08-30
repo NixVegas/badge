@@ -9,7 +9,7 @@
 #
 # To change the pattern or the colours at run time use the CLI:
 #   nix-badge bling set --pattern solid --color '#ff00ff'
-# The CLI only writes /var/lib/nix-badge/leds.conf. The running service watches
+# The CLI only writes /etc/nixbadge/leds.conf. The running service watches
 # that file and reloads when the mtime moves, so nothing calls systemctl and
 # the binary keeps a glibc-only closure. An animation notices within one frame,
 # a static pattern within half a second.
@@ -271,8 +271,10 @@ in
     boot.initrd.systemd.services.nixbadge-bling = unit [ "initrd.target" ];
     systemd.services.nixbadge-bling = unit [ "sysinit.target" ];
 
-    # /var/lib/nix-badge holds the runtime config the CLI writes. The initrd has
-    # no /var, which is why early boot always uses the declarative config.
-    systemd.tmpfiles.rules = [ "d /var/lib/nix-badge 0755 root root -" ];
+    # /etc/nixbadge holds the runtime config the CLI writes (leds.conf), alongside
+    # the seeded default content. common.nix also declares this dir; tmpfiles dedups.
+    # The initrd has no populated /etc/nixbadge, which is why early boot always uses
+    # the declarative config.
+    systemd.tmpfiles.rules = [ "d /etc/nixbadge 0755 root root -" ];
   };
 }
