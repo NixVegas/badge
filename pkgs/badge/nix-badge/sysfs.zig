@@ -366,6 +366,18 @@ pub fn readJ6Volts() ?f64 {
 
 const psu_dir = "/sys/class/power_supply/vbat-adc-battery";
 
+// The vbat-adc-battery node reports voltage_now at ~2x the true pack voltage (the iio-rescale
+// divider is double-counted: a 3xAA pack reads ~9.9 V but is ~4.96 V), so halve it. The proper
+// fix is the DT rescale, which needs an SD reflash; this is the deployable correction.
+const bat_scale_num: u64 = 1;
+const bat_scale_den: u64 = 2;
+// The node exposes NO `capacity` (generic-adc-battery has no monitored-battery/OCV table), so
+// percent is derived from the corrected voltage over the 3xAA usable window: ~1.1 V/cell (the
+// regulators' practical cutoff) to ~1.6 V/cell (fresh). Alkaline discharge is non-linear, so
+// this is a coarse gauge; tune the two bounds if it reads optimistic.
+const bat_empty_mv: u64 = 3300;
+const bat_full_mv: u64 = 4800;
+
 pub const Battery = struct {
     /// Millivolts, or null when the node is absent.
     millivolts: ?u32,
@@ -384,13 +396,19 @@ pub const Battery = struct {
 pub fn readBattery() Battery {
     var b: Battery = .{ .millivolts = null, .percent = null };
 
-    // voltage_now (microvolts) rides the leaky SARADC through the kernel rescale,
-    // so median it; capacity/status are kernel-smoothed, so a single read is fine.
+    // voltage_now (microvolts) rides the leaky SARADC through the kernel rescale, so median
+    // it; then apply the 2x scale correction.
     if (medianU64(psu_dir ++ "/voltage_now")) |uv| {
-        b.millivolts = @intCast(uv / 1000);
-    }
-    if (readU64(psu_dir ++ "/capacity")) |cap| {
-        b.percent = @intCast(@min(cap, 100));
+        const mv: u64 = (uv / 1000) * bat_scale_num / bat_scale_den;
+        b.millivolts = @intCast(mv);
+        // Prefer a real `capacity` if the node ever grows one; otherwise derive percent from
+        // the corrected voltage over the 3xAA window (linear, clamped).
+        if (readU64(psu_dir ++ "/capacity")) |cap| {
+            b.percent = @intCast(@min(cap, 100));
+        } else {
+            const c = std.math.clamp(mv, bat_empty_mv, bat_full_mv);
+            b.percent = @intCast((c - bat_empty_mv) * 100 / (bat_full_mv - bat_empty_mv));
+        }
     }
     var sbuf: [64]u8 = undefined;
     if (linux.readFile(psu_dir ++ "/status", &sbuf)) |s| {
