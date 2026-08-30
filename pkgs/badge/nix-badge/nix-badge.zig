@@ -1050,46 +1050,44 @@ fn oledWait(deadline_ms: u64, button: ?sysfs.Button, press: *PressState) void {
     const poll_ms: u64 = 15; // button sampling period
     while (true) {
         if (eventPending()) return;
-        const now_ms = linux.monotonicMsec();
-        if (now_ms >= deadline_ms) return;
 
-        // Without a button there is nothing to poll; a plain sleep suffices and
-        // still wakes early on a signal (EINTR).
-        const btn = button orelse {
-            linux.sleepNsec((deadline_ms - now_ms) * std.time.ns_per_ms);
-            return;
-        };
-
-        // The RTC/PWR gpio (USER button) has no edge IRQ, so sample the LEVEL and
-        // detect press/release in software. Active-low: 0 = pressed. A release
-        // shorter than oled_longpress_ms cycles the LED pattern, a longer hold
-        // cycles the OLED screen -- acted on at release, so `press` (down + start)
-        // carries across frames.
-        if (btn.level()) |lvl| {
-            const pressed = lvl == 0;
-            if (pressed and !press.down) {
-                press.* = .{ .start_ms = now_ms, .down = true };
-            } else if (!pressed and press.down) {
-                press.down = false;
-                const held = now_ms - press.start_ms;
-                // Three release tiers: a very long hold (>= backend_switch_ms) flips the
-                // evaluator backend live; a long hold cycles the screen; a short press
-                // cycles the LED pattern. Acted on at release, so `press` carries across
-                // frames.
-                const flag = if (held >= backend_switch_ms)
-                    &want_switch_backend
-                else if (held >= oled_longpress_ms)
-                    &want_next_screen
-                else
-                    &want_next_pattern;
-                flag.store(true, .monotonic);
-                return; // process the press promptly rather than finishing the wait
+        // Sample the button ONCE per iteration, BEFORE the deadline check, so a frame that
+        // overran its nextMs budget (deadline already in the past -> no idle time) still
+        // reads it. Coupling button sampling to leftover idle time meant polling silently
+        // died the instant frames got slow (the nix backend at ~30 fps, or any heavy
+        // screen): the deadline was always already past on entry, so oledWait returned
+        // before ever reading the level. Reading here guarantees >= one sample per rendered
+        // frame. The RTC/PWR gpio (USER button) has no edge IRQ; active-low, 0 = pressed. A
+        // release < oled_longpress_ms cycles the LED pattern, < backend_switch_ms cycles the
+        // screen, else flips the evaluator backend -- acted on at release, `press` carries.
+        if (button) |btn| {
+            if (btn.level()) |lvl| {
+                const t = linux.monotonicMsec();
+                const pressed = lvl == 0;
+                if (pressed and !press.down) {
+                    press.* = .{ .start_ms = t, .down = true };
+                } else if (!pressed and press.down) {
+                    press.down = false;
+                    const held = t - press.start_ms;
+                    const flag = if (held >= backend_switch_ms)
+                        &want_switch_backend
+                    else if (held >= oled_longpress_ms)
+                        &want_next_screen
+                    else
+                        &want_next_pattern;
+                    flag.store(true, .monotonic);
+                    return; // process the press promptly rather than finishing the wait
+                }
             }
         }
 
-        // @min narrows to a tiny type because poll_ms is comptime-known; widen
-        // back to u64 before scaling to ns or the *1e6 overflows the type.
-        const step: u64 = @min(poll_ms, deadline_ms - now_ms);
+        const now_ms = linux.monotonicMsec();
+        if (now_ms >= deadline_ms) return;
+        // With a button, wake every poll_ms to keep sampling; without, sleep straight to the
+        // deadline (still wakes early on a signal via EINTR). @min narrows because poll_ms is
+        // comptime-known; widen back to u64 before scaling to ns.
+        const remain = deadline_ms - now_ms;
+        const step: u64 = if (button != null) @min(poll_ms, remain) else remain;
         linux.sleepNsec(step * std.time.ns_per_ms);
     }
 }

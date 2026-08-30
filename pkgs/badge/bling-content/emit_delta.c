@@ -237,13 +237,23 @@ int main(int argc, char **argv)
 	// A [backend] fps HUD stamped over EVERY frame (keyframe or delta) via the
 	// overlay contract (eval.zig applyOverlay), using the shared importable font
 	// lib. scope.backend is 0=fix / 1=nix; scope.fps is the loop's measured rate.
-	printf("  # [backend] fps HUD via the overlay contract + <nixbadge/lib/font.nix>.\n");
+	//
+	// The HUD is gated to the NIX backend (scope.backend == 1). Rendering the font
+	// in Nix every frame is ~25-40 ms of eval (the <nixbadge/lib/font.nix> import +
+	// renderText allocation); on fix that per-frame young-allocation trips the GC
+	// missed-edge bug (#34) into a death spiral (eval climbs to tens of seconds).
+	// Lazy eval means `hud` is NEVER forced when scope.backend != 1, so fix does
+	// zero HUD work and Bad Apple stays at its pre-HUD 60 fps; fix is still identified
+	// by the journal [fix] tag. nix (no such GC bug) renders the on-panel HUD.
+	printf("  # [backend] fps HUD via the overlay contract + <nixbadge/lib/font.nix>,\n");
+	printf("  # gated to nix: rendering the font per-frame in Nix is too costly for fix (#34).\n");
 	printf("  font = import <nixbadge/lib/font.nix>;\n");
 	printf("  hud = font.renderText {\n");
 	printf("    text = \"[\" + (builtins.elemAt [ \"fix\" \"nix\" ] scope.backend) + \"] \" + toString scope.fps + \"fps\";\n");
 	printf("    x = 0;\n");
 	printf("    width = scope.width;\n");
 	printf("  };\n");
+	printf("  hudOn = scope.backend == 1;\n");
 	printf("in\n");
 	// frameIndex is a monotonic per-screen play counter (see badapple-delta.md
 	// "Playback model"); it wraps so the clip loops and resets to 0 (a keyframe)
@@ -254,8 +264,8 @@ int main(int argc, char **argv)
 	printf("  delta    = !fr.k;\n");
 	printf("  n        = fr.n or 0;\n");
 	printf("  nextMs   = %u;\n", next_ms);
-	printf("  overlay  = hud.overlay;\n");
-	printf("  overlayN = hud.overlayN;\n");
+	printf("  overlay  = if hudOn then hud.overlay else [];\n");
+	printf("  overlayN = if hudOn then hud.overlayN else 0;\n");
 	printf("}\n");
 
 	free(fb);
