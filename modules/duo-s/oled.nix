@@ -79,19 +79,22 @@ in
     };
     gcBudgetMb = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 160;
+      default = 768;
       description = ''
-        The fix Engine's GC collection line, in MiB: the heap-reserved size at which it
-        collects. CRITICAL on the memory-tight badge. fix's AUTOMATIC line is
-        clamp(1/2 x MemTotal, 256 MB, 32 GB), so on the 351 MB board it clamps to the
-        256 MB FLOOR -- larger than RAM -- and the shared ScreenSet Engine grows its heap
-        into swap before it EVER collects. That is the "getting slow" / "high swap util"
-        symptom. This passes an explicit `--gc-budget-mb` so fix collects at this size
-        instead, holding RSS below the swap threshold; paired with the major-only GC
-        (setAlwaysMajor, #34) each collection fully reclaims, so RSS stays bounded around
-        the live set (~80 MB with Bad Apple loaded). Lower = less RAM but more frequent
-        (major) collection pauses; raise if the badge has headroom. 0 is rejected (use the
-        evaluator default only by editing the flag out). aarch64 only (no Engine on riscv).
+        The fix Engine's GC collection line, in MiB: the heap-reserved size at which an
+        allocation triggers a collection. Must sit ABOVE the heaviest screen's live heap.
+        The full-song Bad Apple screen forces one delta frame into its hoisted (pinned)
+        `frames` constant per rendered frame, so its live heap climbs to ~400 MB over a
+        playback loop. Because collection is major-only (setAlwaysMajor, #34) EVERY collect
+        walks that whole live heap -- so if this budget is BELOW the heap, an allocation
+        major fires on essentially every frame and eval explodes to tens of seconds
+        (measured: budget 160 -> 0 fps / 24 s; budget 4000 -> 30-41 fps). Keep it well
+        above the plateau so allocation-triggered majors never fire; the per-frame young
+        garbage is still swept by the loop's periodic collectNow, and zram (see
+        common.nix) absorbs the cold pinned frames, so a high budget costs no real RAM.
+        fix's automatic line would be clamp(1/2 x MemTotal, 256 MB, 32 GB) = 256 MB on
+        this board, which is BOTH below the plateau (major storm) and near RAM (swap), so
+        an explicit value is set. aarch64 only (no Engine on riscv).
       '';
     };
     evalScreens = lib.mkOption {
