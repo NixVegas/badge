@@ -32,6 +32,19 @@ const expr = if (have_fix) @import("expr") else struct {};
 const Engine = if (have_fix) expr.Engine else void;
 const Value = if (have_fix) @import("runtime").value.Value else void;
 
+/// The Engine must NEVER move after its first evaluation. fix's GC hook is
+/// installed lazily at the first eval (gc_coordinator.zig: "Install once, after
+/// the owning Engine has reached its final address") and pins the Engine's
+/// address into the heap's collection hook. Holding the Engine BY VALUE and
+/// returning it from open() moved it AFTER the compile had installed the hook,
+/// so every subsequent collection ran against the dead pre-move stack copy —
+/// diverging inline heap state (cursors, young lists, collection flags) between
+/// the mutator (live copy) and the GC (stale copy): missed edges, free lists
+/// the allocator never sees (unbounded cursor growth), and config setters that
+/// the collector never observes. Heap-allocate the Engine BEFORE the first
+/// evaluation and hold it by pointer.
+const EnginePtr = if (have_fix) *expr.Engine else void;
+
 /// Largest pattern source we read. A live LED pattern is ~1 KiB, but a baked
 /// frame-list (Bad Apple: ~400 frames = 392 KiB at 20 s, ~6 MiB for the full
 /// song) is the outlier -- size for that. The scratch buffer is transient (freed
@@ -161,7 +174,7 @@ fn finishFrame(ev: *Engine, frame: *u64, next_ms: i64) u32 {
 /// helpers above.
 pub const Pattern = struct {
     gpa: std.mem.Allocator,
-    ev: Engine,
+    ev: EnginePtr,
     // The pattern source, kept alive because compiled chunks reference it for
     // error spans; freed in `deinit`.
     text: []u8,
@@ -184,14 +197,24 @@ pub const Pattern = struct {
         // compile_cache = .off: a persistent cross-run disk chunk cache is useless
         // for a single embedded pattern (compiled once), and `.auto` probes
         // XDG_CACHE_HOME the service does not set. Skip it.
-        var ev = Engine.init(gpa, .{ .worker_count = 0 }) catch |err| {
+        // Heap-allocate the Engine BEFORE the compile: the compile is the first
+        // evaluation, which installs the GC hook at the Engine's CURRENT address
+        // (see EnginePtr). The move into `ev.*` happens before that, so the hook
+        // pins the final, stable heap address.
+        const ev = gpa.create(Engine) catch {
+            gpa.free(text);
+            return null;
+        };
+        ev.* = Engine.init(gpa, .{ .worker_count = 0 }) catch |err| {
             std.log.err("leds: eval engine init failed: {s}", .{@errorName(err)});
+            gpa.destroy(ev);
             gpa.free(text);
             return null;
         };
         const lambda = ev.evaluate(text) catch |err| {
             std.log.err("leds: eval pattern {s} did not compile: {s}", .{ path, @errorName(err) });
             ev.deinit();
+            gpa.destroy(ev);
             gpa.free(text);
             return null;
         };
@@ -201,6 +224,7 @@ pub const Pattern = struct {
         if (!lambda.isNixClosure()) {
             std.log.err("leds: eval pattern {s} is not a function", .{path});
             ev.deinit();
+            gpa.destroy(ev);
             gpa.free(text);
             return null;
         }
@@ -208,6 +232,7 @@ pub const Pattern = struct {
         ev.gcSetExternalRoots(&.{lambda}) catch |err| {
             std.log.err("leds: eval root pin failed: {s}", .{@errorName(err)});
             ev.deinit();
+            gpa.destroy(ev);
             gpa.free(text);
             return null;
         };
@@ -218,6 +243,7 @@ pub const Pattern = struct {
     pub fn deinit(self: *Pattern) void {
         if (comptime !have_fix) return;
         self.ev.deinit();
+        self.gpa.destroy(self.ev);
         self.gpa.free(self.text);
     }
 
@@ -239,9 +265,9 @@ pub const Pattern = struct {
 
     fn renderInner(self: *Pattern, fields: Fields, out: []Rgb) !u32 {
         if (comptime !have_fix) return error.EvalUnavailable;
-        const f = try applyFrame(&self.ev, self.lambda, fields);
-        try decodeLeds(&self.ev, f, fields.brightness, out); // reads bitmap ints
-        return finishFrame(&self.ev, &self.frame, f.next_ms); // collect after
+        const f = try applyFrame(self.ev, self.lambda, fields);
+        try decodeLeds(self.ev, f, fields.brightness, out); // reads bitmap ints
+        return finishFrame(self.ev, &self.frame, f.next_ms); // collect after
     }
 
     /// Evaluate one frame for a 1-bit OLED panel: apply the compiled lambda,
@@ -264,9 +290,9 @@ pub const Pattern = struct {
 
     fn renderOledInner(self: *Pattern, fields: Fields, out: []u8) !u32 {
         if (comptime !have_fix) return error.EvalUnavailable;
-        const f = try applyFrame(&self.ev, self.lambda, fields);
-        try decodeOled(&self.ev, f, out); // reads bitmap ints
-        return finishFrame(&self.ev, &self.frame, f.next_ms); // collect after
+        const f = try applyFrame(self.ev, self.lambda, fields);
+        try decodeOled(self.ev, f, out); // reads bitmap ints
+        return finishFrame(self.ev, &self.frame, f.next_ms); // collect after
     }
 };
 
@@ -280,7 +306,7 @@ pub const Pattern = struct {
 /// the caller falls back to the Zig screens.
 pub const ScreenSet = struct {
     gpa: std.mem.Allocator,
-    ev: Engine,
+    ev: EnginePtr,
     // Parallel arrays, one entry per loaded screen. `lambdas[i]` is compiled from
     // `texts[i]` (owned, kept alive for chunk error spans) and displayed as
     // `names[i]` (owned, derived from the file basename). All freed in `deinit`.
@@ -305,8 +331,12 @@ pub const ScreenSet = struct {
         // here (each screen is compiled once at startup) and `.auto` probes an
         // XDG_CACHE_HOME the service does not set. worker_count = 0: single
         // threaded, the badge has no spare cores to burn on eval.
-        var ev = Engine.init(gpa, .{ .worker_count = 0 }) catch |err| {
+        // Heap-allocate BEFORE the first compile so the lazily-installed GC hook
+        // pins the Engine's final address (see EnginePtr).
+        const ev = gpa.create(Engine) catch return null;
+        ev.* = Engine.init(gpa, .{ .worker_count = 0 }) catch |err| {
             std.log.err("bling: eval engine init failed: {s}", .{@errorName(err)});
+            gpa.destroy(ev);
             return null;
         };
         // Badge-scale budget: the lazy-arming collection path where the crash lives.
@@ -317,17 +347,20 @@ pub const ScreenSet = struct {
         // `count` before pinning.
         var lambdas = gpa.alloc(Value, paths.len) catch {
             ev.deinit();
+            gpa.destroy(ev);
             return null;
         };
         var texts = gpa.alloc([]u8, paths.len) catch {
             gpa.free(lambdas);
             ev.deinit();
+            gpa.destroy(ev);
             return null;
         };
         var names = gpa.alloc([]u8, paths.len) catch {
             gpa.free(lambdas);
             gpa.free(texts);
             ev.deinit();
+            gpa.destroy(ev);
             return null;
         };
 
@@ -379,6 +412,7 @@ pub const ScreenSet = struct {
             gpa.free(texts);
             gpa.free(names);
             ev.deinit();
+            gpa.destroy(ev);
             std.log.warn("bling: no eval screens loaded; falling back to computed screens", .{});
             return null;
         }
@@ -398,6 +432,7 @@ pub const ScreenSet = struct {
             gpa.free(texts);
             gpa.free(names);
             ev.deinit();
+            gpa.destroy(ev);
             return null;
         };
 
@@ -408,6 +443,7 @@ pub const ScreenSet = struct {
     pub fn deinit(self: *ScreenSet) void {
         if (comptime !have_fix) return;
         self.ev.deinit();
+        self.gpa.destroy(self.ev);
         for (self.texts) |t| self.gpa.free(t);
         for (self.names) |nm| self.gpa.free(nm);
         self.gpa.free(self.lambdas);
@@ -445,8 +481,8 @@ pub const ScreenSet = struct {
 
     fn renderOledInner(self: *ScreenSet, idx: usize, fields: Fields, out: []u8) !u32 {
         if (comptime !have_fix) return error.EvalUnavailable;
-        const f = try applyFrame(&self.ev, self.lambdas[idx], fields);
-        try decodeOled(&self.ev, f, out); // reads bitmap ints
+        const f = try applyFrame(self.ev, self.lambdas[idx], fields);
+        try decodeOled(self.ev, f, out); // reads bitmap ints
         // [fix #34] applyValue root-crosses EACH result into extra_roots and never
         // prunes it (evaluator.zig gcRootCrossingValue: "persists until the next
         // gcSetExternalRoots"). We pin once at open, so per-frame result attrsets
@@ -454,7 +490,7 @@ pub const ScreenSet = struct {
         // lambdas each frame (gcSetExternalRoots REPLACES the set), dropping this
         // frame's result. Safe: the bitmap ints are already decoded out.
         self.ev.gcSetExternalRoots(self.lambdas) catch {};
-        return finishFrame(&self.ev, &self.frame, f.next_ms); // collect after
+        return finishFrame(self.ev, &self.frame, f.next_ms); // collect after
     }
 };
 
@@ -544,7 +580,10 @@ test "renderOled decodes bitmap ints to page-major LE bytes" {
     defer arena.deinit();
     const gpa = arena.allocator();
 
-    var ev = try Engine.init(gpa, .{ .worker_count = 0 });
+    // Heap-allocate before the first evaluate (see EnginePtr): the GC hook pins
+    // the Engine's address at the compile below.
+    const ev = try gpa.create(Engine);
+    ev.* = try Engine.init(gpa, .{ .worker_count = 0 });
     // A two-int bitmap with distinct, byte-distinguishable values so a wrong
     // endianness or offset is caught: 0x04030201 and 0x08070605.
     const lambda = try ev.evaluate(
@@ -776,4 +815,98 @@ test "gc missed-edge repro: draw-heavy battery screen, frequent minor GC" {
         }, &fb);
     }
     reproMark("DONE\n", .{});
+}
+
+// BENCH (profiling #31): per-apply eval time vs number of applies, on a TRIVIAL
+// no-import screen. If eval time climbs with applies HERE, the accumulation is in
+// fix's compile-once/apply-per-frame machinery (GC/roots/stores), not the screen
+// content -- the minimal repro to instrument. Run: zig build test -Dfix-src=...
+test "bench: per-apply time vs applies (trivial screen)" {
+    if (comptime !have_fix) return;
+    var dbuf: [256]u8 = undefined;
+    const dir = try tmpScreenDir(&dbuf);
+    var pbuf: [512]u8 = undefined;
+    const src = "scope: { bitmap = [ scope.t 1 2 3 4 5 6 7 ]; nextMs = 33; }";
+    const path = try writeTmpScreen(&pbuf, dir, "bench.nix", src);
+
+    var p = Pattern.open(std.testing.allocator, path) orelse return error.BenchOpen;
+    defer p.deinit();
+
+    var out: [8]Rgb = undefined;
+    var i: usize = 0;
+    while (i < 6000) : (i += 1) {
+        const fields = Fields{ .t_ms = i, .width = 8, .height = 1 };
+        const t0 = linux.monotonicNsec();
+        _ = p.render(fields, &out) catch |e| {
+            std.debug.print("BENCH render err at apply {d}: {s}\n", .{ i, @errorName(e) });
+            return e;
+        };
+        const dt = linux.monotonicNsec() - t0;
+        if (i % 500 == 0) std.debug.print("BENCH apply {d}: {d} us\n", .{ i, @divTrunc(dt, @as(i128, 1000)) });
+    }
+    std.debug.print("BENCH done 6000 applies\n", .{});
+}
+
+// BENCH2 (profiling #31): the Bad-Apple SHAPE without HUD/imports -- a big PINNED
+// `data` list sliced per frame with `genList` at a GROWING index (i = scope.t), so
+// each apply forces progressively higher `data` elements. If eval time climbs HERE
+// (while the trivial bench1 stays flat), the accumulation is the interaction of the
+// forced-data set with the (major-only) GC, not the apply machinery. The STAT lines
+// from the instrumented collectNow show whether values/attrs/extra_roots grow.
+test "bench2: big pinned data + growing slice (badapple shape)" {
+    if (comptime !have_fix) return;
+    // Build the screen source in a temporary arena (page_allocator: no leak-tracking,
+    // so we measure fix's own behaviour, not the test allocator's OOM on our leaks).
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // FLAT big pinned data list (exactly the badge's flat Bad Apple `data` shape), sliced
+    // per frame at a GROWING index so each apply forces progressively higher elements.
+    const N: usize = 8000;
+    var list: std.ArrayListUnmanaged(u8) = .empty;
+    try list.appendSlice(a, "let data = [");
+    var k: usize = 0;
+    while (k < N) : (k += 1) {
+        var nb: [16]u8 = undefined;
+        try list.appendSlice(a, try std.fmt.bufPrint(&nb, " {d}", .{k}));
+    }
+    try list.appendSlice(a, " ]; nframes = 7900; mod = a: b: a - ((a / b) * b);" ++
+        " in scope: let i = mod scope.t nframes;" ++
+        " bb = builtins.genList (j: builtins.elemAt data (i + j)) 8;" ++
+        " in { bitmap = bb; nextMs = 33; }");
+
+    var dbuf: [256]u8 = undefined;
+    const dir = try tmpScreenDir(&dbuf);
+    var pbuf: [512]u8 = undefined;
+    const path = try writeTmpScreen(&pbuf, dir, "bench2.nix", list.items);
+
+    // Mirror the BADGE exactly: real (non-tracking) allocator, always_major ON, and the
+    // extra_roots reset before each collect (the badge fix). Manual apply/decode/collect
+    // so the reset lands BEFORE the sweep.
+    var p = Pattern.open(std.heap.page_allocator, path) orelse return error.Bench2Open;
+    defer p.deinit();
+    p.ev.setAlwaysMajor(true);
+    const roots = [_]Value{p.lambda};
+
+    var rgb: [8]Rgb = undefined;
+    var frame: u64 = 0;
+    var i: usize = 0;
+    while (i < 7900) : (i += 1) {
+        const fields = Fields{ .t_ms = i, .width = 8, .height = 1 };
+        const t0 = linux.monotonicNsec();
+        const f = applyFrame(p.ev, p.lambda, fields) catch |e| {
+            std.debug.print("BENCH2 apply err at {d}: {s}\n", .{ i, @errorName(e) });
+            return e;
+        };
+        try decodeLeds(p.ev, f, 255, &rgb);
+        frame += 1;
+        if (frame % collect_every == 0) {
+            p.ev.gcSetExternalRoots(&roots) catch {};
+            _ = p.ev.collectNow();
+        }
+        const dt = linux.monotonicNsec() - t0;
+        if (i % 500 == 0) std.debug.print("BENCH2 apply {d}: {d} us\n", .{ i, @divTrunc(dt, @as(i128, 1000)) });
+    }
+    std.debug.print("BENCH2 done 7900 applies\n", .{});
 }

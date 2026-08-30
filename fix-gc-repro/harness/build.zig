@@ -66,9 +66,14 @@ pub fn build(b: *std.Build) void {
         test_root.addImport("expr", graph.expr);
         test_root.addImport("runtime", graph.runtime);
     }
+    // Optional test-name filter (`-Dtest-filter=bench2`) so a single bench/repro
+    // runs in isolation — the GC investigations need clean per-test state (other
+    // tests pollute process-global counters and add minutes of runtime).
+    const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
     const tests = b.addTest(.{
         .root_module = test_root,
         .use_llvm = use_llvm,
+        .filters = if (test_filter) |f| b.dupeStrings(&.{f}) else &.{},
     });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");

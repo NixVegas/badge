@@ -38,6 +38,23 @@ pub const have_fix = build_options.have_fix;
 // otherwise so the gated methods still type-check on an eval-less build.
 const expr = if (have_fix) @import("expr") else struct {};
 const Engine = if (have_fix) expr.Engine else void;
+
+/// The Engine must NEVER move after its first evaluation. fix installs its GC
+/// hook lazily at the first eval (gc_coordinator.zig: "Install once, after the
+/// owning Engine has reached its final address") and pins the Engine's address
+/// into the heap's collection hook. Holding the Engine BY VALUE and returning
+/// it from open() moved it AFTER the compile had installed the hook, so every
+/// subsequent collection ran against the dead pre-move stack copy — diverging
+/// inline heap state between the mutator (live copy) and the GC (stale copy).
+/// THAT aliasing was the true root of the badge's whole GC pathology family:
+/// the #34 "missed edge" panics (the minor read the stale copy's remset), the
+/// unbounded reserved-bytes growth (sweeps freed into the stale free lists the
+/// live allocator never saw), the frames-played eval grind, and setters like
+/// setAlwaysMajor being silently ignored (written to the live copy, read from
+/// the stale one). Proven on the host harness: with the Engine heap-allocated,
+/// the badge-shaped bench runs 7900 applies FLAT (~0.5 ms) with zero panics.
+/// So: heap-allocate the Engine BEFORE the first evaluation; hold it by pointer.
+const EnginePtr = if (have_fix) *expr.Engine else void;
 const Value = if (have_fix) @import("runtime").value.Value else void;
 
 /// Largest pattern source we read. A live LED pattern is ~1 KiB, but a baked frame-list
@@ -74,7 +91,7 @@ fn ensureInts(gpa: std.mem.Allocator, ints: *[]i64, need: usize) !void {
 /// `Value`s are read out to ints.
 pub const FixBackend = struct {
     gpa: std.mem.Allocator,
-    ev: Engine,
+    ev: EnginePtr,
     lambdas: []Value,
     texts: [][]u8,
     names: [][]u8,
@@ -98,8 +115,13 @@ pub const FixBackend = struct {
         }
         if (paths.len == 0) return null;
 
-        var ev = Engine.init(gpa, .{ .worker_count = 0, .compile_cache = .off, .io = opts.io }) catch |err| {
+        // Heap-allocate BEFORE the first compile: the compile is an evaluation, which
+        // installs the GC hook at the Engine's CURRENT address (see EnginePtr). The move
+        // into `ev.*` happens before that, so the hook pins the final, stable address.
+        const ev = gpa.create(Engine) catch return null;
+        ev.* = Engine.init(gpa, .{ .worker_count = 0, .compile_cache = .off, .io = opts.io }) catch |err| {
             std.log.err("fix: eval engine init failed: {s}", .{@errorName(err)});
+            gpa.destroy(ev);
             return null;
         };
         // [#34] fix's young-gated MINOR collection has a remembered-set gap (a live young child
@@ -119,17 +141,20 @@ pub const FixBackend = struct {
 
         var lambdas = gpa.alloc(Value, paths.len) catch {
             ev.deinit();
+            gpa.destroy(ev);
             return null;
         };
         var texts = gpa.alloc([]u8, paths.len) catch {
             gpa.free(lambdas);
             ev.deinit();
+            gpa.destroy(ev);
             return null;
         };
         var names = gpa.alloc([]u8, paths.len) catch {
             gpa.free(lambdas);
             gpa.free(texts);
             ev.deinit();
+            gpa.destroy(ev);
             return null;
         };
 
@@ -165,6 +190,7 @@ pub const FixBackend = struct {
             gpa.free(texts);
             gpa.free(names);
             ev.deinit();
+            gpa.destroy(ev);
             std.log.warn("fix: no eval screens loaded", .{});
             return null;
         }
@@ -181,6 +207,7 @@ pub const FixBackend = struct {
             gpa.free(texts);
             gpa.free(names);
             ev.deinit();
+            gpa.destroy(ev);
             return null;
         };
 
@@ -193,6 +220,7 @@ pub const FixBackend = struct {
         if (self.ints.len > 0) self.gpa.free(self.ints);
         if (self.overlay_ints.len > 0) self.gpa.free(self.overlay_ints);
         self.ev.deinit();
+        self.gpa.destroy(self.ev);
         for (self.texts) |t| self.gpa.free(t);
         for (self.names) |nm| self.gpa.free(nm);
         self.gpa.free(self.lambdas);
@@ -217,7 +245,7 @@ pub const FixBackend = struct {
     /// calls it after decode), safe because the ints are already extracted here.
     pub fn applyFrame(self: *FixBackend, idx: usize, fields: eval.Fields) !eval.Frame {
         if (comptime !have_fix) return error.EvalUnavailable;
-        const ev = &self.ev;
+        const ev = self.ev; // heap-allocated (see EnginePtr)
         const scope = try ev.makeAttrs(&.{
             .{ .name = "t", .value = Value.int(@intCast(fields.t_ms)) },
             .{ .name = "frameIndex", .value = Value.int(@intCast(fields.frame_index)) },
