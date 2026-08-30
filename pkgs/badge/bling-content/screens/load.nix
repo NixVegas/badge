@@ -59,10 +59,10 @@ let
     let
       # Hero load1, big Gallant, top-left.
       s0 = d.drawText d.empty 0 0 ldStr;
-      # Caption to the right of the hero, vertically middled against it.
+      # Caption to the right of the hero, vertically centred against it. Just the
+      # window -- "LOAD AVG" was redundant (this is the load screen).
       capY = (d.gallant.height - sp.height) / 2;
-      s1 = sp.drawText s0 (d.textWidth ldStr + 6) capY "1 MINUTE";
-      s1b = sp.drawText s1 (d.textWidth ldStr + 6) (capY + sp.height + 1) "LOAD AVG";
+      s1b = sp.drawText s0 (d.textWidth ldStr + 6) capY "1 MINUTE";
 
       # Two full-width gauges below the hero. Each row: a "CPU nnn%" tag then a bar
       # filling to the right edge. Sized to fill the band from below the hero to the

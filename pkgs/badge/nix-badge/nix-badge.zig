@@ -1426,12 +1426,25 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     const sensor_refresh_ms: u64 = 500;
     var ctx = oledGather(&cpu);
     var last_gather_ms: u64 = ctx.now_ms;
+    // Battery EMA across gathers: a median-of-33 rejects single-read SPIKES but the
+    // leaky-divider SARADC also WANDERS slowly (temperature/load), so back-to-back
+    // 500 ms snapshots still jump visibly. Blend at alpha=0.25 (~2 s time constant)
+    // and derive percent from the SMOOTHED millivolts so both readouts agree.
+    var bat_mv_ema: ?f64 = if (ctx.battery_mv) |mv| @floatFromInt(mv) else null;
 
     while (!stop_requested.load(.monotonic)) {
         const now_ms = linux.monotonicMsec();
         if (now_ms - last_gather_ms >= sensor_refresh_ms) {
             ctx = oledGather(&cpu);
             last_gather_ms = now_ms;
+            if (ctx.battery_mv) |mv| {
+                const fresh: f64 = @floatFromInt(mv);
+                const ema = if (bat_mv_ema) |prev| prev * 0.75 + fresh * 0.25 else fresh;
+                bat_mv_ema = ema;
+                const smoothed: u64 = @intFromFloat(ema + 0.5);
+                ctx.battery_mv = @intCast(smoothed);
+                ctx.battery_pct = sysfs.percentFromMv(smoothed);
+            }
         }
         ctx.now_ms = now_ms;
         const cur = active_screens[screen_ix];

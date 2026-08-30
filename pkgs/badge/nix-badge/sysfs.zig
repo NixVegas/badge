@@ -385,6 +385,14 @@ pub const Battery = struct {
     percent: ?u8,
 };
 
+/// Linear percent over the pack window, clamped. Exposed so the oled loop can
+/// recompute percent from its EMA-smoothed millivolts (smoothing the voltage and
+/// deriving percent from the raw one would let the two readouts disagree).
+pub fn percentFromMv(mv: u64) u8 {
+    const c = std.math.clamp(mv, bat_empty_mv, bat_full_mv);
+    return @intCast((c - bat_empty_mv) * 100 / (bat_full_mv - bat_empty_mv));
+}
+
 /// Read the battery pack from the vbat iio-rescale channel. Fields are null if
 /// the channel is missing; the caller renders "--" gracefully.
 pub fn readBattery() Battery {
@@ -394,8 +402,7 @@ pub fn readBattery() Battery {
     const volts = channelVolts(dir, 0, "in_voltage0_scale") orelse return b;
     const mv: u64 = @intFromFloat(@max(volts, 0.0) * 1000.0);
     b.millivolts = @intCast(mv);
-    const c = std.math.clamp(mv, bat_empty_mv, bat_full_mv);
-    b.percent = @intCast((c - bat_empty_mv) * 100 / (bat_full_mv - bat_empty_mv));
+    b.percent = percentFromMv(mv);
     return b;
 }
 
