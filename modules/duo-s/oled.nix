@@ -79,22 +79,23 @@ in
     };
     gcBudgetMb = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 768;
+      default = 128;
       description = ''
         The fix Engine's GC collection line, in MiB: the heap-reserved size at which an
-        allocation triggers a collection. Must sit ABOVE the heaviest screen's live heap.
-        The full-song Bad Apple screen forces one delta frame into its hoisted (pinned)
-        `frames` constant per rendered frame, so its live heap climbs to ~400 MB over a
-        playback loop. Because collection is major-only (setAlwaysMajor, #34) EVERY collect
-        walks that whole live heap -- so if this budget is BELOW the heap, an allocation
-        major fires on essentially every frame and eval explodes to tens of seconds
-        (measured: budget 160 -> 0 fps / 24 s; budget 4000 -> 30-41 fps). Keep it well
-        above the plateau so allocation-triggered majors never fire; the per-frame young
-        garbage is still swept by the loop's periodic collectNow, and zram (see
-        common.nix) absorbs the cold pinned frames, so a high budget costs no real RAM.
-        fix's automatic line would be clamp(1/2 x MemTotal, 256 MB, 32 GB) = 256 MB on
-        this board, which is BOTH below the plateau (major storm) and near RAM (swap), so
-        an explicit value is set. aarch64 only (no Engine on riscv).
+        allocation triggers a collection. fix mints a fresh ~72 KB Value chunk per frame
+        (8192 Values), so the per-frame young garbage MUST be collected regularly or it
+        grows unbounded and overflows zram into SD swap (measured with the flat Bad Apple:
+        budget 768 -> swap climbs past 526 MB, eval re-explodes to 16 s; budget 96 -> swap
+        plateaus ~165 MB, eval ~5 ms). So this must sit only modestly above the Engine's
+        steady live heap (Engine baseline + the compiled ScreenSet + the flat Bad Apple
+        `data` list, together well under 100 MB now that no per-frame frame objects are
+        pinned -- see badapple-live.nix). Lower = tighter memory but more frequent
+        collection hitches; since collection is major-only (#34) each is ~O(live heap),
+        ~100 ms, so a too-low budget adds visible hitches while a too-high one leaks. 128
+        balances both and keeps the plateau safely inside zram. (The RIGHT long-term fix
+        is a correct CHEAP minor GC so collects are O(garbage), not O(heap) -- then this
+        knob barely matters.) fix's automatic line would be 256 MB on this board (too
+        high). aarch64 only (no Engine on riscv).
       '';
     };
     evalScreens = lib.mkOption {
