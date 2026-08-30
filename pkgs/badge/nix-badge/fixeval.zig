@@ -287,19 +287,24 @@ pub const FixBackend = struct {
         };
     }
 
-    /// Reclaim young Value garbage (the scope, result attrset, and bitmap/overlay lists of
-    /// the frames since the last collect). MUST be called only AFTER the caller has decoded
-    /// the frame (the ints are already extracted in `applyFrame`, so the sweep is safe). The
-    /// holder calls this on `eval.collect_every` cadence. No-op for the nix backend.
+    /// Reclaim the per-frame Value garbage (the scope, result attrset, and bitmap/overlay
+    /// lists of the frames since the last collect). MUST be called only AFTER the caller has
+    /// decoded the frame (the ints are already extracted in `applyFrame`, so the sweep is
+    /// safe). The holder calls this on `eval.collect_every` cadence. No-op for the nix backend.
     ///
-    /// A fast MINOR collect: correct now that the vendored gc-remset-young-source.patch fixes
-    /// fix's write-barrier (records young-source edges so a parent that tenures mid-minor
-    /// keeps its old->young edge). Before that patch this had to be collectMajorNow to dodge
-    /// the missed-edge death-spiral (#34), but a full major every 64 frames cost ~48ms and
-    /// showed as periodic GC pauses; the minor is ~1-5ms.
+    /// CRITICAL: reset the Engine's external root set to ONLY the compiled lambdas first.
+    /// `Engine.applyValue` -> `runWithVm` calls `gcRootCrossingValue(result)` on EVERY frame's
+    /// return Value (so it survives crossing back to native), and those roots PERSIST until the
+    /// next `gcSetExternalRoots` replaces the set. We set the roots once at open, so without
+    /// this reset `extra_roots` grew one result per frame forever -> every (major, #34)
+    /// collection marked an O(frames-played) set and per-frame eval climbed 5ms -> tens of
+    /// seconds over a playback (with the frames themselves never reclaimable). Re-pinning just
+    /// the lambdas drops the already-decoded results so the collect reclaims them; `extra_roots`
+    /// then stays bounded by `collect_every`, and majors stay cheap regardless of clip length.
     pub fn collect(self: *FixBackend) void {
         if (comptime !have_fix) return;
         const c0 = linux.monotonicNsec();
+        self.ev.gcSetExternalRoots(self.lambdas) catch {};
         _ = self.ev.collectNow();
         collect_ns_accum += linux.monotonicNsec() - c0;
     }
