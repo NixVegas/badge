@@ -239,28 +239,25 @@ int main(int argc, char **argv)
 	printf("  nframes = %lu;\n", frames);
 	printf("  # a mod b (Nix has no builtins.mod; integer division floors for >= 0).\n");
 	printf("  mod = a: b: a - (a / b) * b;\n");
-	// Close the outer (constant) let and open the per-frame lambda. The scope-DEPENDENT
-	// bindings (the HUD + the frame lookup) live in the INNER let, after `scope:`.
+	// `font`/`pad2` are also scope-INDEPENDENT -> keep them in the OUTER let so the font
+	// import (and its precomputed glyph column-byte table) is evaluated ONCE and captured,
+	// not re-imported/rebuilt per frame. This is the bulk of what makes the per-frame HUD
+	// cheap. Only `hud` (needs scope.backend/scope.fps) and `fr` are per-frame.
+	printf("  font = import <nixbadge/lib/font.nix>;\n");
+	printf("  pad2 = n: if n < 10 then \"0\" + toString n else toString n;\n");
 	printf("in\n");
 	printf("scope:\n");
 	printf("let\n");
 	// A [backend] fps HUD stamped over EVERY frame (keyframe or delta) via the overlay
-	// contract (eval.zig applyOverlay), using the shared importable font lib. scope.backend
-	// is 0=fix / 1=nix; scope.fps is the loop's measured rate. Gated to the NIX backend
-	// (scope.backend == 1): rendering the font per-frame in Nix is ~25-40 ms of eval, and on
-	// fix that young-allocation trips the GC missed-edge bug (#34). Lazy eval means `hud` is
-	// never forced when scope.backend != 1, so fix does zero HUD work (Bad Apple stays 60fps;
-	// fix is still identified by the journal [fix] tag). Bottom page (lower-left), fps
-	// zero-padded to 2 digits (01fps).
-	printf("  font = import <nixbadge/lib/font.nix>;\n");
-	printf("  pad2 = n: if n < 10 then \"0\" + toString n else toString n;\n");
+	// contract (eval.zig applyOverlay), bottom page (lower-left), fps zero-padded (01fps).
+	// Runs on BOTH backends now: fix's GC death-spiral is fixed by collectMajorNow (#34), and
+	// the precomputed-glyph + hoisted-import font makes the per-frame render cheap.
 	printf("  hud = font.renderText {\n");
 	printf("    text = \"[\" + (builtins.elemAt [ \"fix\" \"nix\" ] scope.backend) + \"] \" + pad2 scope.fps + \"fps\";\n");
 	printf("    x = 0;\n");
 	printf("    page = scope.height / 8 - 1;\n");
 	printf("    width = scope.width;\n");
 	printf("  };\n");
-	printf("  hudOn = scope.backend == 1;\n");
 	// frameIndex is a monotonic per-screen play counter (see badapple-delta.md "Playback
 	// model"); it wraps so the clip loops and resets to 0 (a keyframe) on screen entry.
 	printf("  fr = builtins.elemAt frames (mod scope.frameIndex nframes);\n");
@@ -269,8 +266,8 @@ int main(int argc, char **argv)
 	printf("  delta    = !fr.k;\n");
 	printf("  n        = fr.n or 0;\n");
 	printf("  nextMs   = %u;\n", next_ms);
-	printf("  overlay  = if hudOn then hud.overlay else [];\n");
-	printf("  overlayN = if hudOn then hud.overlayN else 0;\n");
+	printf("  overlay  = hud.overlay;\n");
+	printf("  overlayN = hud.overlayN;\n");
 	printf("}\n");
 
 	free(fb);

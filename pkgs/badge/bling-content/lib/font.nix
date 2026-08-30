@@ -33,6 +33,14 @@ let
   # (4-c)th bit of each row (bit 4 = leftmost column in the row-major table).
   colByte = rows: c: builtins.foldl' (acc: r: acc + (bit (builtins.elemAt rows r) (4 - c)) * (pow2 r)) 0 (builtins.genList (x: x) 8);
 
+  # Precompute each glyph's 5 vertical column bytes ONCE (lazy per codepoint, memoized).
+  # renderText then does a lookup instead of the pow2 bit-transpose every frame -- this is
+  # what keeps the per-frame HUD cheap. Only correct/cheap when the caller HOISTS
+  # `import <nixbadge/lib/font.nix>` out of the per-frame lambda so this attrset is stable
+  # across frames (otherwise it is rebuilt every frame; see emit_delta.c / badapple-live).
+  glyphColsByCp = builtins.mapAttrs (_: rows: builtins.genList (c: colByte rows c) 5) data.glyphs;
+  colsOf = ch: glyphColsByCp.${toString (cp.${ch} or 32)} or glyphColsByCp."32";
+
   advance = 6; # 5px cell + 1px gap
 in
 {
@@ -44,16 +52,17 @@ in
     { text, x ? 0, page ? 0, width ? 128 }:
     let
       # For each character, its advance columns (5 glyph cols + 1 gap) as { col; byte; }.
+      # `cols` is the precomputed 5 column bytes (a lookup, not a per-frame transpose).
       cells = builtins.concatMap (
         i:
         let
           ch = builtins.elemAt (chars text) i;
-          rows = glyphRows ch;
+          cols = colsOf ch;
           base = x + i * advance;
         in
         builtins.genList (c: {
           col = base + c;
-          byte = if c < 5 then colByte rows c else 0; # col 5 = inter-char gap
+          byte = if c < 5 then builtins.elemAt cols c else 0; # col 5 = inter-char gap
         }) advance
       ) (builtins.genList (i: i) (builtins.stringLength text));
 
