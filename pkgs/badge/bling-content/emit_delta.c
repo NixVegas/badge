@@ -247,10 +247,13 @@ int main(int argc, char **argv)
 	// by the journal [fix] tag. nix (no such GC bug) renders the on-panel HUD.
 	printf("  # [backend] fps HUD via the overlay contract + <nixbadge/lib/font.nix>,\n");
 	printf("  # gated to nix: rendering the font per-frame in Nix is too costly for fix (#34).\n");
+	printf("  # Placed on the BOTTOM page (lower-left), fps zero-padded to 2 digits (01fps).\n");
 	printf("  font = import <nixbadge/lib/font.nix>;\n");
+	printf("  pad2 = n: if n < 10 then \"0\" + toString n else toString n;\n");
 	printf("  hud = font.renderText {\n");
-	printf("    text = \"[\" + (builtins.elemAt [ \"fix\" \"nix\" ] scope.backend) + \"] \" + toString scope.fps + \"fps\";\n");
+	printf("    text = \"[\" + (builtins.elemAt [ \"fix\" \"nix\" ] scope.backend) + \"] \" + pad2 scope.fps + \"fps\";\n");
 	printf("    x = 0;\n");
+	printf("    page = scope.height / 8 - 1;\n");
 	printf("    width = scope.width;\n");
 	printf("  };\n");
 	printf("  hudOn = scope.backend == 1;\n");

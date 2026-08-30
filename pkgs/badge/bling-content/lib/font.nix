@@ -36,13 +36,14 @@ let
   advance = 6; # 5px cell + 1px gap
 in
 {
-  # renderText { text; x?; width?; } -> { overlay = [packed ints]; overlayN = count; }
-  # Draws `text` on page 0 starting at column `x`, clipped to `width`. The gap column after
+  # renderText { text; x?; page?; width?; } -> { overlay = [packed ints]; overlayN = count; }
+  # Draws `text` on `page` (0 = top 8 rows; height/8-1 = bottom) starting at column `x`,
+  # clipped to `width`. The GDDRAM byte offset is page*width + column. The gap column after
   # each glyph is emitted as byte 0 so the box is clean.
   renderText =
-    { text, x ? 0, width ? 128 }:
+    { text, x ? 0, page ? 0, width ? 128 }:
     let
-      # For each character, its advance columns (5 glyph cols + 1 gap) as { off; byte; }.
+      # For each character, its advance columns (5 glyph cols + 1 gap) as { col; byte; }.
       cells = builtins.concatMap (
         i:
         let
@@ -51,13 +52,14 @@ in
           base = x + i * advance;
         in
         builtins.genList (c: {
-          off = base + c;
+          col = base + c;
           byte = if c < 5 then colByte rows c else 0; # col 5 = inter-char gap
         }) advance
       ) (builtins.genList (i: i) (builtins.stringLength text));
 
-      # Clip to the panel width (off is a page-0 column == byte offset).
-      es = builtins.filter (e: e.off >= 0 && e.off < width) cells;
+      # Clip on COLUMN (0..width), then place on `page`: offset = page*width + col.
+      es = map (e: { off = page * width + e.col; inherit (e) byte; })
+        (builtins.filter (e: e.col >= 0 && e.col < width) cells);
       n = builtins.length es;
       E = e: e.off * 256 + e.byte;
       npairs = (n + 1) / 2;
