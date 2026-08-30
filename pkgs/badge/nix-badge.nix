@@ -85,6 +85,11 @@ let
         # earlier young-source-barrier attempt (which couldn't help -- the barrier never fires
         # for these edges -- and bloated the remset into multi-second collects).
         patch -p1 -d $out < ${./nix-badge/fix-stub/gc-seed-pinned-minor.patch}
+        # ...and the airtight belt (#34): force MAJOR-only collection. seedPinnedRegionMinor
+        # covers PINNED parents but the panic recurs with POST-arming tenured parents; a major
+        # rebuilds old/young from the true reachable set so it cannot sweep a live child at all.
+        # Enabled per-Engine via ev.setAlwaysMajor(true) in fixeval.zig.
+        patch -p1 -d $out < ${./nix-badge/fix-stub/gc-always-major.patch}
         # riscv64 support: a riscv64 fiber contextSwitch + MAP_NORESERVE + seq_cst
         # fence + hugetlb NORESERVE, so the RISC-V core gets the full evaluator too.
         # Source-only + arch-gated at comptime, so the hunks are inert on aarch64 /

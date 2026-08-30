@@ -1,0 +1,51 @@
+fix GC: force MAJOR-only collection (#34), airtight mitigation.
+
+seedPinnedRegionMinor fixed the PINNED-parent missed edges but the panic recurs on
+other screens (clock) with POST-ARMING tenured parents (id > track_from) referencing
+young children -- a broader minor remembered-set gap. Rather than chase every path,
+bypass the buggy minor entirely: `always_major` makes gcShouldMajor() always true, so
+BOTH the implicit allocation-triggered collect AND the explicit Engine.collectNow()
+run the full major path (seedPinnedRegion + full remset seed + gcMajorReconcile, which
+rebuilds old/young from the true reachable set and clears the remset). A major cannot
+sweep a live young child regardless of which old parent references it. Memory stays
+bounded (a major reclaims everything a minor would, plus old-gen garbage). Enabled per
+Engine via `ev.setAlwaysMajor(true)` in fixeval (the badge Engine has no env_map, so the
+FIX_GC_ALWAYS_MAJOR env variant does not apply).
+
+--- a/src/runtime/heap.zig	2026-08-29 21:01:56.846150360 -0700
++++ b/src/runtime/heap.zig	2026-08-29 21:01:56.902449584 -0700
+@@ -607,6 +607,10 @@
+     disable_reuse: bool = false,
+     report: GcReportState = .{},
+     promoted_since_major: u64 = 0,
++    /// Force every in-eval collection to run as a full MAJOR (skip the young-gated
++    /// minor entirely). Set via Engine.setAlwaysMajor -- workaround for the minor
++    /// remembered-set missed-edge bug (#34); a major is sound + memory-bounded.
++    always_major: bool = false,
+     major_gate: u64,
+     collect_enabled: bool = false,
+     track_from: ObjectId = 0,
+@@ -2104,6 +2108,7 @@
+     /// have tenured since the last major that the old generation likely holds a
+     /// live-set's worth of reclaimable garbage.
+     pub fn gcShouldMajor(self: *const ObjectHeap) bool {
++        if (self.collection.always_major) return true; // major-only override (#34)
+         // Constrained mode keeps precise transient roots from evaluation start
+         // specifically so the pre-arming half-budget can be reclaimed. Until
+         // one major reconciles it, `track_from` still points at the later
+--- a/src/expr/evaluator.zig	2026-08-29 21:01:56.858109849 -0700
++++ b/src/expr/evaluator.zig	2026-08-29 21:01:56.930448655 -0700
+@@ -853,6 +853,13 @@
+         self.collection.report_on = gc_report;
+     }
+ 
++    /// Force every in-eval + explicit collection to run as a full MAJOR, bypassing the
++    /// young-gated minor path (#34 workaround; a major reclaims everything a minor would
++    /// plus old-gen garbage, so memory stays bounded).
++    pub fn setAlwaysMajor(self: *Engine, on: bool) void {
++        self.heap.collection.always_major = on;
++    }
++
+     pub fn setLazyShellsVisible(self: *Engine, visible: bool) void {
+         self.lazy_shells_visible = visible;
+     }

@@ -102,6 +102,11 @@ pub const FixBackend = struct {
             std.log.err("fix: eval engine init failed: {s}", .{@errorName(err)});
             return null;
         };
+        // [#34] fix's young-gated MINOR collection has a remembered-set gap (a live young child
+        // reachable only from an old/pinned parent gets swept -> "missed edge" panic). Force
+        // MAJOR-only collection: a major rebuilds old/young from the true reachable set and
+        // cannot sweep a live object. Sound + memory-bounded (see gc-always-major.patch).
+        ev.setAlwaysMajor(true);
         if (opts.nix_path) |np| ev.setNixPath(np) catch |err|
             std.log.warn("fix: setNixPath('{s}') failed: {s}; <name> imports unavailable", .{ np, @errorName(err) });
 

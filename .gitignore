@@ -12,3 +12,4 @@ src/idf
 managed_components
 result
 result-*
+fix-gc-repro/fix-src-instr/
