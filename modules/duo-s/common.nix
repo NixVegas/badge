@@ -20,6 +20,24 @@ in
 {
   networking.hostName = "nixbadge-duos";
 
+  # zram: compressed RAM swap, the badge's single biggest responsiveness win. The
+  # fix Bad Apple screen materialises its 13140 delta frames LAZILY as it plays,
+  # each becoming a boxed Nix Value pinned by the frames list -- so the shared
+  # Engine grows from ~60 MB toward ~300 MB over a minute of playback and, on the
+  # 351 MB badge, crosses RAM and thrashes to the slow SD `/swap` file (measured:
+  # per-frame eval 5 ms -> 23 s, PSI memory `full` > 40 %, iowait ~80 %). 1-bit
+  # video deltas compress ~5-10x with zstd, so zram absorbs that working set in a
+  # fraction of the RAM and refaults become microsecond decompresses instead of
+  # SD reads. Sized above RAM (it compresses) and left at the default priority,
+  # which is higher than the SD `/swap` file (-1) -- so zram fills first and the
+  # SD file stays only as an overflow backstop. Both cores are memory-tight, so
+  # this lives in common.nix.
+  zramSwap = {
+    enable = true;
+    algorithm = "zstd";
+    memoryPercent = 150;
+  };
+
   # The SD image ships an ext4 root sized exactly to the store closure, so a
   # fresh card boots 100% full no matter how large the card is. These two
   # options fix that on every boot, in order:
