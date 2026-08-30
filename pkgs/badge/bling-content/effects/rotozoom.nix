@@ -7,10 +7,18 @@
 #   v  = (-dx*sin + dy*cos ) * zoom >> SHIFT
 #   lit = tex[(u + panX) & (TW-1)][(v + panY) & (TH-1)]
 #
-# cos/sin come from a hoisted integer sine table (fixed-point, scale 256); zoom
-# breathes with t; the texture pans so it also drifts. The TEXTURE and the SINE
-# table are hoisted constants (rule 1); per frame we read 3 scalars (cos, sin,
-# zoom) + 2 pan offsets and sample per pixel with a handful of int ops.
+# The TEXTURE and the SINE table are hoisted constants (rule 1) -- and, taken
+# to its limit, so is every FRAME: angle/zoom/pan depend on t ONLY through a
+# master phase p = (t/66) mod 32, i.e. 32 distinct frames, ever. Per phase:
+# angle index = p*8 (exactly one full 256-entry turn per 32-frame loop, so the
+# rotation wraps seamlessly), zoom = the same breathing sine evaluated at
+# index p*8 (one full 8..40 breath per loop), and pan drifts at a p-derived
+# time pt = p*160 through the original divisors. ALL 32 frames are precomputed
+# in the outer let (32 x 256 ints). The table is forced LAZILY: the first loop
+# through the phases pays the old per-frame cost once per new phase (a
+# progressive warmup), after which a frame render is just an elemAt + a
+# 256-int copy (~5 ms) instead of 8k per-pixel rotate+sample ops (~700 ms on
+# the badge core).
 #
 # ---- fixed point -----------------------------------------------------------
 # cos/sin are scaled by 256 (COSS). u,v accumulate dx*cos etc (scale 256) times
@@ -82,20 +90,12 @@ let
     page = i / intsPerPage;
     col0 = (i - (i / intsPerPage) * intsPerPage) * 4;
   }) nInts;
-in
-scope:
-let
-  t = scope.t;
-  ang = t / 24; # rotation angle index into the 256-turn
-  co = cosAt ang; # scale 256
-  si = sinAt ang;
-  # zoom breathes 8..40 (scale 16 => 0.5x .. 2.5x). A slow sine on t.
-  zoom = 24 + (sinAt (t / 60) * 16) / 256; # 8..40
-  panX = t / 40;
-  panY = t / 55;
 
-  # Column byte at absolute column x on `page`.
-  colByte = x: page:
+  # --- the 32-frame phase table -----------------------------------------------
+  # Column byte at absolute column x on `page`, given the frame's five scalars.
+  # This is the old per-frame kernel, verbatim, with co/si/zoom/pan passed in
+  # instead of derived from scope.t.
+  colByte = co: si: zoom: panX: panY: x: page:
     let
       base = page * 8;
       dx = x - cx;
@@ -111,20 +111,49 @@ let
       if texAt u v then acc + bit r else acc
     ) 0 (builtins.genList (i: i) 8);
 
-  frame = builtins.genList (i:
+  # ALL 32 frames, precomputed (see the hoisting note above). Per master phase p:
+  #   angle index = p*8  -> one full turn (256 sine entries) per 32-frame loop
+  #   zoom        = the same breathing formula evaluated at index p*8 (i.e. the
+  #                 old t := p*480, /60) -> one full 8..40 breath per loop
+  #   pan         = the original divisors at pt = p*160 -> the texture drifts
+  #                 ~4 cols / ~3 rows per phase across the loop
+  frames = builtins.genList (p:
     let
-      cp = builtins.elemAt colPage i;
-      c0 = cp.col0;
-      pg = cp.page;
-      b0 = colByte c0 pg;
-      b1 = colByte (c0 + 1) pg;
-      b2 = colByte (c0 + 2) pg;
-      b3 = colByte (c0 + 3) pg;
+      ang = p * 8; # rotation angle index into the 256-turn
+      co = cosAt ang; # scale 256
+      si = sinAt ang;
+      # zoom breathes 8..40 (scale 16 => 0.5x .. 2.5x), one breath per loop.
+      zoom = 24 + (sinAt (p * 8) * 16) / 256; # 8..40
+      pt = p * 160; # the p-derived "time" driving the pan drift
+      panX = pt / 40;
+      panY = pt / 55;
+      cb = colByte co si zoom panX panY;
     in
-    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
-  ) nInts;
+    builtins.genList (i:
+      let
+        cp = builtins.elemAt colPage i;
+        c0 = cp.col0;
+        pg = cp.page;
+        b0 = cb c0 pg;
+        b1 = cb (c0 + 1) pg;
+        b2 = cb (c0 + 2) pg;
+        b3 = cb (c0 + 3) pg;
+      in
+      b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+    ) nInts
+  ) 32;
+in
+scope:
+let
+  # One master phase per frame. t is ms; /66 -> a phase step every other ~30 fps
+  # tick, a full spin in ~2 s. Only the residue mod 32 matters; the whole frame
+  # for it is already tabled.
+  phase = builtins.bitAnd (scope.t / 66) 31;
+  f = builtins.elemAt frames phase;
 in
 {
-  bitmap = frame;
+  # A fresh (young, collectable) copy of the tabled frame, so the runtime's
+  # bitmap force never pins per-frame garbage into the tabled constants.
+  bitmap = builtins.genList (i: builtins.elemAt f i) nInts;
   nextMs = 33; # ~30 fps
 }

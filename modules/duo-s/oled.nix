@@ -77,6 +77,19 @@ in
         off) "nix" transparently falls back to fix at open().
       '';
     };
+    controller = lib.mkOption {
+      type = lib.types.enum [ "auto" "ssd1306" "sh1106" ];
+      default = "auto";
+      description = ''
+        Which controller drives the panel. "auto" probes at open: SH1106 supports
+        reading its display RAM back over I2C, SSD1306 does not, so a write+read-back
+        of two magic bytes discriminates them (falls back to ssd1306 on any I2C
+        error). The two matter because SH1106 (common on 1.3" 128x64 modules) has a
+        132-column RAM at a +2 offset and NO horizontal addressing mode -- an
+        SSD1306-style bulk flush on it shows a scrambled/offset "corrupted" image.
+        Set explicitly if the probe ever misidentifies a clone.
+      '';
+    };
     gcBudgetMb = lib.mkOption {
       type = lib.types.ints.positive;
       default = 128;
@@ -162,6 +175,8 @@ in
             "--backend ${cfg.backend}"
             # Cap the fix Engine's GC line so its heap collects instead of swapping (#28).
             "--gc-budget-mb ${toString cfg.gcBudgetMb}"
+            # SSD1306 vs SH1106 (auto = I2C read-back probe at open).
+            "--oled-controller ${cfg.controller}"
           ]
           # The pure-Nix eval screens: one repeated `--eval-screen PATH` per
           # configured screen. All compile into ONE shared fix Engine (a

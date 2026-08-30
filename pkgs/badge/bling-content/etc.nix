@@ -115,7 +115,7 @@ pkgs.runCommand "nixbadge-content"
         let r = (import $f) {
           t = 1234; frameIndex = 0; width = 128; height = $h; batteryMv = 4100;
           batteryPct = 87; onUsb = true; load1 = 0.42; cpuPct = 12; memPct = 40;
-          uptimeS = 90061; backend = 0; fps = 60;
+          uptimeS = 90061; backend = 0; fps = 60; strap = 1;
         };
         in if builtins.length r.bitmap == $want
               && builtins.all (x: builtins.isInt x) r.bitmap
@@ -131,7 +131,7 @@ pkgs.runCommand "nixbadge-content"
     # emitted `import <nixbadge/lib/font.nix>` + font.nix end-to-end (backend 1 = nix).
     nix --extra-experimental-features nix-command eval --impure --raw --expr "
       let r = (import $out/oled.d/10-badapple.nix) {
-        frameIndex = 0; width = 128; height = 64; backend = 1; fps = 60;
+        frameIndex = 0; width = 128; height = 64; backend = 1; fps = 60; strap = 1;
         t = 0; batteryMv = 0; batteryPct = 0; onUsb = false; load1 = 0.0;
         cpuPct = 0; memPct = 0; uptimeS = 0;
       };

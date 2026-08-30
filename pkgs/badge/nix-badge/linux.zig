@@ -310,6 +310,22 @@ pub const Spi = struct {
 
 pub const I2c = struct {
     pub const SLAVE: u32 = 0x0703;
+    pub const RDWR: u32 = 0x0707;
+    pub const M_RD: u16 = 0x0001;
+
+    /// linux/i2c.h `struct i2c_msg` — one segment of a combined transaction.
+    pub const Msg = extern struct {
+        addr: u16,
+        flags: u16,
+        len: u16,
+        buf: [*]u8,
+    };
+
+    /// linux/i2c-dev.h `struct i2c_rdwr_ioctl_data`.
+    pub const RdwrData = extern struct {
+        msgs: [*]Msg,
+        nmsgs: u32,
+    };
 };
 
 // ================================================================ gpio uAPI ===

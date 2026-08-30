@@ -262,6 +262,7 @@ pub const FixBackend = struct {
             .{ .name = "uptimeS", .value = Value.int(fields.uptime_s) },
             .{ .name = "backend", .value = Value.int(fields.backend_id) },
             .{ .name = "fps", .value = Value.int(fields.fps) },
+            .{ .name = "strap", .value = Value.int(fields.strap) },
         });
 
         const result = try ev.applyValue(self.lambdas[idx], scope);

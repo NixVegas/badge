@@ -14,12 +14,12 @@
 # i lives entirely in ONE page: page = i / 32, and it covers 4 columns
 # c0 = (i % 32)*4 .. c0+3, each contributing an 8-bit vertical slice.
 #
-# ---- hoisting (rule 1) -----------------------------------------------------
-# `colPage`  : for each of the 256 ints, its {page; col0} -- pure geometry, no t.
-# Per frame we still must XOR with y, so the field itself is t-dependent and
-# cannot be fully tabled; but the arithmetic per pixel is a handful of int ops
-# (xor, add, band, compare) with NO allocation of tables, so nix stays cheap:
-# 256 ints * 32 bits, each a few integer ops.
+# ---- hoisting (rule 1, taken to its limit) ---------------------------------
+# The field depends on t ONLY through `phase mod 32` -- 32 distinct frames,
+# ever. So ALL 32 frames are precomputed in the outer let (32 x 256 ints, forced
+# lazily one frame at a time as playback first reaches each phase) and a frame
+# render is just an elemAt + a 256-int slice: Bad-Apple-keyframe cheap (~5 ms)
+# instead of 8k per-pixel int ops per frame (~300 ms on the badge core).
 let
   # 2^n by doubling (Nix has bitAnd/bitOr/bitXor but no shift/pow builtin).
   p2 = n: builtins.foldl' (a: _: a * 2) 1 (builtins.genList (i: i) n);
@@ -42,39 +42,46 @@ let
   # taken mod 32 by masking low 5 bits; lit when that residue is < 16 gives a
   # 50% duty diamond ripple. Using masks (bitAnd) keeps it a pure int op.
   mask5 = 31; # value & 31  == value mod 32
-in
-scope:
-let
-  # One phase per frame. t is ms; /24 -> a brisk march of the diamonds. The XOR
-  # field is symmetric so we don't need a big range; masking wraps it.
-  phase = scope.t / 24;
 
-  # Column byte at absolute column x for this frame: 8 vertical pixels (rows
-  # page*8+0 .. +7) each lit iff ((x ^ y) + phase) & 31 < 16.
-  colByte = x: page:
+  # Column byte at absolute column x for phase p: 8 vertical pixels (rows
+  # page*8+0 .. +7) each lit iff ((x ^ y) + p) & 31 < 16.
+  colByte = p: x: page:
     let base = page * 8; in
     builtins.foldl' (acc: r:
       let
         y = base + r;
-        v = builtins.bitAnd (builtins.bitXor x y + phase) mask5;
+        v = builtins.bitAnd (builtins.bitXor x y + p) mask5;
       in
       if v < 16 then acc + bit r else acc
     ) 0 (builtins.genList (i: i) 8);
 
-  frame = builtins.genList (i:
-    let
-      cp = builtins.elemAt colPage i;
-      c0 = cp.col0;
-      pg = cp.page;
-      b0 = colByte c0 pg;
-      b1 = colByte (c0 + 1) pg;
-      b2 = colByte (c0 + 2) pg;
-      b3 = colByte (c0 + 3) pg;
-    in
-    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
-  ) nInts;
+  # ALL 32 frames, precomputed (see the hoisting note above). Each entry is the
+  # full 256-int packed frame for one phase residue.
+  frames = builtins.genList (p:
+    builtins.genList (i:
+      let
+        cp = builtins.elemAt colPage i;
+        c0 = cp.col0;
+        pg = cp.page;
+        b0 = colByte p c0 pg;
+        b1 = colByte p (c0 + 1) pg;
+        b2 = colByte p (c0 + 2) pg;
+        b3 = colByte p (c0 + 3) pg;
+      in
+      b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+    ) nInts
+  ) 32;
+in
+scope:
+let
+  # One phase per frame. t is ms; /24 -> a brisk march of the diamonds. Only the
+  # residue mod 32 matters; the whole frame for it is already tabled.
+  phase = builtins.bitAnd (scope.t / 24) mask5;
+  f = builtins.elemAt frames phase;
 in
 {
-  bitmap = frame;
+  # A fresh (young, collectable) copy of the tabled frame, so the runtime's
+  # bitmap force never pins per-frame garbage into the tabled constants.
+  bitmap = builtins.genList (i: builtins.elemAt f i) nInts;
   nextMs = 33; # ~30 fps
 }

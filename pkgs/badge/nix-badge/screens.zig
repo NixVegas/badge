@@ -15,6 +15,8 @@ const glyph_w = oled.glyph_w;
 pub const Context = struct {
     now_ms: u64,
     on_usb: ?u1,
+    /// Which core the boot-select strap currently picks: 0 unknown, 1 arm, 2 riscv.
+    strap: u8 = 0,
     battery_mv: ?u32,
     battery_pct: ?u8,
     load1: f64,

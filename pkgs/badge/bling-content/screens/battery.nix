@@ -1,6 +1,6 @@
 # The battery info screen as a PURE-NIX per-frame pattern (fix applyValue). Pairs
 # the two open faces from draw.nix: the charge percent BIG in Sun Gallant (hero),
-# millivolts + charge state on Spleen 5x8 detail rows, and a vertical charge gauge
+# millivolts + power source (USB/battery) on Spleen 5x8 detail rows, and a level gauge
 # pinned to the right edge. TWO hand-designed layouts, branched on the real panel
 # height (draw.nix packs to scope.height, so the bitmap is 128 ints @32 / 256 @64):
 #
@@ -36,7 +36,7 @@ let
         else d.fillRect g1 (gaugeX + 2) (height - 2 - fillH) (gaugeW - 4) fillH;
       s0 = d.drawText gauge 0 0 "${toString pct}%";
       mvStr = "${d.fixed2 scope.batteryMv}V";
-      state = if scope.onUsb then "CHG" else "BAT";
+      state = if scope.onUsb then "USB" else "BAT";
       detail = "${mvStr}  ${state}";
       s1 = sp.drawText s0 0 (height - sp.height) detail;
     in
@@ -65,7 +65,7 @@ let
       s0 = d.drawText gauge 0 heroY heroStr;
 
       mvStr = "${d.fixed2 scope.batteryMv} V";
-      state = if scope.onUsb then "CHARGING" else "ON BATTERY";
+      state = if scope.onUsb then "ON USB" else "ON BATTERY";
       row0 = sp.drawText s0 0 (height - 2 * sp.height) mvStr;
       s1 = sp.drawText row0 0 (height - sp.height) state;
     in

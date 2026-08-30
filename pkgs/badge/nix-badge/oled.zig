@@ -57,6 +57,54 @@ pub const glyph_w = font.glyph_w;
 
 pub const OpenError = error{ UnsupportedHeight, OutOfMemory };
 
+/// Which controller drives the panel. Matters because the two common 0.96"/1.3"
+/// module controllers have INCOMPATIBLE addressing:
+///  - ssd1306: 128-column GDDRAM, horizontal addressing mode (0x20/0x21/0x22) --
+///    one bulk data stream walks the whole window. Our default.
+///  - sh1106: 132-column RAM with the 128 visible columns at offset +2, and NO
+///    horizontal addressing mode (0x20/0x21/0x22 don't exist) -- page mode only
+///    (0xB0|page + column low/high nibbles), one page per data stream. An SSD1306
+///    bulk flush on an SH1106 pointer-wraps into the invisible columns and shows
+///    as a scrambled/offset "corrupted" image. Common on 1.3" 128x64 modules.
+pub const Controller = enum { ssd1306, sh1106 };
+
+/// The CLI/module-facing choice: an explicit controller, or probe at open.
+pub const ControllerChoice = enum { auto, ssd1306, sh1106 };
+
+/// SH1106's 128 visible columns sit at RAM columns 2..129.
+const sh1106_col_offset: u8 = 2;
+
+/// Probe which controller answers at the panel address. Discriminator: SH1106
+/// supports reading display RAM back over I2C (dummy byte + data), SSD1306 does
+/// NOT in serial mode (its read returns garbage/constants, or the transfer NAKs).
+/// Write two magic bytes at page 0 / RAM column 2, then read them back through a
+/// combined write[0x40-control]+read transaction; a match ⇒ SH1106. Both the
+/// page-select (0xB0) and column-nibble (0x00/0x10) commands are valid on both
+/// controllers (the SSD1306 resets into page mode), so the probe itself never
+/// corrupts state — and the caller re-inits + clears right after. Any I2C error
+/// ⇒ ssd1306 (the shipping default). `fd` must already be bound to the address.
+fn detectController(fd: linux.fd_t) Controller {
+    const magic = [_]u8{ 0xa5, 0x5a };
+    const setcol = [_]u8{ 0x00, 0xb0, 0x02, 0x10 }; // cmd control, page 0, col RAM 2
+    // Write the magic at page 0 col 2.
+    _ = linux.write(fd, &setcol) catch return .ssd1306;
+    const data = [_]u8{ 0x40, magic[0], magic[1] };
+    _ = linux.write(fd, &data) catch return .ssd1306;
+    // Point back at col 2 and read: control byte 0x40 (data), then dummy + 2 bytes.
+    _ = linux.write(fd, &setcol) catch return .ssd1306;
+    var ctrl = [_]u8{0x40};
+    var back: [3]u8 = @splat(0);
+    var msgs = [_]linux.I2c.Msg{
+        .{ .addr = i2c_addr, .flags = 0, .len = 1, .buf = &ctrl },
+        .{ .addr = i2c_addr, .flags = linux.I2c.M_RD, .len = back.len, .buf = &back },
+    };
+    var xfer = linux.I2c.RdwrData{ .msgs = &msgs, .nmsgs = msgs.len };
+    _ = linux.ioctl(fd, linux.I2c.RDWR, @intFromPtr(&xfer)) catch return .ssd1306;
+    // back[0] is the SH1106 dummy read; the data follows.
+    if (back[1] == magic[0] and back[2] == magic[1]) return .sh1106;
+    return .ssd1306;
+}
+
 /// A runtime-sized panel: an open i2c fd plus a heap framebuffer it owns. One
 /// instance per panel, passed by pointer, so there is no static state. `buf` is
 /// `1 + width*pages` bytes: byte 0 is the fixed 0x40 data control byte, `buf[1..]`
@@ -66,6 +114,7 @@ pub const Panel = struct {
     fd: linux.fd_t,
     width: u16,
     height: u16,
+    controller: Controller,
     /// 0x40 control byte + framebuffer. Owned; freed in `close`.
     buf: []u8,
 
@@ -86,7 +135,7 @@ pub const Panel = struct {
     /// Returns null (with a logged reason) on any failure — the panel is optional
     /// hardware, so a missing bus, a bad height, or OOM all mean "no panel" and
     /// the caller simply runs without it.
-    pub fn open(alloc: std.mem.Allocator, width: u16, height: u16) ?Panel {
+    pub fn open(alloc: std.mem.Allocator, width: u16, height: u16, choice: ControllerChoice) ?Panel {
         if (!heightSupported(height)) {
             std.log.warn("oled: unsupported height {d} (must be 32 or 64)", .{height});
             return null;
@@ -109,7 +158,16 @@ pub const Panel = struct {
             alloc.free(buf);
             return null;
         };
-        return .{ .alloc = alloc, .fd = fd, .width = width, .height = height, .buf = buf };
+        const controller: Controller = switch (choice) {
+            .ssd1306 => .ssd1306,
+            .sh1106 => .sh1106,
+            .auto => blk: {
+                const det = detectController(fd);
+                std.log.info("oled: controller autodetect -> {s}", .{@tagName(det)});
+                break :blk det;
+            },
+        };
+        return .{ .alloc = alloc, .fd = fd, .width = width, .height = height, .controller = controller, .buf = buf };
     }
 
     pub fn close(self: *Panel) void {
@@ -132,16 +190,26 @@ pub const Panel = struct {
         try self.sendCommands(&.{c});
     }
 
-    /// Push the whole framebuffer to GDDRAM: point the column/page windows at the
-    /// full panel, then stream `1 + width*pages` bytes behind the 0x40 control
-    /// byte already at buf[0].
+    /// Push the whole framebuffer to GDDRAM. SSD1306: point the column/page windows
+    /// at the full panel, then stream `1 + width*pages` bytes behind the 0x40 control
+    /// byte already at buf[0]. SH1106 has no windowed/horizontal addressing, so the
+    /// full flush is one page-mode span per page.
     pub fn flush(self: *Panel) linux.Error!void {
-        try self.sendCommands(&.{
-            Cmd.column_addr, 0, @intCast(self.width - 1),
-            Cmd.page_addr,   0, @intCast(self.pages() - 1),
-        });
-        const n = try linux.write(self.fd, self.buf);
-        if (n != self.buf.len) return error.Io;
+        switch (self.controller) {
+            .ssd1306 => {
+                try self.sendCommands(&.{
+                    Cmd.column_addr, 0, @intCast(self.width - 1),
+                    Cmd.page_addr,   0, @intCast(self.pages() - 1),
+                });
+                const n = try linux.write(self.fd, self.buf);
+                if (n != self.buf.len) return error.Io;
+            },
+            .sh1106 => {
+                var page: u16 = 0;
+                while (page < self.pages()) : (page += 1)
+                    try self.flushPageSpan(page, 0, self.width - 1);
+            },
+        }
     }
 
     /// Flush ONE page's column span [c0, c1] (inclusive) to GDDRAM. A page's bytes
@@ -155,10 +223,23 @@ pub const Panel = struct {
     pub fn flushPageSpan(self: *Panel, page: u16, c0: u16, c1: u16) linux.Error!void {
         std.debug.assert(page < self.pages());
         std.debug.assert(c0 <= c1 and c1 < self.width);
-        try self.sendCommands(&.{
-            Cmd.column_addr, @intCast(c0),   @intCast(c1),
-            Cmd.page_addr,   @intCast(page), @intCast(page),
-        });
+        switch (self.controller) {
+            .ssd1306 => try self.sendCommands(&.{
+                Cmd.column_addr, @intCast(c0),   @intCast(c1),
+                Cmd.page_addr,   @intCast(page), @intCast(page),
+            }),
+            // SH1106 page mode: select the page, then the start column via its low/high
+            // nibbles (+2 RAM offset). The column auto-increments across the data write;
+            // there is no end column (we write exactly `span` bytes and stop).
+            .sh1106 => {
+                const col: u8 = @as(u8, @intCast(c0)) + sh1106_col_offset;
+                try self.sendCommands(&.{
+                    0xb0 | @as(u8, @intCast(page)),
+                    0x00 | (col & 0x0f),
+                    0x10 | (col >> 4),
+                });
+            },
+        }
         const span: usize = @as(usize, c1 - c0) + 1;
         // 0x40 data control byte + up to a full 128-column SSD1306 row.
         var tmp: [1 + 128]u8 = undefined;
@@ -178,6 +259,34 @@ pub const Panel = struct {
         std.debug.assert(heightSupported(self.height));
         const mux: u8 = @intCast(self.height - 1);
         const com_pins: u8 = if (self.height == 32) 0x02 else 0x12;
+        if (self.controller == .sh1106) {
+            // SH1106: no memory-mode/window commands, and the charge pump is the
+            // 0xAD/0x8B pair (not SSD1306's 0x8D/0x14). Panel starts in page mode,
+            // which is the only mode flushPageSpan uses for it.
+            const seq6 = [_]u8{
+                Cmd.display_off,
+                Cmd.set_display_clock_div, 0x80,
+                Cmd.set_multiplex,         mux,
+                Cmd.set_display_offset,    0x00,
+                Cmd.set_start_line | 0x00,
+                0xad, 0x8b, // DC-DC pump on
+                Cmd.seg_remap,
+                Cmd.com_scan_dec,
+                Cmd.set_com_pins,          com_pins,
+                Cmd.set_contrast,          0x8f,
+                Cmd.set_precharge,         0x22,
+                Cmd.set_vcom_detect,       0x35,
+                Cmd.display_all_on_resume,
+                Cmd.normal_display,
+                Cmd.display_on,
+            };
+            var j: usize = 0;
+            while (j < seq6.len) : (j += 8) {
+                const end6 = @min(j + 8, seq6.len);
+                try self.sendCommands(seq6[j..end6]);
+            }
+            return;
+        }
         const seq = [_]u8{
             Cmd.display_off,
             Cmd.set_display_clock_div,

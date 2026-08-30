@@ -836,16 +836,16 @@ fn cmdPower(out: *Out) CmdError!void {
         w.writeAll("VSEL (system / VBUS): --\n") catch return error.Failed;
     }
 
-    // VBAT volts from the kernel power_supply node; percent/status from the same.
+    // VBAT pack volts + derived percent from the vbat iio channel (3x AA
+    // primaries: no charging state to report).
     const bat = sysfs.readBattery();
     if (bat.millivolts) |mv| {
         const v = @as(f64, @floatFromInt(mv)) / 1000.0;
-        const status = if (bat.status_len > 0) bat.status() else "unknown";
         if (bat.percent) |p| {
-            w.print("VBAT (battery):       {d:.3} V ({d}%, {s})\n", .{ v, p, status }) catch
+            w.print("VBAT (battery):       {d:.3} V ({d}%)\n", .{ v, p }) catch
                 return error.Failed;
         } else {
-            w.print("VBAT (battery):       {d:.3} V ({s})\n", .{ v, status }) catch
+            w.print("VBAT (battery):       {d:.3} V\n", .{v}) catch
                 return error.Failed;
         }
     } else {
@@ -1028,6 +1028,10 @@ fn oledGather(cpu: *screens.CpuMeter) screens.Context {
     return .{
         .now_ms = linux.monotonicMsec(),
         .on_usb = sysfs.readLine("usb-vbus-det"),
+        .strap = if (sysfs.readStrap()) |core| switch (core) {
+            .arm => @as(u8, 1),
+            .riscv => @as(u8, 2),
+        } else 0,
         .battery_mv = bat.millivolts,
         .battery_pct = bat.percent,
         .load1 = l1,
@@ -1037,61 +1041,65 @@ fn oledGather(cpu: *screens.CpuMeter) screens.Context {
     };
 }
 
-/// Carries the button press timing across `oledWait` calls.
+/// Carries button press timing across poll iterations (bootswap's hold loop).
 const PressState = struct { start_ms: u64 = 0, down: bool = false };
 
-/// Sleep until the absolute monotonic `deadline_ms` (the frame's start time plus
-/// its nextMs), waking early on a pending stop/pattern/screen flag, a SIGUSR1/2
-/// (poll returns EINTR), or a USER-button edge. The deadline is anchored to the
-/// frame START, not to this call, so the frame PERIOD is nextMs total -- the render
-/// + flush time is absorbed into the budget, not added on top of it. If render+flush
-/// already overran nextMs the deadline is in the past and this returns immediately,
-/// so playback runs as fast as the work allows (never faster than nextMs, never
-/// double-counted). The button is event-driven off its held request fd, so no press
-/// is dropped. A short press (<400 ms) sets the next-pattern flag, a long press the
-/// next-screen flag.
-fn oledWait(deadline_ms: u64, button: ?sysfs.Button, press: *PressState) void {
-    const poll_ms: u64 = 15; // button sampling period
-    while (true) {
-        if (eventPending()) return;
+/// Stops the button sampler thread at shutdown (set + join).
+var button_sampler_stop = std.atomic.Value(bool).init(false);
 
-        // Sample the button ONCE per iteration, BEFORE the deadline check, so a frame that
-        // overran its nextMs budget (deadline already in the past -> no idle time) still
-        // reads it. Coupling button sampling to leftover idle time meant polling silently
-        // died the instant frames got slow (the nix backend at ~30 fps, or any heavy
-        // screen): the deadline was always already past on entry, so oledWait returned
-        // before ever reading the level. Reading here guarantees >= one sample per rendered
-        // frame. The RTC/PWR gpio (USER button) has no edge IRQ; active-low, 0 = pressed. A
-        // release < oled_longpress_ms cycles the LED pattern, < backend_switch_ms cycles the
-        // screen, else flips the evaluator backend -- acted on at release, `press` carries.
-        if (button) |btn| {
-            if (btn.level()) |lvl| {
-                const t = linux.monotonicMsec();
-                const pressed = lvl == 0;
-                if (pressed and !press.down) {
-                    press.* = .{ .start_ms = t, .down = true };
-                } else if (!pressed and press.down) {
-                    press.down = false;
-                    const held = t - press.start_ms;
-                    const flag = if (held >= backend_switch_ms)
-                        &want_switch_backend
-                    else if (held >= oled_longpress_ms)
-                        &want_next_screen
-                    else
-                        &want_next_pattern;
-                    flag.store(true, .monotonic);
-                    return; // process the press promptly rather than finishing the wait
-                }
+/// USER-button sampler THREAD. The RTC/PWR gpio has no edge IRQ, so the button
+/// must be level-polled -- and polling from the render loop starved the instant
+/// frames got slow: a heavy screen spends 250 ms - 2 s inside one eval call
+/// where nothing samples, so a short press (both edges inside one eval) was
+/// physically unobservable and the user had to HOLD the button until the next
+/// frame boundary. This thread samples every 15 ms regardless of frame rate and
+/// reports through the same atomics SIGUSR1/2 use (the sanctioned global-state
+/// exception), so the loop's existing eventPending()/flag consumption is
+/// unchanged. Action latency is still bounded by the in-flight eval (the loop
+/// only reacts between frames), but no press is ever LOST. Release < 400 ms
+/// cycles the LED pattern, < backend_switch_ms cycles the screen, else flips
+/// the evaluator backend.
+fn buttonSampler(btn: sysfs.Button) void {
+    var down = false;
+    var start_ms: u64 = 0;
+    while (!button_sampler_stop.load(.monotonic)) {
+        if (btn.level()) |lvl| {
+            const t = linux.monotonicMsec();
+            const pressed = lvl == 0; // active-low
+            if (pressed and !down) {
+                down = true;
+                start_ms = t;
+            } else if (!pressed and down) {
+                down = false;
+                const held = t - start_ms;
+                const flag = if (held >= backend_switch_ms)
+                    &want_switch_backend
+                else if (held >= oled_longpress_ms)
+                    &want_next_screen
+                else
+                    &want_next_pattern;
+                flag.store(true, .monotonic);
             }
         }
+        linux.sleepNsec(15 * std.time.ns_per_ms);
+    }
+}
 
+/// Sleep until the absolute monotonic `deadline_ms` (the frame's start time plus
+/// its nextMs), waking early on a pending stop/pattern/screen flag or a SIGUSR1/2
+/// (poll returns EINTR). The deadline is anchored to the frame START, not to this
+/// call, so the frame PERIOD is nextMs total -- the render + flush time is absorbed
+/// into the budget, not added on top of it. If render+flush already overran nextMs
+/// the deadline is in the past and this returns immediately. Steps at 15 ms so a
+/// button flag latched by the sampler thread is acted on promptly mid-wait.
+fn oledWait(deadline_ms: u64) void {
+    const poll_ms: u64 = 15;
+    while (true) {
+        if (eventPending()) return;
         const now_ms = linux.monotonicMsec();
         if (now_ms >= deadline_ms) return;
-        // With a button, wake every poll_ms to keep sampling; without, sleep straight to the
-        // deadline (still wakes early on a signal via EINTR). @min narrows because poll_ms is
-        // comptime-known; widen back to u64 before scaling to ns.
         const remain = deadline_ms - now_ms;
-        const step: u64 = if (button != null) @min(poll_ms, remain) else remain;
+        const step: u64 = @min(poll_ms, remain);
         linux.sleepNsec(step * std.time.ns_per_ms);
     }
 }
@@ -1189,6 +1197,9 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     // the 351MB badge: fix's auto line clamps to a 256MB floor and grows into swap before
     // collecting, so the module passes an explicit --gc-budget-mb (see eval.Opts, #28).
     var gc_budget_bytes: u64 = 0;
+    // Panel controller: auto probes at open (SH1106 supports I2C RAM read-back,
+    // SSD1306 does not); an explicit value skips the probe.
+    var oled_controller: oled.ControllerChoice = .auto;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (optArg(args, &i, "--badapple")) |v| {
@@ -1203,6 +1214,11 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
                 return error.Usage;
             };
             gc_budget_bytes = @as(u64, mb) << 20;
+        } else if (optArg(args, &i, "--oled-controller")) |v| {
+            oled_controller = std.meta.stringToEnum(oled.ControllerChoice, v) orelse {
+                std.log.err("oled: bad --oled-controller '{s}' (auto|ssd1306|sh1106)", .{v});
+                return error.Usage;
+            };
         } else if (optArg(args, &i, "--eval-dir")) |v| {
             // Drop-in dir-based content: scan v for *.nix, sorted by name (NN- prefix =
             // cycle order). Appends to any explicit --eval-screen already collected.
@@ -1238,7 +1254,7 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     // The panel is optional hardware; open it first so its geometry is known before
     // we decide whether a baked clip fits. A missing bus / bad size / OOM all mean
     // "no panel" and we exit 0 (like the C) so systemd does not respin us.
-    var panel = oled.Panel.open(gpa, oled_width, oled_height) orelse {
+    var panel = oled.Panel.open(gpa, oled_width, oled_height, oled_controller) orelse {
         std.log.warn("oled: no OLED panel, nothing to do", .{});
         return;
     };
@@ -1356,12 +1372,24 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     installHandler(.USR2, onUser);
 
     // Request the USER button once as a polled INPUT (the RTC/PWR gpio has no edge
-    // IRQ, so the edge path ENXIOs); oledWait samples its level. Null when the DT
-    // exposes no line by this name, in which case only SIGUSR1/2 drive the
-    // screens/patterns.
+    // IRQ, so the edge path ENXIOs) and hand it to the sampler THREAD -- see
+    // buttonSampler for why in-loop polling could not work on slow screens. Null
+    // when the DT exposes no line by this name, in which case only SIGUSR1/2 drive
+    // the screens/patterns.
     var button = sysfs.Button.openPolled(button_name);
     defer if (button) |*b| b.close();
     if (button == null) std.log.info("oled: button '{s}' not found; SIGUSR1/2 only", .{button_name});
+    const button_thread: ?std.Thread = if (button) |btn|
+        std.Thread.spawn(.{}, buttonSampler, .{btn}) catch |err| blk: {
+            std.log.warn("oled: button sampler thread failed ({s}); SIGUSR1/2 only", .{@errorName(err)});
+            break :blk null;
+        }
+    else
+        null;
+    defer if (button_thread) |t| {
+        button_sampler_stop.store(true, .monotonic);
+        t.join();
+    };
 
     std.log.info("oled up on {s} @ 0x{x:0>2}, {d} screens, first {s}", .{
         oled.i2c_bus, oled.i2c_addr, active_screens.len, active_screens[0].name,
@@ -1369,8 +1397,8 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
 
     var screen_ix: usize = restoreScreen(active_screens);
     if (screen_ix != 0) std.log.info("oled: resuming screen {s}", .{active_screens[screen_ix].name});
-    var press: PressState = .{};
     var cpu = screens.CpuMeter.init();
+    var flush_fail_count: u32 = 0;
 
     // Effective-fps window: log the achieved rate every ~3 s so the sustained frame
     // rate (esp. 60 fps Bad Apple) is visible in the journal without a per-frame log.
@@ -1423,7 +1451,23 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
         // A delta frame flushes only its changed columns (a few dozen bytes); a full
         // frame (keyframe / info screen) flushes the whole panel. This partial flush
         // is what keeps 60 fps Bad Apple under the 400 kHz I2C bandwidth.
-        flushDirty(&panel, rendered.dirty) catch std.log.warn("oled: flush failed", .{});
+        if (flushDirty(&panel, rendered.dirty)) |_| {
+            flush_fail_count = 0;
+        } else |_| {
+            // Self-heal a panel that fell off the bus (brown-out / module reset): a
+            // single NAK is transient noise, but a RUN of failures means the
+            // controller lost its init state -- re-run the init sequence and push a
+            // full redraw. Retrying every 8th failure keeps the recovery attempts
+            // paced by the frame loop instead of hammering a dead bus.
+            flush_fail_count += 1;
+            if (flush_fail_count == 1) std.log.warn("oled: flush failed", .{});
+            if (flush_fail_count % 8 == 0) {
+                std.log.warn("oled: {d} consecutive flush failures; re-initing panel", .{flush_fail_count});
+                if (panel.init()) |_| {
+                    panel.flush() catch {};
+                } else |_| {}
+            }
+        }
         const t_flush1 = linux.monotonicNsec();
 
         // Effective fps over a ~3 s window (measured before the wait, so it reflects
@@ -1455,7 +1499,7 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
         // Frame-rate limit against the frame START (ctx.now_ms), so the period is
         // nextMs total, not nextMs on top of the render+flush time (which halved the
         // effective rate). A frame that overran nextMs makes this a no-op.
-        oledWait(ctx.now_ms + rendered.next_ms, button, &press);
+        oledWait(ctx.now_ms + rendered.next_ms);
 
         if (want_next_pattern.swap(false, .monotonic)) blingNextPattern();
         if (want_next_screen.swap(false, .monotonic)) {
@@ -1625,6 +1669,7 @@ fn evalFields(panel: *const oled.Panel, ctx: *const screens.Context, backend_id:
         .uptime_s = @intCast(@min(ctx.uptime_s, @as(u64, std.math.maxInt(u32)))),
         .backend_id = backend_id,
         .fps = fps,
+        .strap = ctx.strap,
     };
 }
 

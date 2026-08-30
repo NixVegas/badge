@@ -360,63 +360,42 @@ pub fn readJ6Volts() ?f64 {
 
 // ================================================================= battery ===
 //
-// The battery now has a kernel power_supply node, so we read it there rather than
-// off the SARADC (the port dropped the userspace battery cal). voltage_now is in
-// microvolts; capacity is 0..100; status is a short word.
+// Read VBAT straight from the vbat iio-rescale channel (median raw x scale,
+// exactly like readVselVolts) -- NOT from the generic-adc-battery power_supply
+// node. Post-SARADC-recal the rescaled iio channels are correct (VSEL
+// cross-checks against the ~5.1 V VBUS: raw*scale = 5.2 V), but the
+// power_supply's voltage_now reads ~HALF the real pack voltage (its own sample
+// path loads the divider differently), which is where "0% and wrong voltage"
+// came from: an earlier /2 correction calibrated against the pre-recal kernel
+// made it doubly wrong (1.3 V shown for a ~5.5 V pack, below the empty clamp
+// -> 0% always). The power_supply `status` ("Charging", VBUS-derived) is
+// meaningless for a primary-cell pack and is gone: the pack is 3x AA (lithium
+// primaries read ~1.8 V/cell fresh), nothing ever charges.
 
-const psu_dir = "/sys/class/power_supply/vbat-adc-battery";
-
-// The vbat-adc-battery node reports voltage_now at ~2x the true pack voltage (the iio-rescale
-// divider is double-counted: a 3xAA pack reads ~9.9 V but is ~4.96 V), so halve it. The proper
-// fix is the DT rescale, which needs an SD reflash; this is the deployable correction.
-const bat_scale_num: u64 = 1;
-const bat_scale_den: u64 = 2;
-// The node exposes NO `capacity` (generic-adc-battery has no monitored-battery/OCV table), so
-// percent is derived from the corrected voltage over the 3xAA usable window: ~1.1 V/cell (the
-// regulators' practical cutoff) to ~1.6 V/cell (fresh). Alkaline discharge is non-linear, so
-// this is a coarse gauge; tune the two bounds if it reads optimistic.
+// 3x lithium AA usable window: ~1.1 V/cell at the regulators' practical cutoff
+// to ~1.8 V/cell fresh. Lithium primaries hold a long ~1.5 V/cell plateau, so
+// the linear percent is a coarse gauge that lives mid-scale most of its life.
 const bat_empty_mv: u64 = 3300;
-const bat_full_mv: u64 = 4800;
+const bat_full_mv: u64 = 5400;
 
 pub const Battery = struct {
-    /// Millivolts, or null when the node is absent.
+    /// Millivolts, or null when the channel is absent.
     millivolts: ?u32,
     /// 0..100, or null when unknown.
     percent: ?u8,
-    status_buf: [24]u8 = @splat(0),
-    status_len: usize = 0,
-
-    pub fn status(self: *const Battery) []const u8 {
-        return self.status_buf[0..self.status_len];
-    }
 };
 
-/// Read the battery from sysfs. Any field may be null/empty if its node is
-/// missing; the caller renders "--"/"unknown" gracefully.
+/// Read the battery pack from the vbat iio-rescale channel. Fields are null if
+/// the channel is missing; the caller renders "--" gracefully.
 pub fn readBattery() Battery {
     var b: Battery = .{ .millivolts = null, .percent = null };
-
-    // voltage_now (microvolts) rides the leaky SARADC through the kernel rescale, so median
-    // it; then apply the 2x scale correction.
-    if (medianU64(psu_dir ++ "/voltage_now")) |uv| {
-        const mv: u64 = (uv / 1000) * bat_scale_num / bat_scale_den;
-        b.millivolts = @intCast(mv);
-        // Prefer a real `capacity` if the node ever grows one; otherwise derive percent from
-        // the corrected voltage over the 3xAA window (linear, clamped).
-        if (readU64(psu_dir ++ "/capacity")) |cap| {
-            b.percent = @intCast(@min(cap, 100));
-        } else {
-            const c = std.math.clamp(mv, bat_empty_mv, bat_full_mv);
-            b.percent = @intCast((c - bat_empty_mv) * 100 / (bat_full_mv - bat_empty_mv));
-        }
-    }
-    var sbuf: [64]u8 = undefined;
-    if (linux.readFile(psu_dir ++ "/status", &sbuf)) |s| {
-        const t = std.mem.trim(u8, s, " \t\r\n");
-        const n = @min(t.len, b.status_buf.len);
-        @memcpy(b.status_buf[0..n], t[0..n]);
-        b.status_len = n;
-    }
+    var dir_buf: [64]u8 = undefined;
+    const dir = findIioDir(&dir_buf, "label", "vbat") orelse return b;
+    const volts = channelVolts(dir, 0, "in_voltage0_scale") orelse return b;
+    const mv: u64 = @intFromFloat(@max(volts, 0.0) * 1000.0);
+    b.millivolts = @intCast(mv);
+    const c = std.math.clamp(mv, bat_empty_mv, bat_full_mv);
+    b.percent = @intCast((c - bat_empty_mv) * 100 / (bat_full_mv - bat_empty_mv));
     return b;
 }
 

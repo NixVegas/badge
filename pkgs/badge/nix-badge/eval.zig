@@ -57,6 +57,10 @@ pub const Fields = struct {
     /// Last measured effective frames/sec (the loop's 3 s window), fed to `scope.fps` so a
     /// screen can draw a live HUD. 0 until the first window closes.
     fps: u32 = 0,
+    /// Which core the boot-select STRAP currently picks (`scope.strap`): 0 unknown,
+    /// 1 arm, 2 riscv. Lets the currentsystem screen show the RUNNING arch next to
+    /// what the strap says the NEXT boot selects.
+    strap: u8 = 0,
 };
 
 /// One applied+extracted frame. `bitmap` is a plain int list the backend forced out of

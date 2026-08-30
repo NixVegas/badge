@@ -2,15 +2,22 @@
 # animated phase, thresholded to 1 bit with an ordered (Bayer 4x4) dither so the
 # soft blobs read as stippled gradients on the mono OLED.
 #
-#   v(x,y,t) = sinX[x*sx + t1]           (horizontal waves)
-#            + sinY[y*sy + t2]           (vertical waves)
-#            + diag[(x+y) + t3]          (diagonal waves)
-#            + rad [dist(x,y) + t4]      (concentric ripples from centre)
+#   v(x,y,p) = sinX[x*sx + t1(p)]        (horizontal waves)
+#            + sinY[y*sy + t2(p)]        (vertical waves)
+#            + diag[(x+y) + t3(p)]       (diagonal waves)
+#            + rad [dist(x,y) + t4(p)]   (concentric ripples from centre)
 #   lit  <=>  ((v + 4*128) & 255) > bayer[x&3][y&3] scaled
 #
-# All sine/distance/geometry tables are HOISTED (rule 1); per frame we only read
-# four phase offsets from t and, for each of the 256 packed ints, sum 4 table
-# lookups per pixel + one dither compare. No per-frame table is built.
+# All sine/distance/geometry tables are HOISTED (rule 1) -- and, taken to its
+# limit, so is every FRAME: the field depends on t ONLY through a master phase
+# p = (t/33) mod 32, i.e. 32 distinct frames, ever. The four per-field phase
+# offsets become p-derived (t1..t4 = p*8, p*13, p*5, p*21 -- mutually
+# coprime-ish multipliers so the fields still drift apart and the 32-frame
+# loop churns visibly), and ALL 32 frames are precomputed in the outer let
+# (32 x 256 ints). The table is forced LAZILY: the first loop through the
+# phases pays the old per-frame cost once per new phase (a progressive
+# warmup), after which a frame render is just an elemAt + a 256-int copy
+# (~5 ms) instead of 8k per-pixel 4-sine sums (~1-2 s on the badge core).
 #
 # ---- fixed point -----------------------------------------------------------
 # No floats: SIN is a 256-entry integer table, one full turn, amplitude +-60.
@@ -100,19 +107,12 @@ let
     page = i / intsPerPage;
     col0 = (i - (i / intsPerPage) * intsPerPage) * 4;
   }) nInts;
-in
-scope:
-let
-  # Four independent phase offsets from wall time -> the fields drift apart and
-  # the plasma churns. Different divisors = different speeds (classic look).
-  t = scope.t;
-  ph1 = t / 20;
-  ph2 = t / 27;
-  ph3 = t / 35;
-  ph4 = t / 15;
 
-  # Column byte for absolute column x on `page` (rows page*8 .. +7).
-  colByte = x: page:
+  # --- the 32-frame phase table -----------------------------------------------
+  # Column byte for absolute column x on `page` (rows page*8 .. +7), given the
+  # four phase offsets of one master phase. This is the old per-frame kernel,
+  # verbatim, with t1..t4 passed in instead of derived from scope.t.
+  colByte = t1: t2: t3: t4: x: page:
     let
       base = page * 8;
       ha = builtins.elemAt hArg x; # horizontal arg (col only)
@@ -121,29 +121,52 @@ let
       let
         y = base + r;
         va = builtins.elemAt vArg y;
-        v = sinAt (ha + ph1)
-          + sinAt (va + ph2)
-          + sinAt (x + y + ph3)
-          + sinAt (radAt x y + ph4);
+        v = sinAt (ha + t1)
+          + sinAt (va + t2)
+          + sinAt (x + y + t3)
+          + sinAt (radAt x y + t4);
         lvl = v + 240; # 0..480
       in
       if lvl > bayerAt x y then acc + bit r else acc
     ) 0 (builtins.genList (i: i) 8);
 
-  frame = builtins.genList (i:
+  # ALL 32 frames, precomputed (see the hoisting note above). Each entry is the
+  # full 256-int packed frame for one master phase p. The four field phases run
+  # at different p-multiples (coprime-ish: 8/13/5/21, taken mod 256 by sinAt's
+  # masking) so the fields drift apart across the loop -- the classic churning
+  # look, now periodic in 32 frames.
+  frames = builtins.genList (p:
     let
-      cp = builtins.elemAt colPage i;
-      c0 = cp.col0;
-      pg = cp.page;
-      b0 = colByte c0 pg;
-      b1 = colByte (c0 + 1) pg;
-      b2 = colByte (c0 + 2) pg;
-      b3 = colByte (c0 + 3) pg;
+      t1 = p * 8;  # horizontal
+      t2 = p * 13; # vertical
+      t3 = p * 5;  # diagonal
+      t4 = p * 21; # radial
+      cb = colByte t1 t2 t3 t4;
     in
-    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
-  ) nInts;
+    builtins.genList (i:
+      let
+        cp = builtins.elemAt colPage i;
+        c0 = cp.col0;
+        pg = cp.page;
+        b0 = cb c0 pg;
+        b1 = cb (c0 + 1) pg;
+        b2 = cb (c0 + 2) pg;
+        b3 = cb (c0 + 3) pg;
+      in
+      b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+    ) nInts
+  ) 32;
+in
+scope:
+let
+  # One master phase per frame. t is ms; /33 -> one phase step per ~30 fps tick.
+  # Only the residue mod 32 matters; the whole frame for it is already tabled.
+  phase = builtins.bitAnd (scope.t / 33) 31;
+  f = builtins.elemAt frames phase;
 in
 {
-  bitmap = frame;
+  # A fresh (young, collectable) copy of the tabled frame, so the runtime's
+  # bitmap force never pins per-frame garbage into the tabled constants.
+  bitmap = builtins.genList (i: builtins.elemAt f i) nInts;
   nextMs = 33; # ~30 fps
 }

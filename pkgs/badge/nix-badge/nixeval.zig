@@ -297,6 +297,7 @@ pub const NixBackend = struct {
         mi = self.addInt(bb, &members, mi, "uptimeS", fields.uptime_s);
         mi = self.addInt(bb, &members, mi, "backend", fields.backend_id);
         mi = self.addInt(bb, &members, mi, "fps", fields.fps);
+        mi = self.addInt(bb, &members, mi, "strap", fields.strap);
 
         const scope = c.nix_alloc_value(ctx, state);
         _ = c.nix_make_attrs(ctx, scope, bb); // consumes the builder's contents
