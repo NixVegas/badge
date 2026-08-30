@@ -2,16 +2,24 @@
 # applies once per frame (compile-once + native applyValue, the same path proven
 # for LEDs -- see pkgs/badge/nix-badge/fixeval.zig decodeOled). Unlike the baked
 # "BADA" blob (pkgs/badge/badapple, which the runtime mmaps), this emits a Nix
-# FUNCTION whose per-frame `frames` list mixes KEYFRAMES and DELTAS:
+# FUNCTION that carries every frame's ints in ONE FLAT list, sliced per frame:
 #
-#   scope:
-#   let frames = [
-#         { k = true;  b = [ <fbLen/4 ints> ]; }                  # keyframe
-#         { k = false; n = <count>; b = [ <ceil(count/2) ints> ]; }  # delta
-#         ... ]; nframes = N;
-#       mod = a: b: a - (a / b) * b;
-#   in let fr = builtins.elemAt frames (mod scope.frameIndex nframes);
-#      in { bitmap = fr.b; delta = !fr.k; n = fr.n or 0; nextMs = <1000/fps>; }
+#   let data   = [ <all frames' ints concatenated> ];   # keyframe + delta ints
+#       starts = [ <fc+1 offsets into data, trailing sentinel> ];
+#       ns     = [ <fc delta-entry counts; 0 for keyframes> ];
+#       nframes = N; keyint = K; mod = a: b: a - (a / b) * b;
+#   in scope:
+#      let i = mod scope.frameIndex nframes;
+#          start = builtins.elemAt starts i;
+#          len = (builtins.elemAt starts (i + 1)) - start;
+#          b = builtins.genList (j: builtins.elemAt data (start + j)) len;   # YOUNG slice
+#      in { bitmap = b; delta = (mod i keyint) != 0; n = builtins.elemAt ns i; nextMs = <1000/fps>; }
+#
+# FLAT so the fix Engine stays small: the old per-frame `frames = [ { k; n; b } ... ]`
+# forced fix to materialise + PIN ~13140 attrset + list objects (~400 MB) as the clip
+# played, which under the major-only GC made every allocating screen pay an O(heap)
+# collection. Flat pins just a few lists (~10 MB) and each frame's `b` is a young,
+# collectable slice, so the live heap stays flat.
 #
 # A KEYFRAME is the full frame packed like the old flat format: fbLen/4 ints, 4
 # consecutive page-major GDDRAM bytes per int LITTLE-ENDIAN (int = b0 | b1<<8 |
@@ -87,10 +95,13 @@ pkgs.stdenv.mkDerivation {
     runHook postBuild
   '';
 
-  # Self-test: the emitted Nix must declare the frame count the blob's header
-  # claims (one frame line per frame), and the keyframe lines must fall exactly
-  # at indices 0, K, 2K, ... -> ceil(fc/K) of them. A mismatch (a dropped/short
-  # frame, a geometry skew, a keyframe miscount) fails the build, not the badge.
+  # Self-test: the emitted Nix is now FLAT (see emit_delta.c) -- one `data` list of
+  # every frame's ints concatenated, indexed by `starts` (fc+1 offsets, trailing
+  # sentinel) and `ns` (fc delta-entry counts). The OLD per-frame attrset list
+  # pinned ~13140 objects in the fix Engine (~400 MB, so any allocating screen then
+  # paid an O(heap) major); flat pins only a few lists (~10 MB). Validate the shape:
+  # nframes matches the header, and starts/ns have the right element counts. The
+  # SEMANTIC check (frame 0 evals to a valid keyframe + HUD) lives in etc.nix.
   # The header's frame_count is the u32 at blob offset 12 (LE).
   doCheck = true;
   checkPhase = ''
@@ -100,24 +111,29 @@ pkgs.stdenv.mkDerivation {
     fc=$(od -An -tu4 -j12 -N4 "$blob" | tr -d ' ')
     echo "badapple-live: blob declares $fc frames"
 
-    # Count the emitted frame lines. Each frame -- keyframe or delta -- begins
-    # with 4 spaces + '{ ' (keyframe: '{ k = true;', delta: '{ k = false;').
-    lines=$(grep -c '^    { ' badapple-live.nix)
-    [ "$lines" -eq "$fc" ] || {
-      echo "SELF-TEST FAIL: $lines frame lines != $fc header frames" >&2; exit 1; }
+    grep -q "^  nframes = $fc;" badapple-live.nix || {
+      echo "SELF-TEST FAIL: nframes != $fc header frames" >&2; exit 1; }
 
-    # Keyframes are exactly the frames at indices 0, K, 2K, ... -> ceil(fc/K).
+    # `starts` has fc+1 entries (trailing sentinel); `ns` has fc. Each list is one
+    # line, so count its integer tokens. (`data` is skipped -- ~0.5M ints.)
+    n_starts=$(grep '^  starts = ' badapple-live.nix | grep -oE '[0-9]+' | wc -l)
+    [ "$n_starts" -eq "$(( fc + 1 ))" ] || {
+      echo "SELF-TEST FAIL: starts has $n_starts entries != fc+1 = $(( fc + 1 ))" >&2; exit 1; }
+
+    n_ns=$(grep '^  ns = ' badapple-live.nix | grep -oE '[0-9]+' | wc -l)
+    [ "$n_ns" -eq "$fc" ] || {
+      echo "SELF-TEST FAIL: ns has $n_ns entries != $fc" >&2; exit 1; }
+
+    # Keyframes fall at indices 0, K, 2K, ... -> ceil(fc/K).
     K=${toString keyframeInterval}
-    want_keys=$(( ( fc + K - 1 ) / K ))
-    got_keys=$(grep -c '^    { k = true;' badapple-live.nix)
-    [ "$got_keys" -eq "$want_keys" ] || {
-      echo "SELF-TEST FAIL: $got_keys keyframe lines != ceil($fc/$K) = $want_keys" >&2
-      exit 1; }
+    keys=$(( ( fc + K - 1 ) / K ))
+    grep -q "^  keyint = $K;" badapple-live.nix || {
+      echo "SELF-TEST FAIL: keyint != $K" >&2; exit 1; }
 
-    echo "SELF-TEST PASS: $fc frames ($got_keys keyframes @ K=$K, $(( fc - got_keys )) deltas)"
+    echo "SELF-TEST PASS: $fc frames flat (starts=$n_starts, ns=$n_ns, $keys keyframes @ K=$K)"
 
     echo "$fc" > .fc
-    echo "$got_keys" > .keys
+    echo "$keys" > .keys
 
     runHook postCheck
   '';

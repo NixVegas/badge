@@ -142,14 +142,31 @@ int main(int argc, char **argv)
 	printf("# Keyframe: full frame, %zu ints (4 page-bytes/int LE). Delta: n change\n",
 		words);
 	printf("# entries, 2/int, E = offset*256+byte, int = E0*262144 + E1.\n");
-	// `frames`/`nframes`/`mod` are scope-INDEPENDENT constants, so they go in an OUTER
-	// let, BEFORE `scope:` -- the lambda then CAPTURES them and they are evaluated once.
-	// Inside the per-frame lambda body they would be a per-application `let`, so nix would
-	// rebuild the entire 13140-element list literal on EVERY frame (~26k allocations/frame,
-	// GC death spiral); fix compiles it as a chunk constant either way, so this is inert for
-	// fix and the fix for nix.
+	// The delta stream is emitted FLAT to keep the fix Engine small. `data` is ONE list
+	// holding every frame's ints concatenated; `starts`/`ns` index it. The OLD form -- a
+	// 13140-element list of per-frame attrsets `{ k; n; b = [...] }` -- forced fix to
+	// materialise + PIN ~13140 attrset + nested-list objects as the clip played, ballooning
+	// the shared Engine to ~400 MB (the ints are only ~10-15 MB; the rest is per-object
+	// overhead) and, under the major-only GC, making every collection walk that whole
+	// GROWING live heap -> multi-second per-frame eval. Flat, only a few list objects stay
+	// pinned (~10 MB) and each frame slices its ints out as YOUNG, collectable garbage, so
+	// the heap stops growing. All scope-INDEPENDENT, so it lives in the OUTER let BEFORE
+	// `scope:` and is captured + evaluated once (essential for nix, which would otherwise
+	// rebuild it every frame; inert for fix, which compiles it as a chunk constant).
+	unsigned long *starts = malloc((frames + 1) * sizeof(unsigned long));
+	unsigned long *ns = malloc(frames * sizeof(unsigned long));
+	if (!starts || !ns) {
+		fprintf(stderr, "emit_delta: out of memory (index arrays)\n");
+		free(fb);
+		free(prev);
+		free(starts);
+		free(ns);
+		return 1;
+	}
+	unsigned long cursor = 0; // count of ints emitted into `data` so far
+
 	printf("let\n");
-	printf("  frames = [\n");
+	printf("  data = [");
 
 	// Running stats for the stderr summary.
 	unsigned long total_keyframes = 0;
@@ -167,11 +184,12 @@ int main(int argc, char **argv)
 		}
 
 		int is_keyframe = (f % keyint) == 0; // frame 0 always a keyframe
+		starts[f] = cursor;                  // where this frame's ints begin in `data`
 
 		if (is_keyframe) {
-			// Full frame: fbLen/4 ints, 4 page-bytes/int LE (== emit_nix.c).
+			// Full frame: `words` ints, 4 page-bytes/int LE (== emit_nix.c).
 			total_keyframes++;
-			fputs("    { k = true; b = [", stdout);
+			ns[f] = 0; // unused for keyframes (decoder ignores n when !delta)
 			for (size_t i = 0; i < words; i++) {
 				uint32_t v = (uint32_t)fb[i * 4 + 0] |
 					     ((uint32_t)fb[i * 4 + 1] << 8) |
@@ -179,20 +197,20 @@ int main(int argc, char **argv)
 					     ((uint32_t)fb[i * 4 + 3] << 24);
 				printf(" %lu", (unsigned long)v);
 			}
-			fputs(" ]; }\n", stdout);
+			cursor += words;
 		} else {
-			// Delta: emit each byte index i where fb[i] != prev[i], ascending,
-			// as E = i*256 + fb[i]; pack two per int, E0 in the high 18 bits.
+			// Delta: each changed byte index i as E = i*256 + fb[i], ascending,
+			// packed two per int (E0 in the high 18 bits). `ns[f]` = entry count so
+			// the decoder knows if the final int carries one entry or two.
 			total_delta_frames++;
 
-			// First pass: count the changes so we can emit `n` before `b`.
+			// First pass: count the changes.
 			size_t count = 0;
 			for (size_t i = 0; i < fb_len; i++)
 				if (fb[i] != prev[i])
 					count++;
 			total_delta_entries += (unsigned long long)count;
-
-			printf("    { k = false; n = %zu; b = [", count);
+			ns[f] = count;
 
 			// Second pass: pack. Hold a pending high entry E0; when its low
 			// partner E1 arrives, flush `E0*262144 + E1`. A trailing odd E0
@@ -217,13 +235,15 @@ int main(int argc, char **argv)
 				printf(" %" PRIu64, packed);
 			}
 
-			fputs(" ]; }\n", stdout);
+			cursor += (count + 1) / 2; // ints emitted into `data` = ceil(count / 2)
 		}
 
 		// The diff is lossless, so the exact reconstructed previous frame is
 		// simply this frame's raw bytes.
 		memcpy(prev, fb, fb_len);
 	}
+
+	starts[frames] = cursor; // sentinel: a frame's slice len is starts[i+1] - starts[i]
 
 	// Reject trailing bytes: a blob longer than its declared frame count is
 	// corrupt, and silently ignoring it would desync the loop.
@@ -232,11 +252,29 @@ int main(int argc, char **argv)
 		fprintf(stderr, "emit_delta: trailing bytes past %lu frames\n", frames);
 		free(fb);
 		free(prev);
+		free(starts);
+		free(ns);
 		return 1;
 	}
 
-	printf("  ];\n");
+	printf(" ];\n"); // close `data`
+
+	// Per-frame index into `data`: `starts` (with a trailing sentinel) gives each
+	// frame's slice as starts[i]..starts[i+1]; `ns` is the delta entry count (0 for
+	// keyframes, which the decoder ignores because delta = false).
+	printf("  starts = [");
+	for (unsigned long f = 0; f <= frames; f++)
+		printf(" %lu", starts[f]);
+	printf(" ];\n");
+	printf("  ns = [");
+	for (unsigned long f = 0; f < frames; f++)
+		printf(" %lu", ns[f]);
+	printf(" ];\n");
+	free(starts);
+	free(ns);
+
 	printf("  nframes = %lu;\n", frames);
+	printf("  keyint = %lu;\n", keyint);
 	printf("  # a mod b (Nix has no builtins.mod; integer division floors for >= 0).\n");
 	printf("  mod = a: b: a - (a / b) * b;\n");
 	// `font`/`pad2` are also scope-INDEPENDENT -> keep them in the OUTER let so the font
@@ -260,11 +298,19 @@ int main(int argc, char **argv)
 	printf("  };\n");
 	// frameIndex is a monotonic per-screen play counter (see badapple-delta.md "Playback
 	// model"); it wraps so the clip loops and resets to 0 (a keyframe) on screen entry.
-	printf("  fr = builtins.elemAt frames (mod scope.frameIndex nframes);\n");
+	// Slice this frame's ints out of the flat `data` list. `genList` builds a fresh
+	// (YOUNG, collectable) list of just this frame's `len` ints, so nothing per-frame
+	// is pinned -- the live heap stays flat instead of growing one frame per render.
+	// `isKey` is derived from the fixed keyframe interval, so no per-frame kind is stored.
+	printf("  i = mod scope.frameIndex nframes;\n");
+	printf("  isKey = (mod i keyint) == 0;\n");
+	printf("  start = builtins.elemAt starts i;\n");
+	printf("  len = (builtins.elemAt starts (i + 1)) - start;\n");
+	printf("  b = builtins.genList (j: builtins.elemAt data (start + j)) len;\n");
 	printf("in {\n");
-	printf("  bitmap   = fr.b;\n");
-	printf("  delta    = !fr.k;\n");
-	printf("  n        = fr.n or 0;\n");
+	printf("  bitmap   = b;\n");
+	printf("  delta    = !isKey;\n");
+	printf("  n        = builtins.elemAt ns i;\n");
 	printf("  nextMs   = %u;\n", next_ms);
 	printf("  overlay  = hud.overlay;\n");
 	printf("  overlayN = hud.overlayN;\n");
