@@ -1,0 +1,64 @@
+fix GC: seed the pinned pre-arming region in the MINOR mark (#34, definitive).
+
+Root cause (proven by instrumentation in fix-gc-repro): every "missed edge" parent
+is a PINNED pre-arming object (id < track_from) -- the compiled screen lambda + its
+captured __drawDep library, binding cells, interned scaffolding -- that acquires NEW
+young referents as evaluation continues (re-published binding cells, lazily-installed
+merge_attrs.flattened edges, re-forced attr_access results). The write barrier does
+NOT reliably capture these: it is a no-op before GC arming (collect_enabled=false),
+and its single remembered-set entry is consumed + cleared every minor (remsetClear).
+The minor mark seeds only markRoots + the remembered set; it NEVER walks the pinned
+region [0, track_from). So a live young child reachable ONLY from a pinned parent is
+unmarked and swept -> "minor mark not closed -- missed edge" panic (release: UAF).
+
+Majors are already correct: collectMajor calls seedPinnedRegion (markObject over the
+whole pinned region). The minor must do the equivalent YOUNG-GATED: markRemsetSource
+walks each pinned object's edges and marks only its YOUNG children (the minor gate in
+Tracer stops at old boundaries), so the cost is O(pinned outgoing edges), NOT
+O(old heap). track_from is ~8192 on the badge -> trivial.
+
+This SUPERSEDES gc-remset-young-source.patch (Fix A): the barrier never fires for
+these pinned->young edges at all, so recording young sources could not help -- and
+recording every young source bloated the remset into multi-second minor collects on
+draw-heavy frames. Drop Fix A; this is the correct, cheap fix. (Upstream should pair
+it with an incremental dirty-pinned watermark for whole-nixpkgs evals where track_from
+is millions; the flat scan is the obviously-correct fix the badge needs.)
+
+--- a/src/expr/eval/gc_controller.zig	2026-08-29 20:27:20.623116326 -0700
++++ b/src/expr/eval/gc_controller.zig	2026-08-29 20:28:22.701186393 -0700
+@@ -149,6 +149,7 @@
+         tr.beginSeeding(collector_slot);
+         markRoots(ev, tr);
+         heap_collector.forEachRemsetSource(ev.heap, SeedCtx{ .tr = tr, .heap = ev.heap }, Seed.cb);
++        seedPinnedRegionMinor(ev.heap, tr);
+         tr.endSeeding();
+         ev.scheduler.gcOpenMark();
+         tr.drainParallel(ev.heap, collector_slot); // returns at termination
+@@ -176,6 +177,7 @@
+         markRoots(ev, tr);
+         const p1 = nowNs();
+         heap_collector.forEachRemsetSource(ev.heap, CountSeedCtx{ .tr = tr, .heap = ev.heap, .n = &remset_sources }, CountSeed.cb);
++        seedPinnedRegionMinor(ev.heap, tr);
+         const p2 = nowNs();
+         tr.drainMinor(ev.heap);
+         const p3 = nowNs();
+@@ -556,6 +558,19 @@
+     while (id < pinned_end) : (id += 1) tr.markObject(heap, id);
+ }
+ 
++/// Minor analogue of `seedPinnedRegion`: the pinned pre-arming region [0, track_from)
++/// holds immortal objects that acquire NEW young referents as evaluation continues; the
++/// write barrier does not reliably capture these (no-op pre-arm; single remset entry
++/// cleared every minor), so a young-gated minor seeding only roots + remset never traces
++/// them and sweeps a live young child from a pinned parent (the "missed edge" panic).
++/// markRemsetSource marks only the source's YOUNG children and stops at old boundaries, so
++/// cost is O(pinned edges), not O(old heap). track_from is ~8192 on the badge.
++fn seedPinnedRegionMinor(heap: *ObjectHeap, tr: *gc.Tracer) void {
++    var id: types.ObjectId = 0;
++    const pinned_end = heap.collection.track_from;
++    while (id < pinned_end) : (id += 1) tr.markRemsetSource(heap, id);
++}
++
+ pub fn markVm(tr: *gc.Tracer, heap: *ObjectHeap, vm: *VM) void {
+     tr.markValue(heap, vm.builtins);
+     tr.markValue(heap, vm.gc_roots.extra); // value in-flight at the safepoint

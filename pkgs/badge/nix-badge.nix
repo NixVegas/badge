@@ -75,13 +75,16 @@ let
         # (chunks are permanent GC roots, never collected -- compile-per-frame
         # would leak). The flake pin (2b23db57) matches the patch's base exactly.
         patch -p1 -d $out < ${./nix-badge/fix-stub/native-apply.patch}
-        # GC missed-edge fix (#34): record young-source edges in the remembered set so a
-        # young parent that tenures mid-minor keeps its old->young edge -- otherwise the
-        # minor mark sweeps a live child -> "missed edge" panic / per-frame eval death-spiral
-        # on draw-heavy screens (Bad Apple's HUD, the info screens' pixel `//` merges). A
-        # one-line deletion of an unsound write-barrier fast-path; strictly conservative (the
-        # remset only grows), so the fast MINOR collect is correct and we avoid major-GC pauses.
-        patch -p1 -d $out < ${./nix-badge/fix-stub/gc-remset-young-source.patch}
+        # GC missed-edge fix (#34), DEFINITIVE: the minor mark never seeded the pinned
+        # pre-arming region, so a live young child reachable only from a pinned parent (the
+        # compiled screen lambda + its captured lib, which acquire new young referents every
+        # frame and are NOT captured by the write barrier) was swept -> "minor mark not closed
+        # -- missed edge" panic on draw-heavy screens. seedPinnedRegionMinor walks the pinned
+        # region young-gated in both minor branches (O(pinned edges) ~ 8192 on the badge; the
+        # major already did the equivalent). Root-caused via fix-gc-repro; supersedes the
+        # earlier young-source-barrier attempt (which couldn't help -- the barrier never fires
+        # for these edges -- and bloated the remset into multi-second collects).
+        patch -p1 -d $out < ${./nix-badge/fix-stub/gc-seed-pinned-minor.patch}
         # riscv64 support: a riscv64 fiber contextSwitch + MAP_NORESERVE + seq_cst
         # fence + hugetlb NORESERVE, so the RISC-V core gets the full evaluator too.
         # Source-only + arch-gated at comptime, so the hunks are inert on aarch64 /
