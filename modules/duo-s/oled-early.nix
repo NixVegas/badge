@@ -10,9 +10,11 @@
 # screen -- picked out of the shared contentTree: shipping all of oled.d would
 # drag the Bad Apple frame data into a RAM-loaded initrd on a 351 MB board.
 #
-# Unlike the bling unit this one does NOT survive switch_root: the stage-2 oled
-# service starts its own Engine and must own the panel/I2C bus, so the initrd
-# instance dies in the final kill (a brief blank across the handover is fine).
+# Like the bling unit, the splash SURVIVES switch_root: the stage-2 oled daemon
+# compiles its full ScreenSet first (5-10s), and only then kills this instance
+# by the pidfile (/run crosses switch_root) and takes the panel -- so the boot
+# info stays up through the whole compile and the panel is dark for ~100ms,
+# not the compile. See killPredecessor in nix-badge.zig.
 # The I2C stack needs no initrd module work: I2C=y, I2C_CHARDEV=y and
 # I2C_DESIGNWARE_PLATFORM=y are all built in, so /dev/i2c-1 exists from devtmpfs
 # before initrd userspace starts.
@@ -53,7 +55,14 @@ in
     boot.initrd.systemd.services.nixbadge-oled-boot = {
       description = "nixbadge OLED boot-info splash";
       wantedBy = [ "initrd.target" ];
-      unitConfig.DefaultDependencies = false;
+      unitConfig = {
+        DefaultDependencies = false;
+        IgnoreOnIsolate = true;
+        # Without this the initrd's final kill would blank the panel exactly
+        # when we want it to keep showing boot info; the stage-2 daemon kills
+        # us via the pidfile once ITS ScreenSet is compiled.
+        SurviveFinalKillSignal = true;
+      };
       serviceConfig = {
         Type = "simple";
         ExecStart = lib.concatStringsSep " " [

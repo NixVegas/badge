@@ -1084,7 +1084,16 @@ fn readBootInfo() void {
     var fbuf: [4096]u8 = undefined;
     nixos_version = cacheVersion(&nixos_version_buf, blk: {
         if (linux.readFile("/etc/os-release", &fbuf)) |txt| {
+            // BUILD_ID carries the FULL label ("26.05.20260812.9f78f4");
+            // VERSION_ID is just the release ("26.05"), which made the bootinfo
+            // hero and its detail row render the same string twice.
             var lines = std.mem.splitScalar(u8, txt, '\n');
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "BUILD_ID=")) {
+                    break :blk std.mem.trim(u8, line["BUILD_ID=".len..], "\" \r");
+                }
+            }
+            lines = std.mem.splitScalar(u8, txt, '\n');
             while (lines.next()) |line| {
                 if (std.mem.startsWith(u8, line, "VERSION_ID=")) {
                     break :blk std.mem.trim(u8, line["VERSION_ID=".len..], "\" \r");
@@ -1265,6 +1274,33 @@ fn collectNixScreens(gpa: std.mem.Allocator, dir: []const u8, out: [][]const u8,
     return c;
 }
 
+/// Take the panel from a surviving predecessor -- the initrd boot splash
+/// (oled-early.nix) lives through switch_root and keeps painting while THIS
+/// instance pays the ScreenSet compile; its pid crosses over in /run's pidfile.
+/// SIGTERM it and wait (<=1s) for the bus to free. Best-effort: no pidfile,
+/// a dead pid, or our own (a restart re-reading its own leftover) = no-op.
+fn killPredecessor() void {
+    var buf: [32]u8 = undefined;
+    const txt = linux.readFile(oled_pidfile, &buf) orelse return;
+    const pid = std.fmt.parseInt(i32, std.mem.trim(u8, txt, " \n\r"), 10) catch return;
+    if (pid <= 0 or pid == linux.getpid()) return;
+    // A stale pidfile (e.g. a plain restart: systemd already reaped the old
+    // instance) can hold a RECYCLED pid by the time our compile finishes --
+    // only signal something that is actually a nix-badge.
+    var comm_path_buf: [48]u8 = undefined;
+    var comm_buf: [32]u8 = undefined;
+    const comm_path = std.fmt.bufPrintZ(&comm_path_buf, "/proc/{d}/comm", .{pid}) catch return;
+    const comm = linux.readFile(comm_path, &comm_buf) orelse return;
+    if (!std.mem.startsWith(u8, comm, "nix-badge")) return;
+    linux.kill(pid, 15) catch return; // SIGTERM; ESRCH -> already gone
+    var tries: u32 = 0;
+    while (tries < 20) : (tries += 1) {
+        linux.kill(pid, 0) catch return; // signal 0 probes existence
+        linux.sleepNsec(50 * std.time.ns_per_ms);
+    }
+    std.log.warn("oled: predecessor pid {d} still alive after 1s; taking the panel anyway", .{pid});
+}
+
 fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdError!void {
     // Cache the constant-per-boot version strings before anything gathers a
     // Context (the registry-build probe render already reads them).
@@ -1355,10 +1391,13 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     };
     defer panel.close();
     // Memory guard (#30): the fix Engine (ScreenSet, ~72 MB) is only stood up
-    // below, AFTER this. A panel that is absent NAKs the SSD1306 init write, so we
-    // exit 0 here and never pay for the Engine on a display-less config. (systemd
-    // does not respin on exit 0.)
-    panel.init() catch {
+    // below, AFTER this. An absent panel NAKs the probe write, so we exit 0 here
+    // and never pay for the Engine on a display-less config. (systemd does not
+    // respin on exit 0.) Deliberately a NON-DESTRUCTIVE NOP, not init: the
+    // initrd boot splash may still be painting the panel (it survives
+    // switch_root), and it keeps doing so through the long ScreenSet compile
+    // below -- the real init runs after killPredecessor takes the panel over.
+    panel.probe() catch {
         std.log.warn("oled: no OLED responding at 0x{x:0>2}; skipping (fix Engine not started)", .{oled.i2c_addr});
         return;
     };
@@ -1419,6 +1458,17 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
         std.log.err("oled: no eval screens loaded; nothing to show", .{});
         return;
     }
+
+    // The ScreenSet is compiled; NOW take the panel: kill the surviving initrd
+    // splash (it kept the panel painted through the compile above) and run the
+    // real init+clear. The dark gap is the ~100ms between its last flush and
+    // our first frame, not the whole compile. An init fault after the takeover
+    // still exits 0 (panel yanked mid-boot).
+    killPredecessor();
+    panel.init() catch {
+        std.log.warn("oled: init failed at 0x{x:0>2} after takeover; skipping", .{oled.i2c_addr});
+        return;
+    };
 
     installHandler(.TERM, onStop);
     installHandler(.INT, onStop);

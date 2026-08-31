@@ -210,6 +210,16 @@ pub const Panel = struct {
         try self.sendCommands(&.{c});
     }
 
+    /// NON-DESTRUCTIVE presence check: a single NOP (0xE3, both controllers)
+    /// behind the command control byte. An absent panel NAKs its address and the
+    /// write errors; a present one ACKs and changes NO display state. This is
+    /// the #30 memory guard WITHOUT init's clear side effect, so the caller can
+    /// compile the ScreenSet while a predecessor (the initrd boot splash) is
+    /// still painting, and run the real `init` only after taking over.
+    pub fn probe(self: *Panel) linux.Error!void {
+        try self.sendCommand(0xE3);
+    }
+
     /// Push the whole framebuffer to GDDRAM. SSD1306: point the column/page windows
     /// at the full panel, then stream `1 + width*pages` bytes behind the 0x40 control
     /// byte already at buf[0]. SH1106 has no windowed/horizontal addressing, so the
@@ -285,19 +295,20 @@ pub const Panel = struct {
             // which is the only mode flushPageSpan uses for it.
             const seq6 = [_]u8{
                 Cmd.display_off,
-                Cmd.set_display_clock_div, 0x80,
-                Cmd.set_multiplex,         mux,
-                Cmd.set_display_offset,    0x00,
+                Cmd.set_display_clock_div,
+                0x80,
+                Cmd.set_multiplex,
+                mux,
+                Cmd.set_display_offset,
+                0x00,
                 Cmd.set_start_line | 0x00,
-                0xad, 0x8b, // DC-DC pump on
-                Cmd.seg_remap,
-                Cmd.com_scan_dec,
+                0xad,                      0x8b, // DC-DC pump on
+                Cmd.seg_remap,             Cmd.com_scan_dec,
                 Cmd.set_com_pins,          com_pins,
                 Cmd.set_contrast,          0x8f,
                 Cmd.set_precharge,         0x22,
                 Cmd.set_vcom_detect,       0x35,
-                Cmd.display_all_on_resume,
-                Cmd.normal_display,
+                Cmd.display_all_on_resume, Cmd.normal_display,
                 Cmd.display_on,
             };
             var j: usize = 0;

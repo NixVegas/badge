@@ -71,8 +71,10 @@ let
       s0 = sp.drawText d.empty (centreX sp topCap) 0 topCap;
       # Short version big in Gallant, centred, in the upper-middle band.
       s1 = d.drawText s0 (centreX d.gallant verShort) 10 verShort;
-      # Dense detail rows: full version, kernel release, arch.
-      s2 = sp.drawText s1 (centreX sp ver) 36 ver;
+      # Dense detail rows: full version, kernel release, arch. Skip the full
+      # version when it adds nothing over the hero (a fallback that only found
+      # the bare release would otherwise print "26.05" twice).
+      s2 = if ver != verShort then sp.drawText s1 (centreX sp ver) 36 ver else s1;
       s3 = sp.drawText s2 (centreX sp kern) 46 kern;
       s4 = sp.drawText s3 (centreX sp arch) 56 arch;
     in

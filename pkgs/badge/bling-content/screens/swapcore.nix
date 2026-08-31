@@ -21,9 +21,14 @@ let
     if hit == [ ] then n else builtins.head hit;
   arch = builtins.substring 0 (firstDash sys) sys;
 
-  strapName =
-    if (scope.strap or 0) == 1 then "ARM"
-    else if (scope.strap or 0) == 2 then "RISCV"
+  # The swap TARGET is the OPPOSITE of what the strap currently reads: holding
+  # the button latches the strap to the OTHER core. (An earlier cut showed the
+  # current strap as "NEXT", which is only different from "NOW" while a prior
+  # swap is still pending -- exactly the wrong moment to be wrong.)
+  strapCode = scope.strap or 0;
+  targetName =
+    if strapCode == 1 then "RISCV"
+    else if strapCode == 2 then "ARM"
     else "?";
 
   centreX = face: s: let x = (width - face.textWidth s) / 2; in if x < 0 then 0 else x;
@@ -34,26 +39,32 @@ let
 
   hero = "CORE SWAP";
   nowStr = "NOW ${arch}";
-  nextStr = "NEXT ${strapName}";
+  nextStr = "NEXT ${targetName}";
   holdStr = "HOLD TO SWAP";
 
-  # 64px: Gallant hero + a NOW/NEXT row + the blinking prompt. 32px: all-Spleen
-  # compact (the hero cell alone is ~22px, no room for rows beneath it).
+  # NOW/NEXT are STACKED rows: side by side they measure ~126px of 128 ("NOW
+  # aarch64" + "NEXT RISCV") and collide.
+  #
+  #   64px:                            32px (no room for a hero cell):
+  #   CORE SWAP     <- Gallant hero    CORE SWAP   HOLD  <- title + blink
+  #   NOW aarch64                      NOW aarch64
+  #   NEXT RISCV                       NEXT RISCV
+  #   HOLD TO SWAP  <- blinking
   layout64 =
     let
       s0 = d.drawText d.empty (centreX d.gallant hero) 0 hero;
       rowY = d.gallant.height + 4;
       s1 = sp.drawText s0 4 rowY nowStr;
-      s2 = sp.drawText s1 (width - sp.textWidth nextStr - 4) rowY nextStr;
+      s2 = sp.drawText s1 4 (rowY + sp.height + 2) nextStr;
       s3 = if blink then sp.drawText s2 (centreX sp holdStr) (height - sp.height - 1) holdStr else s2;
     in
     d.pack s3;
   layout32 =
     let
-      s0 = sp.drawText d.empty (centreX sp hero) 1 hero;
-      s1 = sp.drawText s0 4 12 nowStr;
-      s2 = sp.drawText s1 (width - sp.textWidth nextStr - 4) 12 nextStr;
-      s3 = if blink then sp.drawText s2 (centreX sp holdStr) (height - sp.height - 1) holdStr else s2;
+      s0 = sp.drawText d.empty 1 1 hero;
+      s1 = if blink then sp.drawText s0 (width - sp.textWidth "HOLD" - 1) 1 "HOLD" else s0;
+      s2 = sp.drawText s1 4 12 nowStr;
+      s3 = sp.drawText s2 4 22 nextStr;
     in
     d.pack s3;
 in
