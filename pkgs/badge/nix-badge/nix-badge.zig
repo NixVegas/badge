@@ -962,17 +962,43 @@ const oled_longpress_ms = 400;
 // A USER-button hold of at least this long switches the evaluator backend live (fix<->nix).
 const backend_switch_ms = 5000;
 
-/// Advance the runtime config's `pattern =` to the next non-off pattern, leaving
-/// every other line untouched so the running service hot-reloads only the
-/// pattern. "off" is skipped so a button press never blanks the ring.
+/// Where the pure-Nix LED patterns live; a short press cycles these files.
+/// Overridable via `--bling-dir` (oled subcommand arg parse).
+var bling_dir: []const u8 = "/etc/nixbadge/bling.d";
+
+/// Advance the runtime config's `eval =` to the NEXT pure-Nix pattern in
+/// /etc/nixbadge/bling.d (sorted; NN- prefix = cycle order), leaving every other
+/// line untouched so the running service hot-reloads only the pattern. This is
+/// the whole user-facing pattern surface now -- the old Zig-computed patterns
+/// are out of the cycle (they remain only as the eval-fault emergency fallback).
 fn blingNextPattern() void {
-    // Read the current pattern through the same parser the service uses.
+    // Scan the pattern dir fresh each press: drop-in files join the cycle with
+    // no restart (same contract as oled.d).
+    var buf: [16][]const u8 = undefined;
+    var sfa = std.heap.stackFallback(4096, std.heap.page_allocator);
+    const a = sfa.get();
+    const n = collectNixScreens(a, bling_dir, &buf, 0);
+    defer for (buf[0..n]) |p| a.free(p);
+    if (n == 0) {
+        std.log.warn("oled: no LED patterns in {s}; press ignored", .{bling_dir});
+        return;
+    }
+
+    // Read the current eval path through the same parser the service uses, find
+    // it in the cycle, and step to the next (an unknown/absent path starts at 0).
     var current = Config.default();
     layerRuntime(&current);
-    const patterns = std.enums.values(ws2812.Pattern);
-    var next: usize = (@intFromEnum(current.pattern) + 1) % patterns.len;
-    if (next == @intFromEnum(ws2812.Pattern.off)) next += 1; // never land on off
-    const want = @as(ws2812.Pattern, @enumFromInt(next)).name();
+    var next_ix: usize = 0;
+    const cur = current.eval();
+    if (cur.len > 0) {
+        for (buf[0..n], 0..) |p, i| {
+            if (std.mem.eql(u8, p, cur)) {
+                next_ix = (i + 1) % n;
+                break;
+            }
+        }
+    }
+    const want = buf[next_ix];
 
     switch (linux.mkdir(runtime_dir, 0o755)) {
         .created, .exists => {},
@@ -982,7 +1008,7 @@ fn blingNextPattern() void {
         },
     }
 
-    // Rewrite the file line by line, replacing only the pattern line (appending
+    // Rewrite the file line by line, replacing only the `eval =` line (appending
     // one if none existed). A modest output buffer suits this handful of lines.
     var in_buf: [8192]u8 = undefined;
     const existing = linux.readFile(runtime_conf, &in_buf) orelse &[_]u8{};
@@ -999,17 +1025,17 @@ fn blingNextPattern() void {
         pos = if (nl) |e| e + 1 else existing.len;
 
         const trimmed = std.mem.trimStart(u8, line, " \t");
-        if (std.mem.startsWith(u8, trimmed, "pattern")) {
-            const after = std.mem.trimStart(u8, trimmed[7..], " \t");
+        if (std.mem.startsWith(u8, trimmed, "eval")) {
+            const after = std.mem.trimStart(u8, trimmed[4..], " \t");
             if (after.len > 0 and after[0] == '=') {
-                w.print("pattern = {s}\n", .{want}) catch return;
+                w.print("eval = {s}\n", .{want}) catch return;
                 replaced = true;
                 continue;
             }
         }
         w.writeAll(line) catch return;
     }
-    if (!replaced) w.print("pattern = {s}\n", .{want}) catch return;
+    if (!replaced) w.print("eval = {s}\n", .{want}) catch return;
 
     linux.writeFile(runtime_conf, w.buffered()) catch {
         std.log.warn("oled: cannot write {s}", .{runtime_conf});
@@ -1208,6 +1234,9 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
             backend_kind = parseBackendKind(v);
         } else if (optArg(args, &i, "--content-root")) |v| {
             content_root = v;
+        } else if (optArg(args, &i, "--bling-dir")) |v| {
+            // Where the short-press LED pattern cycle scans (default /etc/nixbadge/bling.d).
+            bling_dir = v;
         } else if (optArg(args, &i, "--gc-budget-mb")) |v| {
             const mb = std.fmt.parseInt(u32, v, 10) catch {
                 std.log.err("oled: bad --gc-budget-mb '{s}'", .{v});
@@ -1465,6 +1494,18 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
         // frame (keyframe / info screen) flushes the whole panel. This partial flush
         // is what keeps 60 fps Bad Apple under the 400 kHz I2C bandwidth.
         if (flushDirty(&panel, rendered.dirty)) |_| {
+            if (flush_fail_count > 0) {
+                // The bus just came back after a failure streak. Mid-streak re-inits
+                // raced the unstable bus, and a moved/re-powered panel wakes in its
+                // RESET state (display off) -- so successful flushes alone leave it
+                // dark (field-observed on a port swap: "flush~4ms" yet a dark panel
+                // until a service restart). One clean redetect + init + full redraw
+                // now that writes are landing again.
+                std.log.info("oled: bus recovered after {d} flush failures; re-initing", .{flush_fail_count});
+                _ = panel.redetect();
+                panel.init() catch {};
+                panel.flush() catch {};
+            }
             flush_fail_count = 0;
         } else |_| {
             // Self-heal a panel that fell off the bus (brown-out / module reset): a

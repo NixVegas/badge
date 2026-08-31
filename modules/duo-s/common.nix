@@ -130,6 +130,12 @@ in
   nixbadge.bling = {
     enable = true;
     count = 24;
+    # Early boot evals Nix too: the declarative eval pattern ships in the initrd
+    # (bling.nix adds it), so the ring runs the SAME pure-Nix rainbow from the
+    # first initrd frame -- the Zig-computed patterns are out of the user-facing
+    # surface entirely (they remain only as the eval-fault emergency fallback).
+    # A short USER press cycles /etc/nixbadge/bling.d/*.nix once stage 2 is up.
+    evalPattern = "${contentTree}/bling.d/10-rainbow.nix";
   };
 
   # OLED engine: a SET of pure-Nix screens the embedded fix evaluator

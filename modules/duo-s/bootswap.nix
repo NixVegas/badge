@@ -9,6 +9,8 @@ let
   nixBadge = import ../../pkgs/badge/nix-badge.nix {
     inherit pkgs;
     fixSrc = badgeFixSrc;
+    # bootswap never evaluates Nix at all; same fast static instance as bling.
+    nixEval = false;
   };
 in
 {

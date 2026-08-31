@@ -39,13 +39,26 @@
   # riscv stays fix-only). The static-link recipe is proven -- see
   # docs/superpowers/plans/2026-08-29-nix-c-api-backend.md.
   nixEval ? true,
+  # Link the Nix C API DYNAMICALLY (shared nixComponents .so's + a patchelf'd NixOS glibc
+  # interpreter/rpath) instead of the static-musl archive link. The static LLD crunch of
+  # ~200 MB of .a's is the build's ~15-minute long pole; the dynamic link is seconds, so
+  # every Zig iteration on the oled runtime stops paying it. DYNAMIC BINARIES MUST NOT go
+  # in the initrd (the LED painter survives switch_root precisely because the static
+  # binary resolves with no interpreter): the bling/initrd instance stays static, only the
+  # stage-2 oled service uses this. aarch64 + nixEval only.
+  nixDynamic ? false,
 }:
 let
   hp = pkgs.stdenv.hostPlatform;
   lib = pkgs.lib;
+  # The dynamic variant targets glibc (the shared nixComponents are glibc builds); pin
+  # zig's glibc-stub version to nixpkgs' major.minor so linked symbol versions exist at
+  # runtime. Everything else stays static musl (see the header note).
+  wantDynamic = nixDynamic && nixEval && hp.isAarch64;
+  glibcMM = lib.versions.majorMinor pkgs.glibc.version;
   zigTarget =
     if hp.isAarch64 then
-      "aarch64-linux-musl"
+      (if wantDynamic then "aarch64-linux-gnu.${glibcMM}" else "aarch64-linux-musl")
     else if hp.isRiscV64 then
       "riscv64-linux-musl"
     else
@@ -106,9 +119,14 @@ let
 
   # ---- Nix C API backend (aarch64 only) --------------------------------------------------
   wantNix = nixEval && hp.isAarch64;
-  # The split C API components (aarch64-musl-static): nix-expr-c pulls in nix-expr/store/util
-  # + boost + boehm-gc; the -c siblings carry the other nix_api_*.h.
-  nixComps = pkgs.pkgsStatic.nixVersions.nixComponents_2_34;
+  # The split C API components: static -> aarch64-musl-static archives (the proven
+  # ~15-minute LLD link); dynamic -> the ordinary shared glibc builds (cache-served,
+  # linked in seconds; deps resolve transitively through each .so's own baked rpath).
+  nixComps =
+    if wantDynamic then
+      pkgs.nixVersions.nixComponents_2_34
+    else
+      pkgs.pkgsStatic.nixVersions.nixComponents_2_34;
   nixExprC = nixComps."nix-expr-c";
   nixStoreC = nixComps."nix-store-c";
   nixUtilC = nixComps."nix-util-c";
@@ -165,7 +183,23 @@ pkgs.buildPackages.stdenv.mkDerivation {
     export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
 
     nixArgs=""
-    ${lib.optionalString wantNix ''
+    ${lib.optionalString (wantNix && wantDynamic) ''
+      # DYNAMIC Nix C API link: -l the shared components; their transitive deps
+      # (boost, curl, boehm-gc, ...) resolve through each .so's own baked rpath, so
+      # no archive/objs dance and the link takes seconds instead of ~15 minutes.
+      PC_DIRS=""
+      for p in $(cat ${nixClosure}/store-paths); do
+        for d in "$p/lib/pkgconfig" "$p/share/pkgconfig"; do [ -d "$d" ] && PC_DIRS="$PC_DIRS:$d"; done
+      done
+      export PKG_CONFIG_PATH="''${PC_DIRS#:}"
+      NIX_INC="${nixExprCHeaders}/include:${nixStoreC.dev}/include:${nixUtilC.dev}/include"
+      PKGCONFIG="${pkgs.pkgsBuildBuild.pkg-config}/bin/pkg-config"
+      NIX_LIBS=$("$PKGCONFIG" --libs-only-l nix-expr-c | tr ' ' '\n' | sed -n 's/^-l//p' | grep . | paste -sd,)
+      NIX_LIBDIRS=$("$PKGCONFIG" --libs-only-L nix-expr-c | tr ' ' '\n' | sed -n 's/^-L//p' | grep . | sort -u | paste -sd:)
+      nixArgs="-Dnix-include=$NIX_INC -Dnix-libdirs=$NIX_LIBDIRS -Dnix-libs=$NIX_LIBS"
+      echo "nix-badge: linking Nix C API backend DYNAMICALLY ($NIX_LIBS)"
+    ''}
+    ${lib.optionalString (wantNix && !wantDynamic) ''
       # Nix C API link flags from pkg-config + the closure (the proven static-link recipe).
       PC_DIRS=""
       for p in $(cat ${nixClosure}/store-paths); do
@@ -199,6 +233,28 @@ pkgs.buildPackages.stdenv.mkDerivation {
     ''}
 
     zig build -Dtarget=${zigTarget} -Doptimize=ReleaseSafe ${fixArg} $nixArgs --prefix "$out"
+
+    ${lib.optionalString wantDynamic ''
+      # NixOS has no /lib/ld-linux-*.so.1: point the binary at nixpkgs' aarch64 glibc
+      # loader and bake an rpath for the DIRECT DT_NEEDEDs (the libnix*-c components,
+      # libstdc++, glibc); each nix .so resolves its own deps through its own rpath.
+      # The store paths written into the ELF are what make nix retain the shared libs
+      # in this package's closure.
+      RPATH="$NIX_LIBDIRS:${lib.getLib pkgs.stdenv.cc.cc}/lib:${pkgs.glibc}/lib"
+      ${pkgs.buildPackages.patchelf}/bin/patchelf \
+        --set-interpreter ${pkgs.glibc}/lib/ld-linux-aarch64.so.1 \
+        --set-rpath "$RPATH" "$out/bin/nix-badge"
+      echo "nix-badge: dynamic interpreter + rpath set"
+    ''}
+
+    # ReleaseSafe embeds zig's bundled musl/std SOURCE PATHS in panic/debug
+    # strings, which retains the entire zig package -- and through it the
+    # clang/llvm libs, ~3.8 GB -- in the badge system closure. Those paths are
+    # only ever PRINTED in panic messages, so mangle the store hash and let nix
+    # drop the reference (panic traces show a defaced path; nothing dereferences
+    # it). This alone halves the SD image's system closure.
+    ${pkgs.buildPackages.removeReferencesTo}/bin/remove-references-to \
+      -t ${pkgs.buildPackages.zig} "$out/bin/nix-badge"
     runHook postBuild
   '';
 

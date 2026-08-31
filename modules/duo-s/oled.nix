@@ -21,6 +21,11 @@ let
   nixBadge = import ../../pkgs/badge/nix-badge.nix {
     inherit pkgs;
     fixSrc = badgeFixSrc;
+    # The oled service is stage-2 only (never in the initrd), so it can link the
+    # Nix C API dynamically: the shared-.so link takes seconds where the static
+    # archive link took ~15 minutes, which is the whole edit-build-deploy loop
+    # for runtime work. See nixbadge.oled.dynamicNix.
+    nixDynamic = cfg.dynamicNix;
   };
   # The Bad Apple blob is arch-independent DATA (a packed 1-bit frame file), but
   # producing it runs ffmpeg + a tiny C packer. Build those on the build host
@@ -75,6 +80,30 @@ in
         which is then honoured over this default on the next start (like the screen
         index + LED pattern already persist). On riscv (or a build with nixEval
         off) "nix" transparently falls back to fix at open().
+      '';
+    };
+    blingDir = lib.mkOption {
+      type = lib.types.str;
+      default = "/etc/nixbadge/bling.d";
+      description = ''
+        Directory the USER short-press scans for pure-Nix LED patterns (*.nix,
+        sorted; NN- prefix = cycle order). The press writes the next file's path
+        as `eval = ` into leds.conf and the running painter hot-reloads it.
+        Passed as `--bling-dir`.
+      '';
+    };
+    dynamicNix = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Link the oled daemon's Nix C API backend DYNAMICALLY (shared nixComponents
+        .so's, patchelf'd NixOS glibc interpreter + rpath) instead of the
+        static-musl archive link. The static LLD crunch is the build's ~15-minute
+        long pole; dynamic links in seconds, so every runtime iteration stops
+        paying it. Costs closure size (the shared nix/boost/curl libs enter the
+        closure) -- see the commit for the measured numbers. The initrd/bling
+        binary is unaffected (always static; a dynamic binary cannot survive
+        switch_root). Set false to ship the fully-static oled daemon again.
       '';
     };
     controller = lib.mkOption {
@@ -177,6 +206,8 @@ in
             "--gc-budget-mb ${toString cfg.gcBudgetMb}"
             # SSD1306 vs SH1106 (auto = I2C read-back probe at open).
             "--oled-controller ${cfg.controller}"
+            # The pure-Nix LED pattern cycle dir (short press steps through it).
+            "--bling-dir ${cfg.blingDir}"
           ]
           # The pure-Nix eval screens: one repeated `--eval-screen PATH` per
           # configured screen. All compile into ONE shared fix Engine (a

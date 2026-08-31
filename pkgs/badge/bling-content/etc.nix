@@ -106,12 +106,35 @@ pkgs.runCommand "nixbadge-content"
     ${screenCmds}
     ${effectCmds}
 
-    # bling.d: the live LED pattern.
-    cp ${./leds-live.nix} "$out/bling.d/10-leds-live.nix"
+    # bling.d: the full pure-Nix LED pattern set (the ONLY user-facing patterns --
+    # the old Zig-computed ones are out of the cycle; the runtime walks these files
+    # on a short press). NN- prefix = cycle order, rainbow leads.
+    cp ${./leds-live.nix} "$out/bling.d/10-rainbow.nix"
+    cp ${./leds/solid.nix} "$out/bling.d/20-solid.nix"
+    cp ${./leds/pulse.nix} "$out/bling.d/30-pulse.nix"
+    cp ${./leds/chase.nix} "$out/bling.d/40-chase.nix"
+    cp ${./leds/sparkle.nix} "$out/bling.d/50-sparkle.nix"
+    cp ${./leds/fire.nix} "$out/bling.d/60-fire.nix"
 
     # ---- self-test: <nixbadge> imports resolve + each info screen yields a valid frame ----
     export NIX_PATH="nixbadge=$out"
     export NIX_STATE_DIR="$PWD/nix-state" NIX_STORE_DIR="$PWD/nix-store" HOME="$PWD"
+
+    # Self-test each LED pattern: a 24-LED ring frame of packed 0xRRGGBB ints.
+    for lp in "$out"/bling.d/*.nix; do
+      nix --extra-experimental-features nix-command eval --impure --raw --expr "
+        let r = (import $lp) {
+          t = 1234; frameIndex = 3; width = 24; height = 1; backend = 0; fps = 30;
+          strap = 1; batteryMv = 4100; batteryPct = 87; onUsb = true; load1 = 0.1;
+          cpuPct = 5; memPct = 40; uptimeS = 10;
+        };
+        in if builtins.length r.bitmap == 24
+              && builtins.all (x: builtins.isInt x && x >= 0 && x <= 16777215) r.bitmap
+              && builtins.isInt r.nextMs && r.nextMs > 0
+           then \"ok\" else throw \"bad LED frame\"
+      " >/dev/null || { echo "SELFTEST FAIL: $lp is not a valid LED pattern" >&2; exit 1; }
+      echo "nixbadge-content: LED pattern $(basename "$lp") -> valid 24-LED frame"
+    done
     checkFrame() {
       local f="$1" h="$2" want="$3"
       nix --extra-experimental-features nix-command eval --impure --raw --expr "

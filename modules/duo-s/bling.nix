@@ -30,6 +30,13 @@ let
   pkg = import ../../pkgs/badge/nix-badge.nix {
     inherit pkgs;
     fixSrc = badgeFixSrc;
+    # No Nix C API here: the LED path only ever evals through fix, and this binary
+    # must stay STATIC (it lives in the initrd and survives switch_root). Dropping
+    # the C API also skips the ~15-minute static archive link -- this instance
+    # (shared with bootswap and the PATH CLI) builds in the zig-only ~2 minutes.
+    # A manual `--backend nix` against THIS binary falls back to fix at open();
+    # the oled SERVICE uses its own nixDynamic build with both backends.
+    nixEval = false;
   };
 
   configFile = pkgs.writeText "nix-badge-leds.conf" ''
