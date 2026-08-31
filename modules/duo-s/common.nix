@@ -210,7 +210,20 @@ in
         fi
         ln -sfn "$f" "$target"   # missing or symlink -> point at the store default
       done < <(find "$src" \( -type f -o -type l \) -print0)
-      # Prune defaults removed upstream (now-dangling symlinks); never touches regular files.
+      # Prune stale managed links: a symlink pointing into /nix/store whose
+      # basename is no longer in the default set was seeded by an OLDER content
+      # tree (e.g. a renamed default -- 10-leds-live.nix -> 10-rainbow.nix left
+      # the old name behind because its target store path still existed, so the
+      # dangling-only prune missed it). Regular files (user hacks) are never
+      # touched; a USER-made symlink into the store would be pruned too, so hack
+      # with copies, not links (that is the documented contract anyway).
+      while IFS= read -r -d "" l; do
+        rel="''${l#"$dst"/}"
+        case "$(readlink "$l")" in
+          /nix/store/*) [ -e "$src/$rel" ] || rm -f "$l" ;;
+        esac
+      done < <(find "$dst" -type l -print0)
+      # And defaults removed upstream entirely (now-dangling symlinks).
       find "$dst" -type l ! -exec test -e {} \; -delete
     '';
   };
