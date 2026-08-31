@@ -7,9 +7,14 @@ the exact reason. This recovers it with citations so it stays recovered.*
 
 ## Verdict
 
-**No clean unified fip is possible. The split is effectively mask-ROM-forced.**
-Keep `fip-arm.bin` / `fip-riscv.bin` + the swap (pkgs/sdcard/swap-core.nix and
-`nix-badge bootswap`'s native fip copy).
+**Keep the split** (`fip-arm.bin` / `fip-riscv.bin` + the swap in
+pkgs/sdcard/swap-core.nix and `nix-badge bootswap`'s native fip copy). A
+polyglot single image IS constructible for non-secure boot (verified below —
+the entry-word coexistence genuinely holds), but it is strictly less robust
+than the file-swap and secure-boot-fragile, so it is rejected on merit, not
+impossibility. The *clean* answer — one image the ROM selects per-core via an
+image field — does not exist: the ROM is content-blind, selection is a
+hardware strap.
 
 Two stacked structural facts force it:
 
@@ -63,15 +68,51 @@ So: wrong-ISA fip + strapped core = **reset loop until the fip is corrected**
 — which is why `nix-badge bootswap` swaps the fip BEFORE latching, and reverts
 it if the latch fails.
 
-## If someone insists on one image (don't)
+## If someone insists on one image (don't) — polyglot IS constructible
 
-Technically constructible, no config flag exists:
-1. Polyglot dual-ISA BL2 entry stub (both ISAs decode the first bytes as a
-   branch into their own body; ~100K combined fits the 0x37000 BL2 budget).
-2. Second core's monitor + U-Boot packed into the spare `LOADER_2ND_B` /
-   `BLCP_2ND` slots (fiptool.py:192-210) + patched `bl2_opt.c` loaders.
-3. fip.nix/fiptool rework to pack it all.
-Days of fragile work; strictly worse than copying one file. Rejected.
+A follow-up did the binary analysis the first pass hand-waved. A polyglot
+entry genuinely works, and the whole image is constructible **for non-secure
+boot**. It is still rejected — it doesn't remove the swap, it hides it inside
+a bespoke binary, and it's secure-boot-fragile.
+
+**The fip diff.** Only 4 param1 header fields differ between our built
+fip-arm.bin and fip-riscv.bin: `PARAM_CKSUM` (0x0C), `BL2_IMG_CKSUM` (0xD4),
+`BL2_IMG_SIZE` (0xD8: arm 0xE000 vs riscv 0xAA00), `PARAM2_LOADADDR` (0xE0).
+Everything else in the 4KB header — including `CHIP_CONF` (DDR/pinmux init,
+760B) — is byte-identical. The three payloads (BL2, MONITOR = TF-A bl31 vs
+OpenSBI, LOADER_2ND = per-core u-boot) are wholly per-ISA. A unified image
+shares ~1KB and duplicates all the code.
+
+**The entry word exists.** The mask ROM jumps to BL2's first 4-byte
+little-endian word. The word `6f 00 00 14` (`0x1400006F`) decodes as BOTH a
+valid aarch64 `b #444` AND a valid riscv `j 320` (JAL, rd=x0 — no clobber),
+confirmed with llvm-mc. It is one of **2048** words in the intersection of the
+aarch64 `B imm26` space and the riscv `JAL` opcode; the two landing offsets
+are independently tunable, so each core trampolines to its own FSBL body. The
+riscv entry is `.option norvc` (a full 4-byte JAL), so the C-extension is
+irrelevant. (The two SHIPPED entries are NOT mutually valid — arm's
+`08 00 00 14` is a riscv `addi`, riscv's `6f 00 00 02` is an illegal aarch64
+word — which is why naive concatenation fails and a purpose-built word is
+required.)
+
+**All non-instruction gates are clear** (non-secure boot): MAGIC2 (0x08) is 0
+in both, ROM checks only MAGIC1=`CVBL01\n`; BL2_IMG_CKSUM is a plain CRC16
+fiptool recomputes over the one merged body; all PK/SIG fields are zero so the
+ROM does no crypto verification.
+
+**Construction** (if you must): one BL2 slot = [polyglot word][7 zero words of
+bl2_head][riscv trampoline @ its offset][arm trampoline @ its offset][both
+full FSBL bodies]; the second core's monitor + u-boot ride the spare
+`BLCP_2ND` / `LOADER_2ND_B` param2 slots. The real cost is patching the riscv
+FSBL's `bl2_opt.c` load_monitor/load_loader_2nd to read those alternate slots,
+NOT the entry word.
+
+**Why still rejected:** (1) it does not eliminate the swap, only relocates it
+into a hand-built ~690KB dual-toolchain binary; (2) it works ONLY while
+non-secure — one BL2_IMG_SIG cannot sign two disjoint bodies, so enabling
+secure boot later breaks it permanently. The file-swap is one atomic `cp` with
+zero shared-format risk. Clever, but strictly less robust — fails the "more
+robust, not just clever" bar.
 
 ## Prior art
 
