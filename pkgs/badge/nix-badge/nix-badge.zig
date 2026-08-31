@@ -558,7 +558,20 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.
             std.time.ns_per_s / @as(u64, cfg.fps)
         else
             std.time.ns_per_s / idle_poll_hz;
-        linux.sleepNsec(period_ns);
+        // Sleep in <=50 ms slices, re-checking the conf mtime each slice: the
+        // USER button's short-press pattern cycle lands as a leds.conf rewrite,
+        // and a whole-period sleep deferred noticing it by up to the pattern's
+        // own nextMs (a second+ on slow patterns) -- the LED twin of the OLED's
+        // hold-the-button bug. Breaking early lets the loop top reload and
+        // paint the new pattern within ~50 ms of the press.
+        const slice_ns: u64 = 50 * std.time.ns_per_ms;
+        var slept: u64 = 0;
+        while (slept < period_ns and !stop_requested.load(.monotonic)) {
+            const step = @min(slice_ns, period_ns - slept);
+            linux.sleepNsec(step);
+            slept += step;
+            if (!std.meta.eql(linux.mtimeNsec(runtime_conf), seen_mtime)) break;
+        }
     }
     // Leave the LEDs as they are so a restart repaints without a visible gap.
 }
