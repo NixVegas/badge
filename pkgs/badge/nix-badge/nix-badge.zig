@@ -1041,6 +1041,59 @@ fn blingNextPattern() void {
 
 /// Gather the per-frame snapshot: the animation clock, battery/USB, and the proc
 /// meters. The CPU delta is tracked in `cpu` across frames.
+// Boot-identity strings for the bootinfo screen (`scope.nixosVersion` /
+// `scope.kernelVersion`). fix is pure (no uname/readFile at eval), so the
+// runtime reads them ONCE at oled start -- they are constant per boot -- and
+// oledGather copies the cached slices into every Context snapshot.
+var nixos_version_buf: [64:0]u8 = undefined;
+var kernel_version_buf: [64:0]u8 = undefined;
+var nixos_version: [:0]const u8 = "";
+var kernel_version: [:0]const u8 = "";
+
+fn cacheVersion(buf: *[64:0]u8, s: []const u8) [:0]const u8 {
+    const n = @min(s.len, buf.len);
+    @memcpy(buf[0..n], s[0..n]);
+    buf[n] = 0;
+    return buf[0..n :0];
+}
+
+/// Kernel release from uname(2) (always available); NixOS version from
+/// /etc/os-release VERSION_ID, falling back to the `init=` store-path label on
+/// /proc/cmdline (`init=/nix/store/<hash>-nixos-system-<host>-<label>/init`) --
+/// the initrd ships no os-release, and systemd-initrd mounts /proc early
+/// enough that the cmdline is always there. The hostname may itself contain
+/// dashes, so the label is the first dash-separated token starting with a
+/// digit (NixOS labels look like 26.05.20260830.1a2b3c).
+fn readBootInfo() void {
+    const uts = std.posix.uname();
+    kernel_version = cacheVersion(&kernel_version_buf, std.mem.sliceTo(&uts.release, 0));
+
+    var fbuf: [4096]u8 = undefined;
+    nixos_version = cacheVersion(&nixos_version_buf, blk: {
+        if (linux.readFile("/etc/os-release", &fbuf)) |txt| {
+            var lines = std.mem.splitScalar(u8, txt, '\n');
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "VERSION_ID=")) {
+                    break :blk std.mem.trim(u8, line["VERSION_ID=".len..], "\" \r");
+                }
+            }
+        }
+        if (linux.readFile("/proc/cmdline", &fbuf)) |txt| {
+            if (std.mem.indexOf(u8, txt, "-nixos-system-")) |i| {
+                var rest = txt[i + "-nixos-system-".len ..];
+                if (std.mem.indexOfAny(u8, rest, " /\n")) |end| rest = rest[0..end];
+                var toks = std.mem.splitScalar(u8, rest, '-');
+                var off: usize = 0;
+                while (toks.next()) |tok| {
+                    if (tok.len > 0 and std.ascii.isDigit(tok[0])) break :blk rest[off..];
+                    off += tok.len + 1;
+                }
+            }
+        }
+        break :blk "";
+    });
+}
+
 fn oledGather(cpu: *screens.CpuMeter) screens.Context {
     const bat = sysfs.readBattery();
     var l1: f64 = 0;
@@ -1055,10 +1108,14 @@ fn oledGather(cpu: *screens.CpuMeter) screens.Context {
         } else 0,
         .battery_mv = bat.millivolts,
         .battery_pct = bat.percent,
+        // Kernel-scaled iio-rescale read; the rail is stiff, so no smoothing.
+        .vsel_mv = if (sysfs.readVselVolts()) |v| @intFromFloat(v * 1000.0 + 0.5) else 0,
         .load1 = l1,
         .cpu_pct = cpu.sample(),
         .mem_pct = @intFromFloat(screens.readMemUsedFrac() * 100.0 + 0.5),
         .uptime_s = screens.readUptimeS(),
+        .nixos_version = nixos_version,
+        .kernel_version = kernel_version,
     };
 }
 
@@ -1196,6 +1253,9 @@ fn collectNixScreens(gpa: std.mem.Allocator, dir: []const u8, out: [][]const u8,
 }
 
 fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdError!void {
+    // Cache the constant-per-boot version strings before anything gathers a
+    // Context (the registry-build probe render already reads them).
+    readBootInfo();
     // `--eval-screen PATH` is repeatable: each occurrence appends a pure-Nix OLED
     // screen. They are compiled into ONE shared fix Engine (a ScreenSet) so the
     // Value/chunk heap is paid once, not once per screen.
@@ -1726,6 +1786,9 @@ fn evalFields(panel: *const oled.Panel, ctx: *const screens.Context, backend_id:
         .backend_id = backend_id,
         .fps = fps,
         .strap = ctx.strap,
+        .vsel_mv = ctx.vsel_mv,
+        .nixos_version = ctx.nixos_version,
+        .kernel_version = ctx.kernel_version,
     };
 }
 

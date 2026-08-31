@@ -18,6 +18,11 @@ let
   };
 in
 {
+  # Let sibling modules reuse THIS contentTree instantiation (oled-early.nix picks
+  # bootinfo + lib/ out of it for the initrd) instead of re-importing etc.nix with
+  # args that could drift.
+  _module.args.badgeContentTree = contentTree;
+
   networking.hostName = "nixbadge-duos";
 
   # zram: compressed RAM swap, the badge's single biggest responsiveness win. The
@@ -132,8 +137,8 @@ in
     count = 24;
     # Early boot evals Nix too: the declarative eval pattern ships in the initrd
     # (bling.nix adds it), so the ring runs the SAME pure-Nix rainbow from the
-    # first initrd frame -- the Zig-computed patterns are out of the user-facing
-    # surface entirely (they remain only as the eval-fault emergency fallback).
+    # first initrd frame -- the Zig-computed patterns are gone entirely (an eval
+    # fault shows the painter's hardcoded dim-blue emergency fill instead).
     # A short USER press cycles /etc/nixbadge/bling.d/*.nix once stage 2 is up.
     evalPattern = "${contentTree}/bling.d/10-rainbow.nix";
   };
@@ -183,9 +188,18 @@ in
 
   systemd.services.nixbadge-content = {
     description = "Seed /etc/nixbadge with default OLED/LED content (hackable in place)";
-    wantedBy = [ "multi-user.target" ];
+    # sysinit so the oled engine (also sysinit now, ordered After= us) can start
+    # as soon as the root fs is up -- it relights the panel after the initrd
+    # splash dies at switch_root. DefaultDependencies=false is required for any
+    # unit wanted by sysinit.target (the defaults would order it after that very
+    # target); the seed itself is a sub-second symlink pass.
+    wantedBy = [ "sysinit.target" ];
     before = [ "nixbadge-oled.service" ];
-    after = [ "systemd-tmpfiles-setup.service" ];
+    after = [
+      "systemd-tmpfiles-setup.service"
+      "local-fs.target"
+    ];
+    unitConfig.DefaultDependencies = false;
     unitConfig.ConditionPathIsReadWrite = "/etc";
     path = [ pkgs.coreutils pkgs.findutils ];
     serviceConfig = {

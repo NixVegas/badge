@@ -180,9 +180,18 @@ in
   config = lib.mkIf cfg.enable {
     systemd.services.nixbadge-oled = {
       description = "nixbadge OLED engine (Bad Apple + screens)";
-      wantedBy = [ "multi-user.target" ];
-      # The i2c-1 bus, the SARADC IIO device and the USER button are all up via
-      # udev well before multi-user; no ordering beyond basic.target is needed.
+      # sysinit, not multi-user: the initrd boot splash (oled-early.nix) dies at
+      # switch_root, and this unit is what relights the panel -- the earlier it
+      # starts, the shorter the dark gap. Everything it needs exists by then:
+      # /dev/i2c-1 is devtmpfs + built-in drivers, the store is the root fs, and
+      # /etc/nixbadge comes from the seeder ordered Before= us (same
+      # DefaultDependencies=false pattern as the bling unit).
+      wantedBy = [ "sysinit.target" ];
+      after = [
+        "local-fs.target"
+        "nixbadge-content.service"
+      ];
+      unitConfig.DefaultDependencies = false;
       serviceConfig = {
         # Runs as root: opens /dev/i2c-1 (0x3c), medians the SARADC sysfs for the
         # battery/rail screens, reads the USER button, and rewrites

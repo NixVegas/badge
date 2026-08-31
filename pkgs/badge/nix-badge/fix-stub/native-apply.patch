@@ -23,7 +23,7 @@ index f51eab7e..cc990bb7 100644
 +    /// root scope. Lets a caller construct a small per-frame argument attrset
 +    /// for `applyValue` without going through the source compiler.
 +    pub fn makeAttrs(self: *Engine, pairs: []const ScopeBinding) !Value {
-+        var inline_entries: [16]runtime.heap.AttrEntry = undefined;
++        var inline_entries: [24]runtime.heap.AttrEntry = undefined;
 +        const entries = if (pairs.len <= inline_entries.len)
 +            inline_entries[0..pairs.len]
 +        else

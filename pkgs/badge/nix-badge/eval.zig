@@ -61,6 +61,19 @@ pub const Fields = struct {
     /// 1 arm, 2 riscv. Lets the currentsystem screen show the RUNNING arch next to
     /// what the strap says the NEXT boot selects.
     strap: u8 = 0,
+    /// The VSEL system rail in millivolts (`scope.vselMv`, ~5000 on USB/VBUS; 0 when
+    /// unreadable). The power screen shows THIS as the rail -- it used to render the
+    /// battery labeled "RAIL", which read ~4-5.5 V and looked wrong next to a 5 V rail.
+    vsel_mv: u32 = 0,
+    /// STRING scope inputs for the bootinfo screen (`scope.nixosVersion` /
+    /// `scope.kernelVersion`). fix is pure (no uname/readFile at eval), so the gather
+    /// side reads them ONCE at startup: kernel from uname(2) release; NixOS label from
+    /// /etc/os-release, falling back to the `init=` store-path label on /proc/cmdline
+    /// (the initrd has no os-release). NUL-terminated so the C-API backend can hand
+    /// them to nix_init_string without a copy; constant per boot, so fix's interner
+    /// dedupes the per-frame intern to a hash lookup.
+    nixos_version: [:0]const u8 = "",
+    kernel_version: [:0]const u8 = "",
 };
 
 /// One applied+extracted frame. `bitmap` is a plain int list the backend forced out of

@@ -80,6 +80,7 @@
             ./modules/duo-s/wifi.nix
             ./modules/duo-s/bling.nix
             ./modules/duo-s/oled.nix
+            ./modules/duo-s/oled-early.nix
             ./modules/duo-s/bootswap.nix
             ./modules/duo-s/deploy.nix
             ./modules/duo-s/core-${core}.nix
@@ -270,8 +271,9 @@
             # nixpkgs. Exposed so the bling content bake can use it.
             fix = (pkgs.extend (import inputs.fix { }).overlay).fix;
             # A pure-Nix OLED animation baked to a BADA blob by `fix` -- the
-            # proof that the badge's screens can be authored in Nix. Play with
-            # `nix-badge oled --badapple <result>/bling-anim.bin`.
+            # proof that the badge's screens can be authored in Nix. Build-time
+            # data only now: the runtime's `--badapple` blob player was removed
+            # (the pure-Nix live screens under bling-content supersede it).
             bling-demo = import ./pkgs/badge/bling-content {
               inherit pkgs;
               fix = (pkgs.extend (import inputs.fix { }).overlay).fix;

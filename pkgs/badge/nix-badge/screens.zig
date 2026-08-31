@@ -14,10 +14,16 @@ pub const Context = struct {
     strap: u8 = 0,
     battery_mv: ?u32,
     battery_pct: ?u8,
+    /// The VSEL system rail in millivolts (~5000 on USB/VBUS); 0 when unreadable.
+    vsel_mv: u32 = 0,
     load1: f64,
     cpu_pct: u8,
     mem_pct: u8,
     uptime_s: u64,
+    /// Boot-identity strings for the bootinfo screen; constant per boot, cached
+    /// once by the gather side (see nix-badge.zig readBootInfo).
+    nixos_version: [:0]const u8 = "",
+    kernel_version: [:0]const u8 = "",
 };
 
 /// A CPU-utilisation tracker: utilisation is a delta between two /proc/stat

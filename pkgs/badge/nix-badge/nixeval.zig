@@ -281,9 +281,9 @@ pub const NixBackend = struct {
 
         // scope = { t; frameIndex; width; ...; backend; fps; }. Members are kept rooted
         // until AFTER nix_make_attrs copies them into the Bindings, then decref'd.
-        var members: [16]ValuePtr = undefined;
+        var members: [24]ValuePtr = undefined;
         var mi: usize = 0;
-        const bb = c.nix_make_bindings_builder(ctx, state, 13);
+        const bb = c.nix_make_bindings_builder(ctx, state, 17);
         mi = self.addInt(bb, &members, mi, "t", @intCast(fields.t_ms));
         mi = self.addInt(bb, &members, mi, "frameIndex", @intCast(fields.frame_index));
         mi = self.addInt(bb, &members, mi, "width", fields.width);
@@ -298,6 +298,9 @@ pub const NixBackend = struct {
         mi = self.addInt(bb, &members, mi, "backend", fields.backend_id);
         mi = self.addInt(bb, &members, mi, "fps", fields.fps);
         mi = self.addInt(bb, &members, mi, "strap", fields.strap);
+        mi = self.addInt(bb, &members, mi, "vselMv", fields.vsel_mv);
+        mi = self.addString(bb, &members, mi, "nixosVersion", fields.nixos_version.ptr);
+        mi = self.addString(bb, &members, mi, "kernelVersion", fields.kernel_version.ptr);
 
         const scope = c.nix_alloc_value(ctx, state);
         _ = c.nix_make_attrs(ctx, scope, bb); // consumes the builder's contents
@@ -442,6 +445,13 @@ pub const NixBackend = struct {
     fn addFloat(self: *NixBackend, bb: anytype, members: []ValuePtr, mi: usize, name_z: [*c]const u8, v: f64) usize {
         const val = c.nix_alloc_value(self.ctx, self.state);
         _ = c.nix_init_float(self.ctx, val, v);
+        _ = c.nix_bindings_builder_insert(self.ctx, bb, name_z, val);
+        members[mi] = val;
+        return mi + 1;
+    }
+    fn addString(self: *NixBackend, bb: anytype, members: []ValuePtr, mi: usize, name_z: [*c]const u8, v: [*c]const u8) usize {
+        const val = c.nix_alloc_value(self.ctx, self.state);
+        _ = c.nix_init_string(self.ctx, val, v);
         _ = c.nix_bindings_builder_insert(self.ctx, bb, name_z, val);
         members[mi] = val;
         return mi + 1;

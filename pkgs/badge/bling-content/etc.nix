@@ -36,6 +36,9 @@ let
 
   # The cyclable info screens, in cycle order (10- is Bad Apple, added separately).
   screens = [
+    # Also the initrd boot splash (shipped there separately by the oled module);
+    # its version strings arrive via scope.nixosVersion/kernelVersion.
+    { n = "15"; name = "bootinfo"; src = ./screens/bootinfo.nix; }
     { n = "20"; name = "battery"; src = ./screens/battery.nix; }
     { n = "30"; name = "load"; src = ./screens/load.nix; }
     { n = "40"; name = "power"; src = ./screens/power.nix; }
@@ -144,7 +147,8 @@ pkgs.runCommand "nixbadge-content"
         let r = (import $f) {
           t = 1234; frameIndex = 0; width = 128; height = $h; batteryMv = 4100;
           batteryPct = 87; onUsb = true; load1 = 0.42; cpuPct = 12; memPct = 40;
-          uptimeS = 90061; backend = 0; fps = 60; strap = 1;
+          uptimeS = 90061; backend = 0; fps = 60; strap = 1; vselMv = 5010;
+          nixosVersion = \"26.05.20260830.1a2b3c\"; kernelVersion = \"6.18.44-test\";
         };
         in if builtins.length r.bitmap == $want
               && builtins.all (x: builtins.isInt x) r.bitmap
@@ -160,7 +164,7 @@ pkgs.runCommand "nixbadge-content"
     # emitted `import <nixbadge/lib/font.nix>` + font.nix end-to-end (backend 1 = nix).
     nix --extra-experimental-features nix-command eval --impure --raw --expr "
       let r = (import $out/oled.d/10-badapple.nix) {
-        frameIndex = 0; width = 128; height = 64; backend = 1; fps = 60; strap = 1;
+        frameIndex = 0; width = 128; height = 64; backend = 1; fps = 60; strap = 1; vselMv = 5010;
         t = 0; batteryMv = 0; batteryPct = 0; onUsb = false; load1 = 0.0;
         cpuPct = 0; memPct = 0; uptimeS = 0;
       };

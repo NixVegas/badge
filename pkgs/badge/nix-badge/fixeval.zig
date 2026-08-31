@@ -263,6 +263,10 @@ pub const FixBackend = struct {
             .{ .name = "backend", .value = Value.int(fields.backend_id) },
             .{ .name = "fps", .value = Value.int(fields.fps) },
             .{ .name = "strap", .value = Value.int(fields.strap) },
+            .{ .name = "vselMv", .value = Value.int(fields.vsel_mv) },
+            // Constant per boot -> intern dedupes to a lookup after the first frame.
+            .{ .name = "nixosVersion", .value = Value.string(try ev.intern.intern(fields.nixos_version)) },
+            .{ .name = "kernelVersion", .value = Value.string(try ev.intern.intern(fields.kernel_version)) },
         });
 
         const result = try ev.applyValue(self.lambdas[idx], scope);
@@ -456,7 +460,7 @@ test "FixBackend.applyFrame extracts bitmap ints, nextMs, delta, and overlay" {
     ;
     const path = try writeTmpScreen(&abuf, dir, "s.nix", src);
 
-    var be = FixBackend.open(gpa, .{ .io = std.testing.io },&.{path}) orelse return error.OpenFailed;
+    var be = FixBackend.open(gpa, .{ .io = std.testing.io }, &.{path}) orelse return error.OpenFailed;
     defer be.deinit();
     try std.testing.expectEqual(@as(usize, 1), be.count());
     try std.testing.expectEqualStrings("s", be.name(0));
@@ -533,7 +537,7 @@ test "FixBackend.applyFrame exposes scope.backend + scope.fps" {
     const src = "scope: { bitmap = [ scope.backend scope.fps ]; nextMs = 10; }";
     const path = try writeTmpScreen(&abuf, dir, "bf.nix", src);
 
-    var be = FixBackend.open(gpa, .{ .io = std.testing.io },&.{path}) orelse return error.OpenFailed;
+    var be = FixBackend.open(gpa, .{ .io = std.testing.io }, &.{path}) orelse return error.OpenFailed;
     defer be.deinit();
     const f = try be.applyFrame(0, .{ .backend_id = 1, .fps = 59 });
     try std.testing.expectEqual(@as(i64, 1), f.bitmap[0]);
@@ -557,11 +561,11 @@ test "FixBackend skips a bad screen but loads the rest" {
     const ok = try writeTmpScreen(&okbuf, dir, "ok.nix", "scope: { bitmap = [ 7 ]; nextMs = 33; }");
 
     const paths: []const []const u8 = &.{ ok, "/nonexistent/nope.nix" };
-    var be = FixBackend.open(gpa, .{ .io = std.testing.io },paths) orelse return error.OpenFailed;
+    var be = FixBackend.open(gpa, .{ .io = std.testing.io }, paths) orelse return error.OpenFailed;
     defer be.deinit();
     try std.testing.expectEqual(@as(usize, 1), be.count());
     try std.testing.expectEqualStrings("ok", be.name(0));
 
-    try std.testing.expect(FixBackend.open(gpa, .{ .io = std.testing.io },&.{"/nonexistent/a.nix"}) == null);
-    try std.testing.expect(FixBackend.open(gpa, .{ .io = std.testing.io },&.{}) == null);
+    try std.testing.expect(FixBackend.open(gpa, .{ .io = std.testing.io }, &.{"/nonexistent/a.nix"}) == null);
+    try std.testing.expect(FixBackend.open(gpa, .{ .io = std.testing.io }, &.{}) == null);
 }
