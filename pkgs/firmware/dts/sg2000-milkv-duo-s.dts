@@ -112,7 +112,13 @@
 			 * the vendor arm64 DTS drives it with no reset. Mainline has no
 			 * cv18xx reset header to verify an RST_SPI3 index against, so
 			 * this DTS does not touch an unverified reset bit. */
-			num-cs = <1>;
+			/* Two logical selects on ONE physical line: cs0 = the gpio
+			 * (HIGH = LEDs via the U10 AND gate), cs1 = nothing at all
+			 * (the cs-gpios array has one entry, so index 1 is NULL and
+			 * the core toggles no pad) -- which through the front
+			 * connector's inverter means "display selected at the LOW
+			 * idle". See spidev@1. */
+			num-cs = <2>;
 			/* Slave DMA via the cv1800b dmamux, so the CPU no longer hand-refills
 			 * the SPI TX FIFO. In PIO the FIFO underruns when a hardirq preempts the
 			 * refill mid-frame, the SPI clock stalls, and the WS2812 chain glitches
@@ -162,6 +168,26 @@
 				 * during transfers, the AND gate emits zero, and
 				 * the LEDs receive no data. */
 				spi-cs-high;
+			};
+
+			/* spidev at /dev/spidev3.1: the Sharp Memory Display probe
+			 * port. The front connector routes the SAME CS net through
+			 * an INVERTER to the display's SCS: line HIGH = LEDs listen
+			 * (AND gate open, display deselected), line LOW = display
+			 * selected. This child deliberately has NO cs-gpios entry
+			 * of its own (the array has one entry, index 1 is NULL), so
+			 * the SPI core toggles nothing during its transfers and the
+			 * line stays at its LOW idle -- i.e. the display is
+			 * selected for exactly the duration of the write. The DW
+			 * native SER bit for slave 1 has no pad muxed, so it does
+			 * nothing. Userspace could not get this behavior at runtime:
+			 * dw-apb-ssi rejects SPI_NO_CS (EINVAL). Swap this node for
+			 * a sharp,ls027b7dh01 panel node once the topology probe
+			 * passes. */
+			spidev@1 {
+				compatible = "rohm,dh2228fv";
+				reg = <1>;
+				spi-max-frequency = <2000000>;
 			};
 		};
 	};
