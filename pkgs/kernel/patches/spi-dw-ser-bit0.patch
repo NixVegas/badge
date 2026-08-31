@@ -1,0 +1,20 @@
+--- a/drivers/spi/spi-dw-core.c	2026-08-31 00:06:07.903540072 -0700
++++ b/drivers/spi/spi-dw-core.c	2026-08-31 00:06:09.464471455 -0700
+@@ -100,7 +100,16 @@
+ 	 * support active-high or active-low CS level.
+ 	 */
+ 	if (cs_high == enable)
+-		dw_writel(dws, DW_SPI_SER, BIT(spi_get_chipselect(spi, 0)));
++		/*
++		 * NixVegas badge (SG2000): the SSI is synthesized with a single
++		 * slave select; SER bits above 0 do not exist, and writing one
++		 * leaves SER=0 so the controller never clocks (DMA feeds a FIFO
++		 * that never drains -> transaction timeout). Device selection on
++		 * this board is EXTERNAL anyway: the one CS line fans out through
++		 * an AND gate (high = WS2812 path) and an inverter (low = Sharp
++		 * Memory Display SCS), so every child needs the same SER bit 0.
++		 */
++		dw_writel(dws, DW_SPI_SER, BIT(0));
+ 	else
+ 		dw_writel(dws, DW_SPI_SER, 0);
+ }

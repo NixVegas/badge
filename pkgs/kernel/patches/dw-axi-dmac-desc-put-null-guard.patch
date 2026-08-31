@@ -1,0 +1,17 @@
+--- a/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c	2026-08-31 00:06:07.911922729 -0700
++++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c	2026-08-31 00:06:09.465269516 -0700
+@@ -336,6 +336,14 @@
+ 
+ 	for (descs_put = 0; descs_put < count; descs_put++) {
+ 		hw_desc = &desc->hw_desc[descs_put];
++		/*
++		 * A failed prep only populated the chain up to the failure
++		 * point; the remaining entries never got an lli, and
++		 * dma_pool_free() on a NULL vaddr oopses. Entries are filled
++		 * in order, so the first NULL ends the chain.
++		 */
++		if (!hw_desc->lli)
++			break;
+ 		dma_pool_free(chan->desc_pool, hw_desc->lli, hw_desc->llp);
+ 	}
+ 

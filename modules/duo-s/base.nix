@@ -64,6 +64,26 @@
           name = "dw-axi-dmac-apb-regs-quiet";
           patch = ../../pkgs/firmware/dw-axi-dmac-apb-regs-quiet.patch;
         }
+        {
+          # A failed dw-axi-dmac prep (e.g. an oversized/odd slave_sg) calls
+          # axi_desc_put() over ALL nr_hw_descs entries, dma_pool_free()ing the
+          # NULL llis of the never-populated tail -- a kernel NULL deref at
+          # offset 8 that takes the SPI bus lock down with it (observed live: a
+          # 3122-byte spidev write left every later SPI user in D-state until
+          # reboot). Stop at the first NULL; entries are filled in order.
+          name = "dw-axi-dmac-desc-put-null-guard";
+          patch = ../../pkgs/kernel/patches/dw-axi-dmac-desc-put-null-guard.patch;
+        }
+        {
+          # The SG2000's DW SSI is synthesized with ONE slave select: SER bits
+          # above 0 don't exist, so a child at reg=<1> (the Sharp Memory Display
+          # behind the CS inverter -- see the spi3 DTS) never clocks: the DMA
+          # feeds a FIFO that never drains, times out at 200ms, and poisons the
+          # channel. Device selection on this board is EXTERNAL anyway (AND gate
+          # high = LEDs, inverter low = display), so every child gets SER bit 0.
+          name = "spi-dw-ser-bit0";
+          patch = ../../pkgs/kernel/patches/spi-dw-ser-bit0.patch;
+        }
         # NOTE: a sophgo-cv1800b-adc clkdiv/sample_window module-param patch was
         # tried here to fight the SARADC rail-reading attenuation, on the theory
         # that the ~688k divider undersettles the sample window. Live sweeps on
