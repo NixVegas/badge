@@ -1083,10 +1083,27 @@ fn readBootInfo() void {
 
     var fbuf: [4096]u8 = undefined;
     nixos_version = cacheVersion(&nixos_version_buf, blk: {
+        // The cmdline `init=` store-path label is the PRIMARY source: it is the
+        // full version ("26.05.20260812.9f78f44"), and /proc/cmdline exists
+        // everywhere this runs (initrd AND stage 2), while os-release is absent
+        // in the initrd and only as fresh as whoever populated it. The screen
+        // derives its "26.05" hero from this same string (truncate at the
+        // second dot), so one source feeds both renderings.
+        if (linux.readFile("/proc/cmdline", &fbuf)) |txt| {
+            if (std.mem.indexOf(u8, txt, "-nixos-system-")) |i| {
+                var rest = txt[i + "-nixos-system-".len ..];
+                if (std.mem.indexOfAny(u8, rest, " /\n")) |end| rest = rest[0..end];
+                var toks = std.mem.splitScalar(u8, rest, '-');
+                var off: usize = 0;
+                while (toks.next()) |tok| {
+                    if (tok.len > 0 and std.ascii.isDigit(tok[0])) break :blk rest[off..];
+                    off += tok.len + 1;
+                }
+            }
+        }
+        // Fallback for an unlabeled init= (dev sandboxes, custom boots):
+        // os-release BUILD_ID is the full label, VERSION_ID the bare release.
         if (linux.readFile("/etc/os-release", &fbuf)) |txt| {
-            // BUILD_ID carries the FULL label ("26.05.20260812.9f78f4");
-            // VERSION_ID is just the release ("26.05"), which made the bootinfo
-            // hero and its detail row render the same string twice.
             var lines = std.mem.splitScalar(u8, txt, '\n');
             while (lines.next()) |line| {
                 if (std.mem.startsWith(u8, line, "BUILD_ID=")) {
@@ -1097,18 +1114,6 @@ fn readBootInfo() void {
             while (lines.next()) |line| {
                 if (std.mem.startsWith(u8, line, "VERSION_ID=")) {
                     break :blk std.mem.trim(u8, line["VERSION_ID=".len..], "\" \r");
-                }
-            }
-        }
-        if (linux.readFile("/proc/cmdline", &fbuf)) |txt| {
-            if (std.mem.indexOf(u8, txt, "-nixos-system-")) |i| {
-                var rest = txt[i + "-nixos-system-".len ..];
-                if (std.mem.indexOfAny(u8, rest, " /\n")) |end| rest = rest[0..end];
-                var toks = std.mem.splitScalar(u8, rest, '-');
-                var off: usize = 0;
-                while (toks.next()) |tok| {
-                    if (tok.len > 0 and std.ascii.isDigit(tok[0])) break :blk rest[off..];
-                    off += tok.len + 1;
                 }
             }
         }
