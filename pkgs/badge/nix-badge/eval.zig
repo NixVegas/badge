@@ -78,6 +78,16 @@ pub const Frame = struct {
     n: u32 = 0,
     overlay: []const i64 = &.{},
     overlay_n: u32 = 0,
+    // ---- contract v2 (all OPTIONAL attrs; absent keeps v1 behavior) ----
+    /// `hidden = true`: the screen is skipped by the long-press cycle and is
+    /// reachable only by a direct RT-signal jump (probed once at registry build).
+    hidden: bool = false,
+    /// `pause = true`: do NOT advance frameIndex for the next render (freeze the
+    /// playback counter; `t` keeps moving so time-driven screens still animate).
+    pause: bool = false,
+    /// `autoReturnMs = N`: after N ms continuously on this screen, the loop jumps
+    /// back to the screen it came from (a transient/status screen).
+    auto_return_ms: u32 = 0,
 };
 
 /// The panel region a rendered frame touched, so the caller flushes minimally. `full` ->
@@ -88,8 +98,9 @@ pub const Dirty = struct {
     changed: [max_pages]u128 = .{0} ** max_pages,
 };
 
-/// One decoded OLED frame: the clamped period plus the dirty region.
-pub const OledFrame = struct { next_ms: u32, dirty: Dirty };
+/// One decoded OLED frame: the clamped period plus the dirty region, and the
+/// contract-v2 auto-return request (0 = none) the loop acts on.
+pub const OledFrame = struct { next_ms: u32, dirty: Dirty, auto_return_ms: u32 = 0 };
 
 /// Reclaim young garbage every this many frames (fix); nix (Boehm) ignores it.
 pub const collect_every: u64 = 64;

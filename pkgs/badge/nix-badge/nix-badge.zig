@@ -66,6 +66,29 @@ fn onStop(_: linux.SIG) callconv(.c) void {
     stop_requested.store(true, .monotonic);
 }
 
+// ---- screen-control API (RT signals, kernel-numbered) -----------------------
+// `kill -<sig> <pid>` (or `systemctl kill -s <sig> nixbadge-oled`) drives the
+// screen directly: sig 40+N jumps to screen index N (0..15); sig 56 jumps to the
+// screen whose name contains "swapcore" (the bootswap hold indicator, which is a
+// hidden auto-returning content screen). Numbers 40+ stay clear of the libc
+// runtime's internal RT signals (32..34). The oled daemon writes its pid to
+// /run/nixbadge-oled.pid so peers (bootswap) can signal without systemctl.
+const sig_jump_base: u32 = 40;
+const sig_jump_count: u32 = 16;
+const sig_swapcore: u32 = 56;
+const oled_pidfile: [*:0]const u8 = "/run/nixbadge-oled.pid";
+/// Pending jump: -1 none, -2 swapcore-by-name, else a screen index.
+var want_jump = std.atomic.Value(i32).init(-1);
+
+fn onJump(sig: linux.SIG) callconv(.c) void {
+    const n = @intFromEnum(sig);
+    if (n == sig_swapcore) {
+        want_jump.store(-2, .monotonic);
+    } else if (n >= sig_jump_base and n < sig_jump_base + sig_jump_count) {
+        want_jump.store(@intCast(n - sig_jump_base), .monotonic);
+    }
+}
+
 fn onUser(sig: linux.SIG) callconv(.c) void {
     switch (sig) {
         .USR1 => want_next_pattern.store(true, .monotonic),
@@ -89,7 +112,8 @@ fn eventPending() bool {
     return stop_requested.load(.monotonic) or
         want_next_pattern.load(.monotonic) or
         want_next_screen.load(.monotonic) or
-        want_switch_backend.load(.monotonic);
+        want_switch_backend.load(.monotonic) or
+        want_jump.load(.monotonic) != -1;
 }
 
 // ------------------------------------------------------------- output sink ---
@@ -628,6 +652,12 @@ fn reloadInto(cfg: *Config, base: ?[]const u8, max_count: *u32, bufsiz: u64, fd:
     cfg.colors_buf = fresh.colors_buf;
     cfg.ncolors = fresh.ncolors;
     cfg.setBlob(fresh.blob());
+    // The eval path is CLI-mutable too (the short-press cycle rewrites `eval =`).
+    // It was missing from this whitelist, so every reload re-opened the STALE
+    // startup path while leds.conf marched on -- the button "cycling back to the
+    // same pattern" bug. The reload loop reopens the eval pattern right after
+    // this returns, so refreshing the path here is all it takes.
+    cfg.setEval(fresh.eval());
 
     max_count.* = maxCountForBufsiz(bufsiz, cfg.encoding.bytesPerLed());
     clampCount(cfg, bufsiz, max_count.*);
@@ -949,6 +979,9 @@ fn parseCUnsigned(text: []const u8) ?u64 {
 // through `renderScreen`, so cycling/persistence stay generic over the flavour.
 const Screen = struct {
     name: []const u8,
+    /// Contract v2: hidden screens are skipped by the long-press cycle and are
+    /// only reachable by a direct RT-signal jump. Probed once at registry build.
+    hidden: bool = false,
     body: union(enum) {
         // A computed screen: paints the panel directly from the snapshot.
         zig: *const fn (panel: *oled.Panel, ctx: *const screens.Context) u32,
@@ -1376,8 +1409,10 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     // blob lead.
     var registry: [max_eval_screens + 1]Screen = undefined;
     var active_screens: []Screen = undefined;
+    // Minimal probe scope for the registry's contract-v2 `hidden` reads.
+    const probe_fields = eval.Fields{ .width = panel.width, .height = panel.height };
     if (eval_set) |*s| {
-        active_screens = buildEvalRegistry(&registry, s);
+        active_screens = buildEvalRegistry(&registry, s, probe_fields);
     } else {
         var n: usize = 0;
         if (clip != null) {
@@ -1399,6 +1434,22 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     installHandler(.INT, onStop);
     installHandler(.USR1, onUser);
     installHandler(.USR2, onUser);
+    // The screen-control API: RT signals 40..55 jump to screen 0..15, 56 to the
+    // "swapcore" screen (see the sig_jump_* docs at onJump).
+    {
+        var sn: u32 = 0;
+        while (sn < sig_jump_count) : (sn += 1)
+            installHandler(@enumFromInt(sig_jump_base + sn), onJump);
+        installHandler(@enumFromInt(sig_swapcore), onJump);
+    }
+    // Advertise the pid so peers (bootswap's hold indicator) can signal without
+    // systemctl (which would drag its closure into the binary).
+    {
+        var pid_buf: [16]u8 = undefined;
+        const pid_str = std.fmt.bufPrint(&pid_buf, "{d}\n", .{linux.getpid()}) catch "";
+        linux.writeFile(oled_pidfile, pid_str) catch
+            std.log.warn("oled: cannot write {s}; RT-signal peers won't find us", .{oled_pidfile});
+    }
 
     // Request the USER button once as a polled INPUT (the RTC/PWR gpio has no edge
     // IRQ, so the edge path ENXIOs) and hand it to the sampler THREAD -- see
@@ -1425,7 +1476,13 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     });
 
     var screen_ix: usize = restoreScreen(active_screens);
+    // Never resume ON a hidden (transient) screen: fall back to 0.
+    if (screen_ix < active_screens.len and active_screens[screen_ix].hidden) screen_ix = 0;
     if (screen_ix != 0) std.log.info("oled: resuming screen {s}", .{active_screens[screen_ix].name});
+    // Contract-v2 navigation state: where auto-return goes back to, and when the
+    // current screen was entered (the auto-return clock).
+    var prev_screen_ix: usize = 0;
+    var screen_entered_ms: u64 = linux.monotonicMsec();
     var cpu = screens.CpuMeter.init();
     var flush_fail_count: u32 = 0;
 
@@ -1561,9 +1618,53 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
 
         if (want_next_pattern.swap(false, .monotonic)) blingNextPattern();
         if (want_next_screen.swap(false, .monotonic)) {
-            screen_ix = (screen_ix + 1) % active_screens.len;
-            persistScreen(active_screens[screen_ix].name);
-            std.log.info("oled: screen -> {s}", .{active_screens[screen_ix].name});
+            // Long-press cycle skips contract-v2 hidden screens (they are only
+            // reachable by a direct RT jump). Bounded walk: if EVERY screen is
+            // hidden we stay put rather than spin.
+            var steps: usize = 0;
+            var ix = screen_ix;
+            while (steps < active_screens.len) : (steps += 1) {
+                ix = (ix + 1) % active_screens.len;
+                if (!active_screens[ix].hidden) break;
+            }
+            if (ix != screen_ix) {
+                prev_screen_ix = screen_ix;
+                screen_ix = ix;
+                screen_entered_ms = ctx.now_ms;
+                persistScreen(active_screens[screen_ix].name);
+                std.log.info("oled: screen -> {s}", .{active_screens[screen_ix].name});
+            }
+        }
+        // RT-signal jumps: 40+N -> screen N; 56 -> the "swapcore" screen. Direct
+        // jumps reach hidden screens; transient (hidden) targets are not persisted
+        // so a reboot never lands on one.
+        const jump = want_jump.swap(-1, .monotonic);
+        if (jump != -1) {
+            const target: ?usize = if (jump == -2)
+                findScreenContaining(active_screens, "swapcore")
+            else if (jump >= 0 and @as(usize, @intCast(jump)) < active_screens.len)
+                @as(usize, @intCast(jump))
+            else
+                null;
+            if (target) |tix| {
+                if (tix != screen_ix) {
+                    prev_screen_ix = screen_ix;
+                    screen_ix = tix;
+                    screen_entered_ms = ctx.now_ms;
+                    if (!active_screens[tix].hidden) persistScreen(active_screens[tix].name);
+                    std.log.info("oled: jump -> {s}", .{active_screens[tix].name});
+                }
+            } else std.log.warn("oled: jump signal for unknown screen ({d})", .{jump});
+        }
+        // Contract-v2 auto-return: a transient screen's frames carry autoReturnMs;
+        // once we have been on it that long, bounce back to the screen we came from.
+        if (rendered.auto_return_ms > 0 and
+            ctx.now_ms - screen_entered_ms >= rendered.auto_return_ms and
+            prev_screen_ix < active_screens.len and prev_screen_ix != screen_ix)
+        {
+            screen_ix = prev_screen_ix;
+            screen_entered_ms = ctx.now_ms;
+            std.log.info("oled: auto-return -> {s}", .{active_screens[screen_ix].name});
         }
         // A >5 s hold flips the evaluator backend live: tear down the current ScreenSet and
         // reopen the SAME screens on the other backend (a recompile; a brief freeze is fine).
@@ -1588,8 +1689,10 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
                 if (eval_set) |*ns| {
                     backend_kind = ns.kind();
                     persistBackend(backend_kind);
-                    active_screens = buildEvalRegistry(&registry, ns);
+                    active_screens = buildEvalRegistry(&registry, ns, probe_fields);
                     screen_ix = findScreen(active_screens, keep_name) orelse 0;
+                    prev_screen_ix = 0;
+                    screen_entered_ms = ctx.now_ms;
                     std.log.info("oled: backend now [{s}]", .{backendName(backend_kind)});
                 } else {
                     std.log.err("oled: backend switch lost the eval screens; stopping", .{});
@@ -1734,10 +1837,16 @@ fn evalFields(panel: *const oled.Panel, ctx: *const screens.Context, backend_id:
 /// Rebuild the screen registry from an eval screen set: one `.eval` entry per lambda, named
 /// by the set's (basename) names. Returns the active slice. Used at startup and after a live
 /// backend switch (the names point into the set's storage, so they must be rebuilt).
-fn buildEvalRegistry(registry: []Screen, s: *const backend.ScreenSet) []Screen {
+fn buildEvalRegistry(registry: []Screen, s: *backend.ScreenSet, probe: eval.Fields) []Screen {
     var n: usize = 0;
     const cnt = @min(s.count(), registry.len);
-    while (n < cnt) : (n += 1) registry[n] = .{ .name = s.name(n), .body = .{ .eval = n } };
+    while (n < cnt) : (n += 1) registry[n] = .{
+        .name = s.name(n),
+        // One probe apply per screen reads the contract-v2 `hidden` flag (and
+        // warms the screen's first frame as a side effect).
+        .hidden = s.probeHidden(n, probe),
+        .body = .{ .eval = n },
+    };
     return registry[0..n];
 }
 
@@ -1745,6 +1854,15 @@ fn buildEvalRegistry(registry: []Screen, s: *const backend.ScreenSet) []Screen {
 fn findScreen(active: []const Screen, name: []const u8) ?usize {
     for (active, 0..) |s, ix| {
         if (std.mem.eql(u8, s.name, name)) return ix;
+    }
+    return null;
+}
+
+/// Index of the first screen whose name CONTAINS `frag` (the RT jump-by-role
+/// lookup, e.g. "swapcore" matching "90-swapcore"), or null.
+fn findScreenContaining(active: []const Screen, frag: []const u8) ?usize {
+    for (active, 0..) |s, ix| {
+        if (std.mem.indexOf(u8, s.name, frag) != null) return ix;
     }
     return null;
 }
@@ -1912,6 +2030,16 @@ fn cmdBootswap(io: std.Io) void {
         if (pressed and !press.down) {
             press = .{ .start_ms = linux.monotonicMsec(), .down = true };
             fired = false;
+            // Boot-button UX: tell the oled daemon (via its pidfile + the RT
+            // screen-control API) to show the "swapcore" screen while the hold is
+            // in progress. Best-effort: no oled/pidfile/screen -> nothing shown.
+            var pid_buf: [32]u8 = undefined;
+            if (linux.readFile("/run/nixbadge-oled.pid", &pid_buf)) |raw| {
+                const t = std.mem.trim(u8, raw, " \t\r\n");
+                if (std.fmt.parseInt(i32, t, 10)) |opid| {
+                    linux.kill(opid, sig_swapcore) catch {};
+                } else |_| {}
+            }
         } else if (pressed and press.down and !fired) {
             const held = linux.monotonicMsec() - press.start_ms;
             if (held >= bootswap_hold_ms) {

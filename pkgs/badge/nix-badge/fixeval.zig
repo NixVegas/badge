@@ -308,6 +308,18 @@ pub const FixBackend = struct {
             }
         }
 
+        // Contract v2 optionals (absent -> v1 defaults): hidden (cycle skip),
+        // pause (freeze frameIndex), autoReturnMs (transient screen bounce-back).
+        var hidden = false;
+        var pause = false;
+        var auto_return_ms: u32 = 0;
+        if (try ev.getAttr(result, "hidden")) |h| hidden = (try ev.forceValue(h)).asBool();
+        if (try ev.getAttr(result, "pause")) |p| pause = (try ev.forceValue(p)).asBool();
+        if (try ev.getAttr(result, "autoReturnMs")) |ar| {
+            const raw = (try ev.forceValue(ar)).asInt();
+            if (raw > 0) auto_return_ms = @intCast(@min(raw, @as(i64, std.math.maxInt(u32))));
+        }
+
         return .{
             .bitmap = self.ints[0..pix.len],
             .next_ms = next.asInt(),
@@ -315,6 +327,9 @@ pub const FixBackend = struct {
             .n = n_changes,
             .overlay = self.overlay_ints[0..overlay_len],
             .overlay_n = overlay_entries,
+            .hidden = hidden,
+            .pause = pause,
+            .auto_return_ms = auto_return_ms,
         };
     }
 

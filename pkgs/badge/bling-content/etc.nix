@@ -41,6 +41,9 @@ let
     { n = "40"; name = "power"; src = ./screens/power.nix; }
     { n = "50"; name = "clock"; src = ./screens/clock.nix; }
     { n = "60"; name = "currentsystem"; src = ./screens/currentsystem.nix; }
+    # Contract-v2 transient (hidden + auto-return): the bootswap hold indicator,
+    # reached only via the RT screen-control API (sig 56 -> "swapcore").
+    { n = "90"; name = "swapcore"; src = ./screens/swapcore.nix; }
   ];
 
   # Demoscene eye-candy screens (128x64-native). Copied verbatim (their one import,

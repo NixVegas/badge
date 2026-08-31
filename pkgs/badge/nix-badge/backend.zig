@@ -148,8 +148,25 @@ pub const ScreenSet = struct {
         if (f.overlay_n > 0) eval.applyOverlay(f.overlay, f.overlay_n, out, fr.width, &dirty);
         self.frame +%= 1;
         if (self.frame % eval.collect_every == 0) self.be.collect();
-        self.play_idx +%= 1;
-        return .{ .next_ms = eval.clampNextMs(f.next_ms), .dirty = dirty };
+        // Contract v2 `pause`: freeze the playback counter (the screen keeps
+        // rendering with a moving `t`, but frameIndex stands still).
+        if (!f.pause) self.play_idx +%= 1;
+        return .{
+            .next_ms = eval.clampNextMs(f.next_ms),
+            .dirty = dirty,
+            .auto_return_ms = f.auto_return_ms,
+        };
+    }
+
+    /// Probe a screen's contract-v2 `hidden` flag: apply it ONCE with frameIndex 0
+    /// (also warms its first frame) and read the optional. Used at registry build so
+    /// the long-press cycle can skip hidden screens before ever visiting them. A
+    /// probe fault reports NOT hidden (the render path handles/drops faults itself).
+    pub fn probeHidden(self: *ScreenSet, idx: usize, fields: eval.Fields) bool {
+        var fr = fields;
+        fr.frame_index = 0;
+        const f = self.be.applyFrame(idx, fr) catch return false;
+        return f.hidden;
     }
 };
 

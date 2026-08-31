@@ -370,6 +370,30 @@ pub const NixBackend = struct {
             }
         }
 
+        // Contract v2 optionals (absent -> v1 defaults); mirrors fixeval.applyFrame.
+        var hidden = false;
+        var pause = false;
+        var auto_return_ms: u32 = 0;
+        if (c.nix_has_attr_byname(ctx, res, state, "hidden")) {
+            const hv = c.nix_get_attr_byname(ctx, res, state, "hidden");
+            defer _ = c.nix_value_decref(ctx, hv);
+            _ = c.nix_value_force(ctx, state, hv);
+            hidden = c.nix_get_bool(ctx, hv);
+        }
+        if (c.nix_has_attr_byname(ctx, res, state, "pause")) {
+            const pv = c.nix_get_attr_byname(ctx, res, state, "pause");
+            defer _ = c.nix_value_decref(ctx, pv);
+            _ = c.nix_value_force(ctx, state, pv);
+            pause = c.nix_get_bool(ctx, pv);
+        }
+        if (c.nix_has_attr_byname(ctx, res, state, "autoReturnMs")) {
+            const av = c.nix_get_attr_byname(ctx, res, state, "autoReturnMs");
+            defer _ = c.nix_value_decref(ctx, av);
+            _ = c.nix_value_force(ctx, state, av);
+            const raw = c.nix_get_int(ctx, av);
+            if (raw > 0) auto_return_ms = @intCast(@min(raw, @as(i64, std.math.maxInt(u32))));
+        }
+
         return .{
             .bitmap = self.ints[0..bitmap_len],
             .next_ms = next_ms,
@@ -377,6 +401,9 @@ pub const NixBackend = struct {
             .n = n_changes,
             .overlay = self.overlay_ints[0..overlay_len],
             .overlay_n = overlay_entries,
+            .hidden = hidden,
+            .pause = pause,
+            .auto_return_ms = auto_return_ms,
         };
     }
 

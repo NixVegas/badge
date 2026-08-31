@@ -46,6 +46,16 @@ pub fn open(path: [*:0]const u8, flags: O, mode: linux.mode_t) Error!fd_t {
     return @intCast(try decode(ret));
 }
 
+pub fn getpid() i32 {
+    return linux.getpid();
+}
+
+/// Send `sig` (a raw kernel signal number, so RT signals 32..64 work) to `pid`.
+/// The SIG enum is non-exhaustive, so any kernel number round-trips through it.
+pub fn kill(pid: i32, sig: u32) Error!void {
+    _ = try decode(linux.kill(pid, @enumFromInt(sig)));
+}
+
 pub fn close(fd: fd_t) void {
     // A close() error is not actionable (the fd is released regardless) and EBADF
     // would mean a double close, our bug; either way we do not branch on it.
