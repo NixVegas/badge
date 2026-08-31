@@ -5,11 +5,13 @@ scope:
 let
   mod = a: b: a - (a / b) * b;
 
-  # Integer hash (xorshift-ish via mul/mod; Nix ints are 64-bit so no overflow
-  # worries at these magnitudes).
-  hash = x: mod (x * 2654435761) 65536;
+  # Integer hash, OVERFLOW-SAFE: reduce to 16 bits BEFORE the multiply (Knuth
+  # 40503). The first cut multiplied the raw input by 2654435761 -- with `t` in
+  # monotonic ms since boot, the product blew past i64 within the hour and fix
+  # (correctly) raised IntegerOverflow, killing the eval pattern until reload.
+  hash = x: mod (mod x 65536 * 40503) 65536;
 
-  bucket = scope.t / 100; # twinkle lifetime 100 ms
+  bucket = mod (scope.t / 100) 65536; # twinkle lifetime 100 ms, bounded
 
   led = i:
     let

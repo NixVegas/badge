@@ -4,9 +4,10 @@
 scope:
 let
   mod = a: b: a - (a / b) * b;
-  hash = x: mod (x * 2654435761) 65536;
+  # Overflow-safe 16-bit hash -- see sparkle.nix for why the wide multiply broke.
+  hash = x: mod (mod x 65536 * 40503) 65536;
 
-  bucket = scope.t / 66; # flicker rate
+  bucket = mod (scope.t / 66) 65536; # flicker rate, bounded
 
   led = i:
     let
