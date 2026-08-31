@@ -27,12 +27,6 @@ let
     # for runtime work. See nixbadge.oled.dynamicNix.
     nixDynamic = cfg.dynamicNix;
   };
-  # The Bad Apple blob is arch-independent DATA (a packed 1-bit frame file), but
-  # producing it runs ffmpeg + a tiny C packer. Build those on the build host
-  # (buildPackages), not the target -- with target pkgs a cross build would try
-  # to run aarch64 ffmpeg under emulation to transcode 3.5 min of video, which is
-  # absurdly slow / breaks the build. The output bytes are identical either way.
-  badApple = import ../../pkgs/badge/badapple { pkgs = pkgs.buildPackages; };
 in
 {
   options.nixbadge.oled = {
@@ -41,9 +35,8 @@ in
       default = true;
       description = ''
         Run the oled engine on the optional SAO OLED. When false the daemon is
-        not started and the Bad Apple frame blob is not built into the closure
-        (a badge assembled without the panel); the WS2812 ring still animates
-        from the leds.nix painter.
+        not started (a badge assembled without the panel); the WS2812 ring
+        still animates from the leds.nix painter.
       '';
     };
     width = lib.mkOption {
@@ -152,11 +145,11 @@ in
         the current one every frame; the USER long-press / SIGUSR2 cycles through
         them. Each is passed as a repeated `--eval-screen` arg (named by its file
         basename). A screen that fails to compile is skipped; if NONE load, the
-        engine falls back to the computed Zig screens.
+        daemon logs it and exits 0 (nothing to show; there is no Zig fallback).
 
         aarch64 ONLY: the fix evaluator is compiled into the ARM core; on the
-        eval-less riscv core the flags are accepted but the screens are skipped
-        (the computed Zig screens run instead). The files are read at runtime
+        eval-less riscv core the flags are accepted but no screen loads, so the
+        daemon exits 0 (no OLED screens on riscv). The files are read at runtime
         (the oled daemon is a stage-2 service; no initrd), so point them at store paths --
         e.g. the `bling-screens` package's `<store>/screens/battery.nix` and the
         `bling-badapple-live` package's `<store>/badapple-live.nix`.
@@ -200,7 +193,6 @@ in
             "--oled-width ${toString cfg.width}"
             "--oled-height ${toString cfg.height}"
             "--button ${cfg.button}"
-            "--badapple ${badApple}/badapple.bin"
             "--backend ${cfg.backend}"
             # Cap the fix Engine's GC line so its heap collects instead of swapping (#28).
             "--gc-budget-mb ${toString cfg.gcBudgetMb}"
@@ -211,9 +203,9 @@ in
           ]
           # The pure-Nix eval screens: one repeated `--eval-screen PATH` per
           # configured screen. All compile into ONE shared fix Engine (a
-          # ScreenSet); when at least one loads they REPLACE the computed Zig
-          # screens, else the oled daemon falls back to them. aarch64 only (no-op on riscv,
-          # where eval is not built in). Order here = cycle order on the badge.
+          # ScreenSet). They are the ONLY screen surface -- if none load the
+          # daemon exits 0 (also the riscv case, where eval is not built in).
+          # Order here = cycle order on the badge.
           ++ map (p: "--eval-screen ${p}") cfg.evalScreens
           # Dir-based content: scan oled.d for *.nix (sorted). The default config points
           # this at /etc/nixbadge/oled.d; screens there import <nixbadge/lib/...>.

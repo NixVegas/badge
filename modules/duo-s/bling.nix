@@ -7,14 +7,16 @@
 # That is why the unit body below is shared between boot.initrd.systemd.services
 # and systemd.services.
 #
-# To change the pattern or the colours at run time use the CLI:
-#   nix-badge bling set --pattern solid --color '#ff00ff'
+# The patterns themselves are pure-Nix files (bling.d, cycled by the USER
+# button rewriting `eval =`); to change the brightness or the pattern source at
+# run time use the CLI:
+#   nix-badge bling set --brightness 128 --eval /etc/nixbadge/bling.d/20-fire.nix
 # The CLI only writes /etc/nixbadge/leds.conf. The running service watches
 # that file and reloads when the mtime moves, so nothing calls systemctl and
 # the binary keeps a glibc-only closure. An animation notices within one frame,
 # a static pattern within half a second.
 #
-# A reload takes the pattern, brightness, fps and colours. It does NOT reload
+# A reload takes the brightness, fps and the blob/eval paths. It does NOT reload
 # device, count or speedHz: those describe the board, the SPI node is already
 # open and the frame buffers are already sized. Change them with a rebuild.
 {
@@ -47,8 +49,6 @@ let
     cs_high = ${if cfg.csHigh then "1" else "0"}
     brightness = ${toString cfg.brightness}
     fps = ${toString cfg.fps}
-    pattern = ${cfg.pattern}
-    colors = ${lib.concatStringsSep "," cfg.colors}
     ${lib.optionalString (cfg.blob != null) "blob = ${cfg.blob}"}
     ${lib.optionalString (cfg.evalPattern != null) "eval = ${cfg.evalPattern}"}
   '';
@@ -99,9 +99,10 @@ in
       default = null;
       description = ''
         A baked "BLED" RGB-frame blob (see pkgs/badge/bling-content/leds.nix, a
-        pure-Nix `f(t) -> [rgb]` pattern evaluated by fix) to play on the ring
-        instead of a computed pattern. null uses the computed `pattern`.
-        Reloadable at run time: nix-badge bling set --blob PATH.
+        pure-Nix `f(t) -> [rgb]` pattern evaluated by fix) to play on the ring.
+        null falls back to `evalPattern` (or, with neither set, the built-in
+        dim-blue emergency fill). Reloadable at run time:
+        nix-badge bling set --blob PATH.
       '';
     };
 
@@ -113,8 +114,8 @@ in
         `scope: { bitmap = [ 0xRRGGBB... ]; nextMs; }`) evaluated per frame by the
         embedded fix evaluator. Unlike `blob` (baked at build time), this reads the
         LIVE scope (t, battery, ...) each frame. Highest precedence, over blob and
-        the computed pattern. aarch64 only -- ignored on the riscv core, which has
-        no evaluator and falls back to blob/computed. Reloadable at run time:
+        the emergency fill. aarch64 only -- ignored on the riscv core, which has
+        no evaluator and falls back to blob/fill. Reloadable at run time:
         nix-badge bling set --eval PATH. Note: if set here (declaratively) the file
         is added to the initrd so early boot can eval it.
       '';
@@ -215,43 +216,9 @@ in
       default = 30;
       description = "Animation frames per second.";
     };
-
-    pattern = lib.mkOption {
-      type = lib.types.enum [
-        "off"
-        "solid"
-        "pulse"
-        "rainbow"
-        "chase"
-      ];
-      default = "rainbow";
-      description = "Pattern to show at boot.";
-    };
-
-    colors = lib.mkOption {
-      type = lib.types.listOf (lib.types.strMatching "#[0-9a-fA-F]{6}");
-      default = [ "#ffffff" ];
-      example = [
-        "#ff0000"
-        "#00ff00"
-        "#0000ff"
-      ];
-      description = ''
-        Colours the pattern uses. "solid" spreads them over the ring, "pulse"
-        uses the first, and "chase" steps through them one lap at a time.
-        "rainbow" ignores them.
-      '';
-    };
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = cfg.colors != [ ];
-        message = "nixbadge.bling.colors must have at least one colour.";
-      }
-    ];
-
     environment.systemPackages = [ pkg ];
 
     # The binary and its config must live inside the initrd, not only on the

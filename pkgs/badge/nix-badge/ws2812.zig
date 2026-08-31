@@ -1,4 +1,4 @@
-//! WS2812 (NeoPixel) framing over an SPI MOSI line, plus the ring animations.
+//! WS2812 (NeoPixel) framing over an SPI MOSI line.
 //!
 //! WS2812 has no clock line: each LED bit is a pulse whose HIGH fraction encodes
 //! the bit value. We synthesise those pulses by sending several SPI bits per LED
@@ -97,110 +97,10 @@ pub fn encodeFrame(enc: Encoding, pixels: []const Rgb, latch_bytes: usize, out: 
     @memset(out[pixels.len * bpl ..][0..latch_bytes], 0);
 }
 
-// ------------------------------------------------------------- animations ---
-
-pub const Pattern = enum(u8) {
-    off = 0,
-    solid,
-    pulse,
-    rainbow,
-    chase,
-
-    /// Parse a pattern name, or null when unknown (a recoverable input fault).
-    pub fn parse(text: []const u8) ?Pattern {
-        return std.meta.stringToEnum(Pattern, text);
-    }
-
-    pub fn name(self: Pattern) []const u8 {
-        return @tagName(self);
-    }
-
-    /// Whether this pattern changes frame to frame (drives fps vs idle pacing).
-    pub fn isAnimated(self: Pattern) bool {
-        return switch (self) {
-            .off, .solid => false,
-            .pulse, .rainbow, .chase => true,
-        };
-    }
-};
-
-/// Integer colour wheel: pos 0..255 -> a hue around the RGB circle. libm-free.
-pub fn wheel(pos_in: u8) Rgb {
-    var pos: u32 = 255 - @as(u32, pos_in);
-    if (pos < 85) return .{ .r = @intCast(255 - pos * 3), .g = 0, .b = @intCast(pos * 3) };
-    if (pos < 170) {
-        pos -= 85;
-        return .{ .r = 0, .g = @intCast(pos * 3), .b = @intCast(255 - pos * 3) };
-    }
-    pos -= 170;
-    return .{ .r = @intCast(pos * 3), .g = @intCast(255 - pos * 3), .b = 0 };
-}
-
-/// Scale a channel by num/255 (num 0..255), the software brightness step.
+/// Scale a channel by num/255 (num 0..255), the software brightness step
+/// (a WS2812 chain has no per-pixel brightness byte).
 pub fn scaleChannel(v: u8, num: u32) u8 {
     return @intCast(@as(u32, v) * num / 255);
-}
-
-/// Triangle wave 0..255..0 over `period` frames. A libm-free pulse envelope.
-pub fn triangle(frame: u32, period: u32) u32 {
-    if (period == 0) return 255;
-    const x = frame % period;
-    const half = period / 2;
-    if (half == 0) return 255;
-    return if (x < half) x * 255 / half else (period - x) * 255 / half;
-}
-
-/// Parameters a render needs beyond the frame counter. Bundled so `render` stays
-/// a pure function of its inputs.
-pub const RenderParams = struct {
-    pattern: Pattern,
-    brightness: u8,
-    fps: u32,
-    colors: []const Rgb,
-};
-
-/// Paint one animation frame into `out` (one entry per LED). `out.len` is the
-/// ring length. `params.colors` must be non-empty. Global brightness is applied
-/// last, matching a WS2812 chain that has no per-pixel brightness byte.
-pub fn render(params: RenderParams, frame: u32, out: []Rgb) void {
-    std.debug.assert(params.colors.len > 0);
-    const count: u32 = @intCast(out.len);
-
-    switch (params.pattern) {
-        .off => @memset(out, .{ .r = 0, .g = 0, .b = 0 }),
-        .solid => for (out, 0..) |*px, i| {
-            px.* = params.colors[i % params.colors.len];
-        },
-        .pulse => {
-            const level = triangle(frame, params.fps * 2);
-            const base = params.colors[0];
-            const v: Rgb = .{
-                .r = scaleChannel(base.r, level),
-                .g = scaleChannel(base.g, level),
-                .b = scaleChannel(base.b, level),
-            };
-            @memset(out, v);
-        },
-        .rainbow => for (out, 0..) |*px, i| {
-            const idx: u32 = @intCast(i);
-            const pos = (idx * 256 / count + frame) & 0xff;
-            px.* = wheel(@intCast(pos));
-        },
-        .chase => {
-            @memset(out, .{ .r = 0, .g = 0, .b = 0 });
-            const head = frame % count;
-            const lap = frame / count;
-            out[head] = params.colors[lap % params.colors.len];
-        },
-    }
-
-    if (params.brightness < 255) {
-        for (out) |*px| {
-            px.r = scaleChannel(px.r, params.brightness);
-            px.g = scaleChannel(px.g, params.brightness);
-            px.b = scaleChannel(px.b, params.brightness);
-        }
-    }
 }
 
 // -------------------------------------------------------------------- tests ---
@@ -239,29 +139,8 @@ test "encodeFrame writes GRB order then a zero latch" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0 }, out[24..28]);
 }
 
-test "wheel endpoints" {
-    try std.testing.expectEqual(Rgb{ .r = 255, .g = 0, .b = 0 }, wheel(0));
-}
-
-test "triangle peaks at the half period and is zero at the ends" {
-    try std.testing.expectEqual(@as(u32, 0), triangle(0, 60));
-    try std.testing.expectEqual(@as(u32, 255), triangle(30, 60));
-    try std.testing.expectEqual(@as(u32, 255), triangle(1, 0)); // zero period guard
-}
-
-test "Pattern.parse rejects garbage and accepts names" {
-    try std.testing.expectEqual(Pattern.rainbow, Pattern.parse("rainbow").?);
-    try std.testing.expectEqual(@as(?Pattern, null), Pattern.parse("nope"));
-}
-
-test "render chase lights exactly one LED" {
-    const colors = [_]Rgb{.{ .r = 10, .g = 20, .b = 30 }};
-    var out: [4]Rgb = undefined;
-    render(.{ .pattern = .chase, .brightness = 255, .fps = 30, .colors = &colors }, 1, &out);
-    var lit: u32 = 0;
-    for (out) |px| {
-        if (px.r != 0 or px.g != 0 or px.b != 0) lit += 1;
-    }
-    try std.testing.expectEqual(@as(u32, 1), lit);
-    try std.testing.expectEqual(colors[0], out[1]);
+test "scaleChannel scales linearly with saturating endpoints" {
+    try std.testing.expectEqual(@as(u8, 0), scaleChannel(200, 0));
+    try std.testing.expectEqual(@as(u8, 200), scaleChannel(200, 255));
+    try std.testing.expectEqual(@as(u8, 100), scaleChannel(200, 128)); // 200*128/255
 }

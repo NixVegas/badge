@@ -16,7 +16,6 @@ const ws2812 = @import("ws2812.zig");
 const config = @import("config.zig");
 const oled = @import("oled.zig");
 const sysfs = @import("sysfs.zig");
-const badapple = @import("badapple.zig");
 const bled = @import("bled.zig");
 const screens = @import("screens.zig");
 const fixeval = @import("fixeval.zig");
@@ -144,18 +143,16 @@ const Out = struct {
 const usage_text =
     \\usage:
     \\  nix-badge bling run --config FILE [--backend fix|nix]
-    \\  nix-badge bling set [--pattern P] [--brightness 0-255] [--count N] [--speed-hz HZ]
-    \\        [--bits 3|4|8] [--fps N] [--color '#rrggbb' ...] [--blob PATH] [--eval PATH]
+    \\  nix-badge bling set [--brightness 0-255] [--count N] [--speed-hz HZ]
+    \\        [--bits 3|4|8] [--fps N] [--blob PATH] [--eval PATH]
     \\  nix-badge bling show
     \\  nix-badge core <arm|riscv|status>
     \\  nix-badge power
-    \\  nix-badge oled [--badapple PATH] [--eval-screen PATH ...] [--eval-dir DIR] [--content-root DIR] [--oled-width W] [--oled-height H] [--backend fix|nix]
+    \\  nix-badge oled [--eval-screen PATH ...] [--eval-dir DIR] [--content-root DIR] [--oled-width W] [--oled-height H] [--backend fix|nix]
     \\  nix-badge bootswap
     \\  nix-badge mmio <read ADDR | write ADDR VALUE>
     \\  nix-badge fix-selftest              (smoke-test the embedded fix evaluator)
     \\  nix-badge nix-selftest              (smoke-test the upstream Nix C API backend)
-    \\
-    \\patterns: off solid pulse rainbow chase
     \\
 ;
 
@@ -372,7 +369,7 @@ fn sendFrame(fd: linux.fd_t, frame: []const u8, speed_hz: u32, report: bool) voi
 /// Close any currently-open blob and open the one at `cfg.blob()` if set. Returns
 /// the new `?bled.Frames`: null when no blob is configured, or when the configured
 /// one is missing/short/bad-magic (logged), so the caller falls back to the
-/// computed pattern. This is only ever called on start and on an mtime change, so
+/// emergency fill. This is only ever called on start and on an mtime change, so
 /// the open cost is off the hot path.
 fn refreshBlob(prev: ?bled.Frames, cfg: *const Config) ?bled.Frames {
     var old = prev;
@@ -384,13 +381,13 @@ fn refreshBlob(prev: ?bled.Frames, cfg: *const Config) ?bled.Frames {
     var path_buf: [256]u8 = undefined;
     const zpath = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return null;
     return bled.load(zpath) catch |err| {
-        std.log.warn("blob {s}: {s}; using computed pattern", .{ path, @errorName(err) });
+        std.log.warn("blob {s}: {s}; ignoring it", .{ path, @errorName(err) });
         return null;
     };
 }
 
 /// Copy the first `out.len` LEDs of one blob frame's ring-order RGB into `out`
-/// with the software brightness scale, matching what `ws2812.render` applies.
+/// with the software brightness scale (a WS2812 chain has no brightness byte).
 /// `out.len` is the effective LED count: the blob's nleds, or fewer if the spidev
 /// bufsiz clamped it, so the frame always holds at least `out.len` LEDs.
 fn paintBlobFrame(frames: *const bled.Frames, now_ms: u64, brightness: u8, out: []Rgb) void {
@@ -406,13 +403,15 @@ fn paintBlobFrame(frames: *const bled.Frames, now_ms: u64, brightness: u8, out: 
     }
 }
 
-/// The `bling run` service. Plays a baked "BLED" blob when one is configured and
-/// valid, otherwise renders the configured computed pattern. On a runtime-file
-/// mtime change it hot-reloads the CLI-mutable fields AND the blob path. Static
-/// patterns idle at 2 Hz (and still repaint, since a WS2812 chain has no error
-/// recovery of its own); animations and blobs run at their fps. The WS2812 encode
-/// + spidev write + latch path is identical in both modes — only the pixel source
-/// differs — so the blob mode is purely additive and cannot regress flicker.
+/// The `bling run` service. Pixel-source precedence: the pure-Nix eval pattern,
+/// then a baked "BLED" blob, then the hardcoded dim-blue emergency fill (the
+/// Zig-computed patterns are gone; pure-Nix content is the only real surface).
+/// On a runtime-file mtime change it hot-reloads the CLI-mutable fields AND the
+/// blob/eval paths. The static fill idles at 2 Hz (and still repaints, since a
+/// WS2812 chain has no error recovery of its own); eval patterns and blobs run
+/// at their own pace. The WS2812 encode + spidev write + latch path is identical
+/// for every source — only the pixel source differs — so no source can regress
+/// flicker.
 fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.Kind, io: std.Io) CmdError!void {
     var cfg = try loadConfig(base);
 
@@ -424,18 +423,18 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.
 
     // A configured, valid blob overrides the LED count (its nleds) and fps; the
     // buffers below are then sized to the effective geometry. A missing/bad blob
-    // leaves `blob` null and the computed pattern drives everything.
+    // leaves `blob` null and the eval pattern (or the fill) drives everything.
     var blob = refreshBlob(null, &cfg);
     defer if (blob) |*b| b.deinit();
     applyBlobGeometry(&cfg, blob, bufsiz, max_count);
     clampCount(&cfg, bufsiz, max_count);
 
     // A configured pure-Nix `eval` pattern (aarch64 only) is the HIGHEST-precedence
-    // pixel source, over blob and the computed pattern. It paces on its own nextMs.
-    // Sensor inputs are refreshed on a slow tick (battery is a median-of-33 ADC
-    // read); `t` is current every frame. Missing/bad/unavailable -> null, so the
-    // painter transparently falls back to blob/computed (and riscv, with no eval
-    // built in, always takes that path).
+    // pixel source, over the blob. It paces on its own nextMs. Sensor inputs are
+    // refreshed on a slow tick (battery is a median-of-33 ADC read); `t` is
+    // current every frame. Missing/bad/unavailable -> null, so the painter
+    // transparently falls back to blob/fill (and riscv, with no eval built in,
+    // always takes that path).
     var eval_pat: ?backend.Pattern = openEval(gpa, &cfg, backend_kind, io);
     defer if (eval_pat) |*p| p.deinit();
     var sensors: eval.Fields = .{};
@@ -463,7 +462,6 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.
         });
 
     var seen_mtime: ?i128 = linux.mtimeNsec(runtime_conf);
-    var frame_no: u32 = 0;
     var report_timing = true;
 
     while (!stop_requested.load(.monotonic)) {
@@ -487,7 +485,6 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.
             if (eval_pat) |*p| p.deinit();
             eval_pat = openEval(gpa, &cfg, backend_kind, io);
             last_sensor_ms = 0; // force a sensor refresh next frame
-            frame_no = 0;
             report_timing = true;
             // Resize buffers to the possibly-changed count/encoding. On OOM we
             // keep the old geometry rather than crash the boot indicator.
@@ -515,8 +512,8 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.
         const now_ms = linux.monotonicMsec();
         const lit = pixels[0..cfg.count];
 
-        // Source precedence: eval > blob > computed. The eval pattern, when it
-        // renders successfully, also dictates the frame period via its nextMs.
+        // Source precedence: eval > blob > emergency fill. The eval pattern, when
+        // it renders successfully, also dictates the frame period via its nextMs.
         var eval_period_ns: ?u64 = null;
         if (eval_pat) |*p| {
             if (last_sensor_ms == 0 or now_ms - last_sensor_ms >= sensor_interval_ms) {
@@ -541,12 +538,10 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.
             if (blob) |*frames| {
                 paintBlobFrame(frames, now_ms, cfg.brightness, lit);
             } else {
-                ws2812.render(.{
-                    .pattern = cfg.pattern,
-                    .brightness = cfg.brightness,
-                    .fps = cfg.fps,
-                    .colors = cfg.colors(),
-                }, frame_no, lit);
+                // No eval pattern and no blob: the pure-Nix patterns are the only
+                // real surface, so this hardcoded dim-blue fill is the emergency
+                // indicator -- an eval fault stays visible, but calm.
+                @memset(lit, .{ .r = 0, .g = 8, .b = 32 });
             }
         }
         // Identical encode + transfer + latch for every source — the flicker-free
@@ -555,17 +550,14 @@ fn cmdBlingRun(gpa: std.mem.Allocator, base: ?[]const u8, backend_kind: backend.
 
         sendFrame(fd, frame[0..frame_len], cfg.speed_hz, report_timing);
         report_timing = false;
-        frame_no +%= 1;
 
-        // An eval pattern paces on the nextMs it returned; otherwise a blob or
-        // animated computed pattern runs at fps, and a static one idles at 2 Hz.
-        const period_ns: u64 = eval_period_ns orelse blk: {
-            const animated = blob != null or cfg.pattern.isAnimated();
-            break :blk if (animated)
-                std.time.ns_per_s / @as(u64, cfg.fps)
-            else
-                std.time.ns_per_s / idle_poll_hz;
-        };
+        // An eval pattern paces on the nextMs it returned; a blob runs at its
+        // fps; the static emergency fill idles at 2 Hz (and still repaints,
+        // since a WS2812 chain has no error recovery of its own).
+        const period_ns: u64 = eval_period_ns orelse if (blob != null)
+            std.time.ns_per_s / @as(u64, cfg.fps)
+        else
+            std.time.ns_per_s / idle_poll_hz;
         linux.sleepNsec(period_ns);
     }
     // Leave the LEDs as they are so a restart repaints without a visible gap.
@@ -579,7 +571,7 @@ const sensor_interval_ms: u64 = 1000;
 
 /// Open the configured eval pattern, or null when none is set or eval is not
 /// built in (riscv). A bad pattern logs inside `open` and also yields null, so
-/// the painter transparently falls back to the blob/computed source.
+/// the painter transparently falls back to the blob (or the emergency fill).
 // The badge content root + its `<nixbadge>` search-path entry (so LED/OLED content can
 // `import <nixbadge/lib/...>`). oled takes an optional `--content-root` override; the LED
 // painter uses the fixed default.
@@ -611,7 +603,7 @@ fn gatherSensors(cpu: *screens.CpuMeter) eval.Fields {
 
 /// When a blob is active, override the effective LED count (its nleds) and fps so
 /// the buffer sizing, encode, and pacing all follow the baked animation. No-op when
-/// no blob is active (the computed pattern's config values stand).
+/// no blob is active (the config's own count/fps stand).
 fn applyBlobGeometry(cfg: *Config, blob: ?bled.Frames, bufsiz: u64, max_count: u32) void {
     const frames = blob orelse return;
     cfg.count = frames.nleds;
@@ -619,22 +611,24 @@ fn applyBlobGeometry(cfg: *Config, blob: ?bled.Frames, bufsiz: u64, max_count: u
     clampCount(cfg, bufsiz, max_count);
 }
 
-/// Log the active source (blob path or pattern name) and the frame geometry, once
-/// at start and after every reload.
+/// Log the active blob (or its absence) and the frame geometry, once at start
+/// and after every reload.
 fn logRunState(cfg: *const Config, blob: ?bled.Frames, frame_len: usize) void {
     if (blob) |frames| {
         std.log.info("blob {s}: {d} leds, {d} fps, {d} frames, brightness {d}, {d} bytes/frame", .{
             cfg.blob(), frames.nleds, frames.fps, frames.frames, cfg.brightness, frame_len,
         });
     } else {
-        std.log.info("pattern {s}: {d} leds, brightness {d}, {d} fps, {d} bytes/frame", .{
-            cfg.pattern.name(), cfg.count, cfg.brightness, cfg.fps, frame_len,
+        // No blob: the pixel source is the pure-Nix eval pattern when one is
+        // configured (and healthy), else the dim-blue emergency fill.
+        std.log.info("no blob: {d} leds, brightness {d}, {d} fps, {d} bytes/frame", .{
+            cfg.count, cfg.brightness, cfg.fps, frame_len,
         });
     }
 }
 
-/// Re-read the config and adopt the CLI-mutable fields (pattern, brightness, fps,
-/// count, speed, encoding, colours, blob path). Hardware identity (device) is not
+/// Re-read the config and adopt the CLI-mutable fields (brightness, fps, count,
+/// speed, encoding, blob + eval paths). Hardware identity (device) is not
 /// reloaded. A speed change is pushed to the driver; each transfer also carries its
 /// own speed, so nothing is reopened.
 fn reloadInto(cfg: *Config, base: ?[]const u8, max_count: *u32, bufsiz: u64, fd: linux.fd_t) void {
@@ -643,14 +637,11 @@ fn reloadInto(cfg: *Config, base: ?[]const u8, max_count: *u32, bufsiz: u64, fd:
     layerRuntime(&fresh);
 
     const old_speed = cfg.speed_hz;
-    cfg.pattern = fresh.pattern;
     cfg.brightness = fresh.brightness;
     cfg.fps = fresh.fps;
     cfg.count = fresh.count;
     cfg.speed_hz = fresh.speed_hz;
     cfg.encoding = fresh.encoding;
-    cfg.colors_buf = fresh.colors_buf;
-    cfg.ncolors = fresh.ncolors;
     cfg.setBlob(fresh.blob());
     // The eval path is CLI-mutable too (the short-press cycle rewrites `eval =`).
     // It was missing from this whitelist, so every reload re-opened the STALE
@@ -675,16 +666,10 @@ fn cmdBlingSet(out: *Out, args: []const []const u8) CmdError!void {
     var cfg = Config.default();
     layerRuntime(&cfg); // start from what is live so a partial change keeps the rest
 
-    var have_colors = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
-        if (optArg(args, &i, "--pattern")) |v| {
-            cfg.pattern = ws2812.Pattern.parse(v) orelse {
-                std.log.err("unknown pattern '{s}'", .{v});
-                return error.Failed;
-            };
-        } else if (optArg(args, &i, "--brightness")) |v| {
+        if (optArg(args, &i, "--brightness")) |v| {
             const n = std.fmt.parseInt(u32, v, 10) catch 0;
             cfg.brightness = if (n > 255) 255 else @intCast(n);
         } else if (optArg(args, &i, "--speed-hz")) |v| {
@@ -714,23 +699,9 @@ fn cmdBlingSet(out: *Out, args: []const []const u8) CmdError!void {
                 return error.Failed;
             }
             cfg.count = n;
-        } else if (optArg(args, &i, "--color")) |v| {
-            if (!have_colors) {
-                cfg.ncolors = 0;
-                have_colors = true;
-            }
-            if (cfg.ncolors >= config.max_colors) {
-                std.log.err("at most {d} colours", .{config.max_colors});
-                return error.Failed;
-            }
-            cfg.colors_buf[cfg.ncolors] = config.parseColor(v) orelse {
-                std.log.err("bad colour '{s}'", .{v});
-                return error.Failed;
-            };
-            cfg.ncolors += 1;
         } else if (optArg(args, &i, "--blob")) |v| {
             // A path selects a baked BLED animation; an empty value clears it and
-            // returns to the computed pattern.
+            // returns to the eval pattern (or the emergency fill).
             cfg.setBlob(v);
         } else if (optArg(args, &i, "--eval")) |v| {
             // A path selects a pure-Nix pattern function evaluated per frame
@@ -747,8 +718,8 @@ fn cmdBlingSet(out: *Out, args: []const []const u8) CmdError!void {
 
     // The running service picks up the change on its next tick; we do not talk to
     // systemd. Echo the two headline fields.
-    out.w().print("pattern = {s}\n", .{cfg.pattern.name()}) catch return error.Failed;
     out.w().print("brightness = {d}\n", .{cfg.brightness}) catch return error.Failed;
+    out.w().print("eval = {s}\n", .{cfg.eval()}) catch return error.Failed;
 }
 
 /// Match `--flag VALUE` at position i; on a match advances i past the value and
@@ -777,11 +748,7 @@ fn cmdBlingShow(out: *Out) CmdError!void {
     var cfg = Config.default();
     layerRuntime(&cfg);
     const w = out.w();
-    w.print("pattern = {s}\n", .{cfg.pattern.name()}) catch return error.Failed;
     w.print("brightness = {d}\n", .{cfg.brightness}) catch return error.Failed;
-    w.writeAll("colors = ") catch return error.Failed;
-    config.writeColorList(w, &cfg) catch return error.Failed;
-    w.writeByte('\n') catch return error.Failed;
     w.print("blob = {s}\n", .{cfg.blob()}) catch return error.Failed;
     w.print("eval = {s}\n", .{cfg.eval()}) catch return error.Failed;
 }
@@ -973,22 +940,17 @@ fn parseCUnsigned(text: []const u8) ?u64 {
 // pattern (by rewriting the runtime config so the running `bling run` hot-reloads
 // it) or the OLED screen, so one button cycles both ring and panel.
 
-// A cyclable OLED screen. Two flavours share the loop: a computed Zig screen (a
-// pure function of the per-frame `Context`) and a pure-Nix eval screen (one
-// lambda of a shared `ScreenSet`, addressed by index). The loop renders either
-// through `renderScreen`, so cycling/persistence stay generic over the flavour.
+// A cyclable OLED screen: a pure-Nix eval screen, one lambda of the shared
+// `ScreenSet`, addressed by index and rendered via ScreenSet.renderOled into
+// the shared eval framebuffer, then blitted. (The old computed-Zig flavour is
+// gone; pure-Nix content is the only screen surface.)
 const Screen = struct {
     name: []const u8,
     /// Contract v2: hidden screens are skipped by the long-press cycle and are
     /// only reachable by a direct RT-signal jump. Probed once at registry build.
     hidden: bool = false,
-    body: union(enum) {
-        // A computed screen: paints the panel directly from the snapshot.
-        zig: *const fn (panel: *oled.Panel, ctx: *const screens.Context) u32,
-        // A pure-Nix screen: index into `active_screen_set`'s lambdas; rendered
-        // via ScreenSet.renderOled into the shared eval framebuffer, then blitted.
-        eval: usize,
-    },
+    /// Index into the active ScreenSet's lambdas.
+    eval: usize,
 };
 
 const oled_longpress_ms = 400;
@@ -1003,7 +965,7 @@ var bling_dir: []const u8 = "/etc/nixbadge/bling.d";
 /// /etc/nixbadge/bling.d (sorted; NN- prefix = cycle order), leaving every other
 /// line untouched so the running service hot-reloads only the pattern. This is
 /// the whole user-facing pattern surface now -- the old Zig-computed patterns
-/// are out of the cycle (they remain only as the eval-fault emergency fallback).
+/// are gone (an eval fault shows the hardcoded dim-blue emergency fill).
 fn blingNextPattern() void {
     // Scan the pattern dir fresh each press: drop-in files join the cycle with
     // no restart (same contract as oled.d).
@@ -1166,8 +1128,8 @@ fn oledWait(deadline_ms: u64) void {
 // Where the current OLED screen is remembered across reboots. The LED pattern
 // already persists (the bling service layers /etc/nixbadge/leds.conf over the
 // declarative base at startup); this is the screen's equivalent. Persisted by
-// NAME, not index, so it survives a registry that changes shape (badapple present
-// or not).
+// NAME, not index, so it survives a registry that changes shape (the content
+// set changing across boots).
 const oled_state_file: [*:0]const u8 = "/etc/nixbadge/oled.state";
 
 /// Restore the last-shown screen. A missing file or an unknown name (e.g. the
@@ -1234,7 +1196,6 @@ fn collectNixScreens(gpa: std.mem.Allocator, dir: []const u8, out: [][]const u8,
 }
 
 fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdError!void {
-    var badapple_path: ?[]const u8 = null;
     // `--eval-screen PATH` is repeatable: each occurrence appends a pure-Nix OLED
     // screen. They are compiled into ONE shared fix Engine (a ScreenSet) so the
     // Value/chunk heap is paid once, not once per screen.
@@ -1261,9 +1222,7 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     var oled_controller: oled.ControllerChoice = .auto;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (optArg(args, &i, "--badapple")) |v| {
-            badapple_path = v;
-        } else if (optArg(args, &i, "--backend")) |v| {
+        if (optArg(args, &i, "--backend")) |v| {
             backend_kind = parseBackendKind(v);
         } else if (optArg(args, &i, "--content-root")) |v| {
             content_root = v;
@@ -1313,9 +1272,10 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
         }
     }
 
-    // The panel is optional hardware; open it first so its geometry is known before
-    // we decide whether a baked clip fits. A missing bus / bad size / OOM all mean
-    // "no panel" and we exit 0 (like the C) so systemd does not respin us.
+    // The panel is optional hardware; open it first so its geometry is known
+    // (it sizes the shared eval framebuffer below). A missing bus / bad size /
+    // OOM all mean "no panel" and we exit 0 (like the C) so systemd does not
+    // respin us.
     var panel = oled.Panel.open(gpa, oled_width, oled_height, oled_controller) orelse {
         std.log.warn("oled: no OLED panel, nothing to do", .{});
         return;
@@ -1330,40 +1290,12 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
         return;
     };
 
-    // Load the clip and check it matches the panel geometry; badapple leads the
-    // registry only when it loads AND its baked size equals the panel's, since a
-    // differently-sized frame would blit the wrong number of bytes. A mismatch or a
-    // bad asset just leaves it out; the meters still run.
-    var clip: ?badapple.Clip = null;
-    if (badapple_path) |path| {
-        var path_buf: [512]u8 = undefined;
-        if (std.fmt.bufPrintZ(&path_buf, "{s}", .{path})) |zpath| {
-            if (badapple.load(zpath)) |c| {
-                if (c.width == panel.width and c.height == panel.height) {
-                    clip = c;
-                    std.log.info("badapple: {s}, {d}x{d}, {d} fps, {d} frames", .{
-                        path, c.width, c.height, c.fps, c.frames,
-                    });
-                } else {
-                    std.log.warn("badapple: {s} is {d}x{d} but panel is {d}x{d}; skipping", .{
-                        path, c.width, c.height, panel.width, panel.height,
-                    });
-                    var mismatched = c; // release the mapping we will not play
-                    mismatched.deinit();
-                }
-            } else |err| {
-                std.log.warn("badapple: {s}: {s}", .{ path, @errorName(err) });
-            }
-        } else |_| {}
-    }
-    defer if (clip) |*c| c.deinit();
-
     // Open the pure-Nix eval screens: ALL `--eval-screen` paths compiled into ONE
     // shared fix Engine (a ScreenSet), each a lambda applied per frame and decoded
     // to page-major bytes. Only on an eval build (aarch64); a screen that fails to
     // compile is skipped but the rest load. When at least one loads we get a set
-    // and a shared framebuffer; otherwise `set` is null and we use the Zig
-    // fallback registry below (also the riscv path, where eval is not built in).
+    // and a shared framebuffer; otherwise `eval_set` stays null and the daemon
+    // exits below (pure-Nix content is the only screen surface).
     // Shared eval options: the file-IO backend (screen `import`/`readFile`) + the
     // `<nixbadge>` search path so a screen can `import <nixbadge/lib/font.nix>`. Held at
     // function scope so the live backend-switch reopen below reuses it.
@@ -1382,7 +1314,7 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
         backend_kind = restoreBackend(backend_kind);
         if (backend.ScreenSet.open(gpa, eval_opts, backend_kind, eval_screen_paths[0..eval_screen_count])) |s| {
             const fb = gpa.alloc(u8, @as(usize, panel.width) * (panel.height / 8)) catch blk: {
-                std.log.warn("oled: cannot alloc eval framebuffer; using computed", .{});
+                std.log.warn("oled: cannot alloc eval framebuffer; dropping eval screens", .{});
                 break :blk null;
             };
             if (fb) |b| {
@@ -1398,36 +1330,21 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     defer if (eval_set) |*s| s.deinit();
     defer if (eval_fb) |b| gpa.free(b);
 
-    // Build the screen registry. Two branches, one loop shape:
-    //   - eval on  -> the cyclable screens are the N pure-Nix eval screens (their
-    //     set carries badapple-live + the info screens), rendered via the shared
-    //     Engine. The badapple BLOB is not used here (badapple-live supersedes it).
-    //   - eval off -> the fallback: the badapple blob (when it loaded and fits)
-    //     followed by the computed Zig info screens, so the riscv core and any
-    //     eval failure still shows screens.
-    // The array is sized for the larger of the two (the eval set, capped) plus the
-    // blob lead.
-    var registry: [max_eval_screens + 1]Screen = undefined;
+    // Build the screen registry from the eval set: the cyclable screens are the N
+    // pure-Nix eval screens, rendered via the shared Engine. There is no Zig
+    // fallback registry any more -- pure-Nix content is the only screen surface --
+    // so no loaded eval screens (every screen failed to compile, or the eval-less
+    // riscv core) means nothing to show: log it and exit 0 so systemd does not
+    // respin a daemon that has no content.
+    var registry: [max_eval_screens]Screen = undefined;
     var active_screens: []Screen = undefined;
     // Minimal probe scope for the registry's contract-v2 `hidden` reads.
     const probe_fields = eval.Fields{ .width = panel.width, .height = panel.height };
     if (eval_set) |*s| {
         active_screens = buildEvalRegistry(&registry, s, probe_fields);
     } else {
-        var n: usize = 0;
-        if (clip != null) {
-            registry[n] = .{ .name = "badapple", .body = .{ .zig = screenBadapple } };
-            n += 1;
-        }
-        registry[n] = .{ .name = "battery", .body = .{ .zig = screens.battery } };
-        n += 1;
-        registry[n] = .{ .name = "load", .body = .{ .zig = screens.load } };
-        n += 1;
-        registry[n] = .{ .name = "power", .body = .{ .zig = screens.power } };
-        n += 1;
-        registry[n] = .{ .name = "clock", .body = .{ .zig = screens.clock } };
-        n += 1;
-        active_screens = registry[0..n];
+        std.log.err("oled: no eval screens loaded; nothing to show", .{});
+        return;
     }
 
     installHandler(.TERM, onStop);
@@ -1498,11 +1415,6 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
     // can draw a live HUD (the value updates once per ~3 s window). 0 until the first close.
     var last_fps: u32 = 0;
 
-    // The active clip is read inside screenBadapple via this file-scope pointer,
-    // set for the duration of the loop. It is single-threaded and cleared on exit.
-    active_clip = if (clip) |*c| c else null;
-    defer active_clip = null;
-
     // Sensors (battery = a median-of-33 SARADC read, plus /proc load/cpu/mem/uptime and
     // the VBUS gpio) move on a human timescale, not per frame. Reading them every frame
     // cost ~15 ms/frame -- the true ~46 fps ceiling, NOT eval (~1 ms) or I2C flush
@@ -1534,11 +1446,10 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
         }
         ctx.now_ms = now_ms;
         const cur = active_screens[screen_ix];
-        // Render the current screen. A computed screen paints directly; an eval
-        // screen applies its lambda (ScreenSet) into the shared framebuffer and
-        // blits it. A NULL return means the eval screen faulted -> drop it by name
-        // so the loop falls back to the remaining screens (never spins the log,
-        // the fault is logged once inside renderOled).
+        // Render the current screen: apply its ScreenSet lambda into the shared
+        // framebuffer and blit it. A NULL return means the screen faulted ->
+        // drop it by name so the loop falls back to the remaining screens (never
+        // spins the log, the fault is logged once inside renderOled).
         const set_ptr = if (eval_set) |*s| s else null;
         const t_eval0 = linux.monotonicNsec();
         const rendered = renderScreen(cur, &panel, &ctx, set_ptr, eval_fb, @intFromEnum(backend_kind), last_fps) orelse blk: {
@@ -1729,22 +1640,10 @@ fn dropScreen(active: []Screen, name: []const u8, cur_ix: *usize) []Screen {
     return shorter;
 }
 
-// The clip the badapple screen plays. Set only while the oled loop runs (single
-// threaded); the screen fn signature is fixed by the registry so it cannot take
-// the clip as a parameter, hence this scoped pointer rather than a parameter.
-var active_clip: ?*badapple.Clip = null;
-
-fn screenBadapple(panel: *oled.Panel, ctx: *const screens.Context) u32 {
-    const clip = active_clip orelse return 100;
-    panel.blit(clip.frameAt(ctx.now_ms));
-    return clip.frameMs();
-}
-
 /// Render the current screen and return its nextMs hint + dirty region, or null
-/// when an eval screen faulted (the caller drops it). A computed `.zig` screen
-/// paints the panel directly (always a full flush); an `.eval` screen applies its
-/// ScreenSet lambda into the shared `fb` (a delta screen mutates it in place),
-/// then blits it and returns the changed region so the caller flushes minimally.
+/// when the screen faulted (the caller drops it). The screen's ScreenSet lambda
+/// is applied into the shared `fb` (a delta screen mutates it in place), then
+/// blitted; the returned dirty region lets the caller flush minimally.
 fn renderScreen(
     screen: Screen,
     panel: *oled.Panel,
@@ -1754,22 +1653,18 @@ fn renderScreen(
     backend_id: u8,
     fps: u32,
 ) ?eval.OledFrame {
-    switch (screen.body) {
-        .zig => |f| return .{ .next_ms = f(panel, ctx), .dirty = .{ .full = true } },
-        .eval => |idx| {
-            // eval screens only exist when the set + framebuffer were created;
-            // both null-out together, so a missing one is a bug, not a fault.
-            const s = set orelse return .{ .next_ms = 100, .dirty = .{ .full = true } };
-            const b = fb orelse return .{ .next_ms = 100, .dirty = .{ .full = true } };
-            const r = s.renderOled(idx, evalFields(panel, ctx, backend_id, fps), b) catch return null;
-            panel.blit(b);
-            return r;
-        },
-    }
+    // The set + framebuffer are created together before the loop starts (the
+    // daemon exits when no eval screens load), so a missing one is a bug, not a
+    // runtime fault; paint nothing and idle rather than crash the daemon.
+    const s = set orelse return .{ .next_ms = 100, .dirty = .{ .full = true } };
+    const b = fb orelse return .{ .next_ms = 100, .dirty = .{ .full = true } };
+    const r = s.renderOled(screen.eval, evalFields(panel, ctx, backend_id, fps), b) catch return null;
+    panel.blit(b);
+    return r;
 }
 
 /// Push a rendered frame's dirty region to the panel: the whole panel for a full
-/// frame (keyframe / computed screen), else only the changed column span of each
+/// frame (keyframe / full-frame screen), else only the changed column span of each
 /// dirty page (a few dozen bytes at 60 fps Bad Apple). Clamped to the panel's page
 /// count so a `Dirty` sized for 64 rows is safe on a 32-row panel.
 fn flushDirty(panel: *oled.Panel, dirty: eval.Dirty) !void {
@@ -1845,7 +1740,7 @@ fn buildEvalRegistry(registry: []Screen, s: *backend.ScreenSet, probe: eval.Fiel
         // One probe apply per screen reads the contract-v2 `hidden` flag (and
         // warms the screen's first frame as a side effect).
         .hidden = s.probeHidden(n, probe),
-        .body = .{ .eval = n },
+        .eval = n,
     };
     return registry[0..n];
 }
@@ -2141,7 +2036,6 @@ test {
     _ = config;
     _ = oled;
     _ = sysfs;
-    _ = badapple;
     _ = bled;
     _ = screens;
     _ = fixeval;
