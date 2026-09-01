@@ -170,24 +170,30 @@
 				spi-cs-high;
 			};
 
-			/* spidev at /dev/spidev3.1: the Sharp Memory Display probe
-			 * port. The front connector routes the SAME CS net through
-			 * an INVERTER to the display's SCS: line HIGH = LEDs listen
-			 * (AND gate open, display deselected), line LOW = display
-			 * selected. This child deliberately has NO cs-gpios entry
-			 * of its own (the array has one entry, index 1 is NULL), so
-			 * the SPI core toggles nothing during its transfers and the
-			 * line stays at its LOW idle -- i.e. the display is
-			 * selected for exactly the duration of the write. The DW
-			 * native SER bit for slave 1 has no pad muxed, so it does
-			 * nothing. Userspace could not get this behavior at runtime:
-			 * dw-apb-ssi rejects SPI_NO_CS (EINVAL). Swap this node for
-			 * a sharp,ls027b7dh01 panel node once the topology probe
-			 * passes. */
-			spidev@1 {
-				compatible = "rohm,dh2228fv";
+			/* The Sharp Memory Display (LS027B7DH01, 400x240) as a DRM
+			 * fbcon (#42). The front connector routes the SAME CS net
+			 * through an INVERTER to the display's SCS: line HIGH = LEDs
+			 * listen (AND gate open, display deselected), line LOW =
+			 * display selected. This child has NO cs-gpios of its own
+			 * (the controller's cs-gpios array has one entry; index 1 is
+			 * NULL), so the SPI core toggles nothing here and the line
+			 * sits at whatever the LED cs-gpio (spidev3.0) left it: LOW
+			 * when the painter is idle = display selected. The patched
+			 * sharp-memory driver flushes as ONE spi_message, which holds
+			 * the controller bus_lock_mutex for the whole write, so the
+			 * userspace painter blocks (can't drive the line high) and
+			 * the display stays selected for the flush -- kernel and
+			 * userspace competing on the SPI core's own mutex. The DW
+			 * native SER bit for slave 1 drives no pad (SER-bit0 patch).
+			 *
+			 * vcom-mode = software: EXTMODE is strapped low, so a kthread
+			 * toggles the in-band VCOM bit (no EXTCOMIN pin/pwm needed).
+			 * DISP is tied high on the board, so no enable-gpios. */
+			display@1 {
+				compatible = "sharp,ls027b7dh01";
 				reg = <1>;
 				spi-max-frequency = <2000000>;
+				sharp,vcom-mode = "software";
 			};
 		};
 	};

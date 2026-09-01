@@ -20,7 +20,16 @@
       # bring-up -- e.g. sweeping the SAO IIC1 pinmux (claimed by 3001000.pinctrl)
       # while hunting the OLED's 0x3c ACK. Parsed generically in kernel/resource.c
       # (arch-independent). Root-only; fine for a hacker badge.
-      boot.kernelParams = [ "console=ttyS0,115200" "earlycon" "iomem=relaxed" ];
+      # fbcon=rotate:2: the Sharp fbcon panel (#42) is mounted upside down, so
+      # rotate the console 180 in fbcon (CONFIG_FRAMEBUFFER_CONSOLE_ROTATION)
+      # rather than in the driver. console=ttyS0 stays the primary (kernel log +
+      # serial recovery); the fb VT (tty1) gets its own getty below.
+      boot.kernelParams = [
+        "console=ttyS0,115200"
+        "earlycon"
+        "iomem=relaxed"
+        "fbcon=rotate:2"
+      ];
 
       # Boot via U-Boot's extlinux. The vendor FSBL still runs first and is
       # packaged per-core in core-*.nix (ATF for ARM, OpenSBI for RISC-V).
@@ -28,6 +37,19 @@
       boot.loader.generic-extlinux-compatible.enable = true;
 
       hardware.deviceTree.enable = true;
+
+      # The Sharp fbcon (#42): when a USB keyboard is plugged in, tty1 renders on
+      # the panel via fbcon and this getty gives an immediate root shell there
+      # (physical possession of the badge already implies trust; serial recovery
+      # is unaffected). Scoped to tty1 with a drop-in so the serial getty on
+      # ttyS0 keeps its normal login prompt -- autologin is the panel only.
+      systemd.services."getty@tty1" = {
+        overrideStrategy = "asDropin";
+        serviceConfig.ExecStart = [
+          ""
+          "@${pkgs.util-linux}/sbin/agetty agetty --login-program ${pkgs.shadow}/bin/login --autologin root --noclear --keep-baud tty1 $TERM"
+        ];
+      };
 
       # SPI3 drives the WS2812 LED ring through spidev (see modules/duo-s/bling.nix).
       # nixpkgs leaves SPIDEV off and builds the DesignWare SPI glue as modules.
@@ -83,6 +105,34 @@
           # high = LEDs, inverter low = display), so every child gets SER bit 0.
           name = "spi-dw-ser-bit0";
           patch = ../../pkgs/kernel/patches/spi-dw-ser-bit0.patch;
+        }
+        {
+          # The Sharp Memory Display fbcon (#42). The mainline sharp-memory DRM
+          # driver flushes the whole frame (up to 12.5 KB) in ONE spi_write --
+          # a single transfer that (a) needs a multi-block dw-axi-dmac descriptor
+          # (ENOMEMs here) and (b) releases the controller bus_lock_mutex the
+          # moment it returns, so the userspace WS2812 painter (spidev, sharing
+          # SPI3 + the CS net) can slip a frame in and drive the shared CS high
+          # mid-flush, corrupting the panel. Rework the flush into ONE
+          # spi_message of <=512 B transfers: single-block DMA each, and the one
+          # message holds bus_lock_mutex for the whole write so the painter
+          # blocks until it completes. LEDs primary + a real fbcon, coexisting.
+          name = "sharp-memory-chunk-flush";
+          patch = ../../pkgs/kernel/patches/sharp-memory-chunk-flush.patch;
+        }
+        {
+          # Enable the Sharp Memory LCD DRM driver (#42). =y so /dev/fb0 + fbcon
+          # exist without a module load; DRM/FB/FRAMEBUFFER_CONSOLE/FONT_8x16/VT
+          # and USB HID are already in the base config, so a getty on the fb VT +
+          # a plugged-in keyboard give a 50x15 terminal on the panel. The panel is
+          # mounted upside down -- rotate the console 180 via fbcon=rotate:2 (see
+          # boot.kernelParams below) rather than in the driver.
+          name = "enable-sharp-memory-drm";
+          patch = null;
+          extraConfig = ''
+            DRM y
+            TINYDRM_SHARP_MEMORY y
+          '';
         }
         # NOTE: a sophgo-cv1800b-adc clkdiv/sample_window module-param patch was
         # tried here to fight the SARADC rail-reading attenuation, on the theory

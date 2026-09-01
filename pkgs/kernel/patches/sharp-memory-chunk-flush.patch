@@ -1,0 +1,61 @@
+--- a/drivers/gpu/drm/tiny/sharp-memory.c	2026-08-31 17:38:11.576264906 -0700
++++ b/drivers/gpu/drm/tiny/sharp-memory.c	2026-08-31 17:38:12.460702920 -0700
+@@ -25,11 +25,17 @@
+ #include <linux/mutex.h>
+ #include <linux/pwm.h>
+ #include <linux/spi/spi.h>
++#include <linux/slab.h>
+ 
+ #define SHARP_MODE_PERIOD 8
+ #define SHARP_ADDR_PERIOD 8
+ #define SHARP_DUMMY_PERIOD 8
+ 
++/* NixVegas badge: cap each SPI transfer so no dw-axi-dmac descriptor
++ * spans more than one 1024 B block (multi-block prep ENOMEMs on this
++ * SG2000). 512 B is safely single-block. */
++#define SHARP_SPI_CHUNK 512
++
+ #define SHARP_MEMORY_DISPLAY_MAINTAIN_MODE 0
+ #define SHARP_MEMORY_DISPLAY_UPDATE_MODE 1
+ #define SHARP_MEMORY_DISPLAY_CLEAR_MODE 4
+@@ -85,11 +91,39 @@
+ 
+ static inline int sharp_memory_spi_write(struct spi_device *spi, void *buf, size_t len)
+ {
++	struct spi_transfer *xfers;
++	struct spi_message m;
++	unsigned int n, nxfers;
++	size_t off;
++	int ret;
++
+ 	/* Reverse the bit order */
+ 	for (u8 *b = buf; b < ((u8 *)buf) + len; ++b)
+ 		*b = bitrev8(*b);
+ 
+-	return spi_write(spi, buf, len);
++	/*
++	 * NixVegas badge: the Sharp shares SPI3 and its chip-select net with
++	 * the WS2812 ring (a userspace spidev painter). Send the whole flush as
++	 * ONE spi_message of <=SHARP_SPI_CHUNK transfers: (1) each transfer is a
++	 * single dw-axi-dmac block (a multi-block descriptor ENOMEMs on this
++	 * SoC), and (2) one message holds the controller bus_lock_mutex for the
++	 * entire write, so the painter (also spi_sync) cannot slip a frame in
++	 * that would drive the shared CS high mid-flush and corrupt the panel.
++	 */
++	nxfers = DIV_ROUND_UP(len, SHARP_SPI_CHUNK);
++	xfers = kcalloc(nxfers, sizeof(*xfers), GFP_KERNEL);
++	if (!xfers)
++		return -ENOMEM;
++
++	spi_message_init(&m);
++	for (n = 0, off = 0; off < len; n++, off += SHARP_SPI_CHUNK) {
++		xfers[n].tx_buf = (u8 *)buf + off;
++		xfers[n].len = min_t(size_t, len - off, SHARP_SPI_CHUNK);
++		spi_message_add_tail(&xfers[n], &m);
++	}
++	ret = spi_sync(spi, &m);
++	kfree(xfers);
++	return ret;
+ }
+ 
+ static inline struct sharp_memory_device *drm_to_sharp_memory_device(struct drm_device *drm)
