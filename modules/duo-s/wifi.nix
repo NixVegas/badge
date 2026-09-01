@@ -61,7 +61,17 @@ in
   # The aic bsp calls cvi_get_wifi_pwr_on_desc()/cvi_sdio_rescan() from the
   # sdhci-cv181x host driver. Load the host first so these symbols resolve
   # before aic8800_bsp starts.
+  #
+  # aicwf_dbg_level=1 (LOGERROR only). The vendor default is 0x40F
+  # (ERROR|INFO|TRACE|DEBUG|FW) -- hundreds of AICWFDBG printk lines per boot
+  # (rwnx_rx_handle_msg, cmd_malloc/free, scan channel, txpwr...) that flood
+  # every console. Harmless normally, but with the Sharp panel wired as a
+  # journald console (#42) it drowns the fbcon tty. LOGERROR (bits from
+  # aicwf_debug.h: ERROR=0x1 INFO=0x2 TRACE=0x4 DEBUG=0x8) keeps real faults;
+  # wifi status is still on `iw`/`nmcli`/`journalctl`. Runtime-writable:
+  # `echo N | sudo tee /sys/module/aic8800_fdrv/parameters/aicwf_dbg_level`.
   boot.extraModprobeConfig = lib.mkIf onDuoS ''
     softdep aic8800_bsp pre: sdhci-cv181x
+    options aic8800_fdrv aicwf_dbg_level=1
   '';
 }

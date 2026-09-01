@@ -1640,8 +1640,12 @@ fn cmdOled(gpa: std.mem.Allocator, io: std.Io, args: []const []const u8) CmdErro
             const collms = @divTrunc(fixeval.takeCollectNs(), denom);
             last_fps = @intCast(fps_frames * 1000 / (ctx.now_ms - fps_win_ms));
             // Backend tag ([fix]/[nix]) + self RSS so the A/B log shows fps, eval split, and
-            // the evaluator's memory cost side by side on the same screen.
-            std.log.info("oled: {d} fps [{s}] ({s}) eval~{d}ms (collect~{d}ms) flush~{d}ms rss~{d}MB", .{
+            // the evaluator's memory cost side by side on the same screen. DEBUG, not info:
+            // this fires every 3 s forever, and with the panel wired as a journald console
+            // (#42, ForwardToConsole=/dev/tty1) an info-level line would flood the fbcon tty
+            // and make it unusable for interactive login. The same numbers show in the
+            // on-screen fps HUD; enable debug logging to get them in the journal for A/B.
+            std.log.debug("oled: {d} fps [{s}] ({s}) eval~{d}ms (collect~{d}ms) flush~{d}ms rss~{d}MB", .{
                 last_fps, backendName(backend_kind), cur.name, evms, collms, flms, readSelfRssKb() / 1024,
             });
             fps_frames = 0;
