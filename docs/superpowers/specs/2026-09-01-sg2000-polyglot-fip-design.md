@@ -19,9 +19,12 @@ param2 slots. `fip.bin` never changes; the 74AUP1G175 latch is the sole core sel
 
 ## Global constraints
 
-- **Non-secure boot only.** One `BL2_IMG_SIG` cannot sign two disjoint bodies; enabling
-  secure boot later breaks the polyglot permanently. The badge is non-secure — fine.
-  This is a hard, documented limitation, not a bug to fix.
+- **Secure-boot compatible, not enabled now.** The design does NOT foreclose secure boot
+  (see "Secure-boot enablement" below) — the earlier verdict's "one `BL2_IMG_SIG` cannot
+  sign two disjoint bodies" was wrong: the two FSBL bodies are contiguous in one BL2 slot,
+  so one signature over the merged blob (`BL2_IMG_SIZE` = full merged size, which the
+  non-secure build already sets) covers both. We ship non-secure this round; enabling
+  secure boot is an optional additive phase with no redesign.
 - **Recovery is mandatory and cheap.** `fip-arm.bin` and `fip-riscv.bin` stay on the SD
   as known-good blobs. Rollback = `cp fip-arm.bin fip.bin` (from the still-booting core
   or an SD reader). Never remove them.
@@ -170,10 +173,31 @@ board touch.
 
 - **Brick risk:** a bad BL2 dead-ends the BootROM (`E:RESET` loop) → SD reflash. Mitigated
   by keeping the split recovery fips and bench-bisecting.
-- **Secure boot:** permanently incompatible (non-goal; documented).
+- **Secure boot:** NOT enabled this round, but the design is compatible (see below) — a
+  later phase, not a foreclosed door.
 - **Not** removing the strap/latch mechanism — the 74AUP1G175 + AUTO switch stay; this only
   removes the fip-copy half of the switch.
 - **Not** touching the per-core /`<core>`/extlinux trees — already per-core and correct.
+
+## Secure-boot enablement (optional later phase — NOT this round)
+
+The polyglot is structurally secure-boot-ready; no redesign is needed to enable it later.
+The chain (from `plat/cv181x/security/security.c`, RSA-2048):
+
+- **ROM → BL2:** verified against `param1.bl2_img_sig` + `param1.bl_pk` over `BL2_IMG_SIZE`
+  bytes. Since the merged BL2 is ONE contiguous image and `BL2_IMG_SIZE` = the full merged
+  size, one signature covers BOTH FSBL bodies; the ROM verifies the same signed blob on
+  either core, then jumps to word 0 (each core branches to its body inside the verified
+  region). This is why the verdict's "can't sign two disjoint bodies" was wrong.
+- **FSBL → downstream:** each of the four payloads (arm bl31, arm u-boot, riscv OpenSBI,
+  riscv u-boot) carries its own RSA sig appended (last `RSA_N_BYTES`=256), verified by its
+  core's FSBL via `dec_verify_image` against the shared `bl_pk`.
+
+To enable (a self-contained follow-on): generate one RSA-2048 root key; have fiptool sign
+the merged BL2 (into `bl2_img_sig`) + append sigs to the four payloads; **burn the PK hash
+into eFuse (irreversible)**; bench-confirm both cores still boot. Residual unknown = the
+mask ROM's secure-mode RSA-verify path (on-die, unreadable), confirmed only on the bench.
+Deferred by choice — prove the non-secure polyglot first.
 
 ## Open items for the plan to pin
 

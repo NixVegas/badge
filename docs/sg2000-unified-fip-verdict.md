@@ -5,6 +5,16 @@ RISC-V core, selected by the strap — so the core swap wouldn't need to rewrite
 `/boot/fip.bin`? We investigated this once before, split the fips, and forgot
 the exact reason. This recovers it with citations so it stays recovered.*
 
+> **CORRECTION (2026-09-01, superseded by #48).** Two claims below are overturned:
+> (1) The "keep the split" verdict was re-decided — the polyglot's real win is decoupling
+> the core-switch from the SD (a live latch flip, no fip copy, no reflash), a rationale this
+> memo did not weigh. See `docs/superpowers/specs/2026-09-01-sg2000-polyglot-fip-design.md`.
+> (2) "Secure-boot-fragile / one BL2_IMG_SIG cannot sign two disjoint bodies" is WRONG: the
+> two FSBL bodies are contiguous in one BL2 slot, so one signature over the merged blob
+> (`BL2_IMG_SIZE` = full merged size, which the build already sets) covers both — the
+> polyglot IS secure-boot-compatible. The boot-flow evidence and construction recipe below
+> remain correct and are the basis of the #48 design.
+
 ## Verdict
 
 **Keep the split** (`fip-arm.bin` / `fip-riscv.bin` + the swap in
