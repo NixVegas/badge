@@ -22,15 +22,22 @@
       # (arch-independent). Root-only; fine for a hacker badge.
       # fbcon=rotate:2: the Sharp fbcon panel (#42) is mounted upside down, so
       # rotate the console 180 in fbcon (CONFIG_FRAMEBUFFER_CONSOLE_ROTATION)
-      # rather than in the driver. console=ttyS0 stays the primary (kernel log +
-      # serial recovery); the fb VT (tty1) gets its own getty below.
+      # rather than in the driver.
       boot.kernelParams = [
-        # console=tty1 FIRST so kernel + systemd boot messages also render on
-        # the Sharp fbcon panel (#42) -- otherwise fbcon has nothing to show and
-        # DEFERRED_TAKEOVER holds off until the getty writes ~2min in. ttyS0 is
-        # LAST so it stays /dev/console (serial recovery + single-user land there).
-        "console=tty1"
+        # /dev/console is the LAST console= entry. Put tty1 (the Sharp fbcon
+        # panel, #42) LAST so the panel IS /dev/console: systemd writes its
+        # "Starting/Started" boot status there and lands the getty + emergency
+        # shell on it, so the panel behaves exactly like a serial console --
+        # status during boot, then a quiet getty (PID1 stops emitting once the
+        # default target is reached; no continuous journal firehose). ttyS0
+        # stays a registered console too: it still gets ALL kernel printk, and
+        # serial-getty is kept explicitly below for remote ser2net login. What
+        # ttyS0 gives up is the systemd status + emergency/single-user shell,
+        # which now land on the panel. earlycon keeps the very early boot on
+        # serial (the panel's DRM driver isn't up until ~6.3s, so nothing can
+        # render there before then).
         "console=ttyS0,115200"
+        "console=tty1"
         "earlycon"
         "iomem=relaxed"
         "fbcon=rotate:2"
@@ -46,20 +53,19 @@
       console.font = "${pkgs.spleen}/share/consolefonts/spleen-6x12.psfu";
       console.earlySetup = true;
 
-      # Mirror the boot log onto the Sharp panel (#42). systemd's pretty
-      # boot status goes only to /dev/console (= ttyS0, kept primary for serial
-      # recovery), so tty1 otherwise showed just kernel printk + the getty. Have
-      # journald forward the whole journal (kernel + systemd + service logs) to
-      # the panel's VT: additive, serial is unchanged, no recovery regression.
-      # This is log-format text, not the animated "[ OK ]" bars (those are PID1's
-      # /dev/console output, not journal entries). Hard floor: nothing renders
-      # before the Sharp DRM driver binds fbcon at ~6.3s -- the earlycon and
-      # early-kernel lines are serial-only by physics; the panel is a full
-      # console from ~6.3s onward.
-      services.journald.extraConfig = ''
-        ForwardToConsole=yes
-        TTYPath=/dev/tty1
-      '';
+      # Keep a serial login for remote ser2net recovery (#11). Now that tty1 is
+      # /dev/console (above), systemd's getty-generator spawns the console getty
+      # on the panel; enable serial-getty@ttyS0 explicitly so ttyS0 still offers
+      # a login over the Husky serial bridge. ttyS0 keeps all kernel printk, so
+      # a remote operator sees boot/oops output; only the systemd status and the
+      # emergency/single-user shell moved to the panel with /dev/console.
+      #
+      # NOTE: an earlier take wired journald ForwardToConsole=/dev/tty1 to mirror
+      # the log onto the panel. That streams the WHOLE journal forever and drowns
+      # the getty (every session/service line interrupts the prompt). Making the
+      # panel /dev/console is the right model: it shows systemd status DURING boot
+      # and goes quiet after, exactly like a serial console -- no forward needed.
+      systemd.services."serial-getty@ttyS0".enable = true;
 
       # Boot via U-Boot's extlinux. The vendor FSBL still runs first and is
       # packaged per-core in core-*.nix (ATF for ARM, OpenSBI for RISC-V).
