@@ -120,11 +120,15 @@
           patch = ../../pkgs/kernel/patches/sharp-memory-chunk-flush.patch;
         }
         {
-          # Enable the Sharp Memory LCD DRM driver (#42). =y (built-in): so it
-          # probes during kernel init and fbcon (DEFERRED_TAKEOVER) grabs the
-          # panel VT EARLY -- =m loaded so late that even the systemd boot
-          # messages were missed. (A source change to the sharp-memory-* patch
-          # rebuilds the whole kernel either way, so =m bought no iteration win.)
+          # Enable the Sharp Memory LCD DRM driver (#42). =y (built-in) so it
+          # probes during kernel init (~7s). And DISABLE DEFERRED_TAKEOVER: with
+          # it on, fbcon waited for the first text on tty1 before binding, but
+          # that text had nowhere to render until a getty opened tty1 ~60-140s
+          # in (a chicken-and-egg that console=tty1 alone can't break) -- so the
+          # panel stayed blank through boot. =n makes fbcon bind the moment the
+          # fbdev registers, so kernel + systemd boot messages render on the
+          # panel from ~7s. (A source change to the sharp-memory-* patch rebuilds
+          # the whole kernel either way, so =m bought no iteration win.)
           # DRM/FB/FRAMEBUFFER_CONSOLE/FONT_8x16/VT and USB HID are already in the
           # base config, so the getty on tty1 + a keyboard give a text terminal.
           # Panel is mounted upside down -> fbcon=rotate:2 (boot.kernelParams).
@@ -133,6 +137,7 @@
           extraConfig = ''
             DRM y
             TINYDRM_SHARP_MEMORY y
+            FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER n
           '';
         }
         # NOTE: a sophgo-cv1800b-adc clkdiv/sample_window module-param patch was
