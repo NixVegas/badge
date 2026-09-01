@@ -11,10 +11,11 @@
 # generations to the /boot ROOT with ../nixos/ paths, which clobbers this layout
 # and leaves the board unbootable.
 #
-# So override the installer to update ONLY the running core's subtree and never
-# touch fip.bin, fip-*.bin, or the other core. Core switching stays with
-# nix-badge / swap-core. The image build is unaffected: make-boot-dir.nix calls
-# populateCmd directly, not this installer.
+# So override the installer to update ONLY the running core's subtree (kernel +
+# extlinux) and its firmware (fip-<core>.bin, plus the active fip.bin when it
+# already selects this core -- so a pending swap isn't undone), never the other
+# core. Core switching stays with nix-badge / swap-core. The image build is
+# unaffected: make-boot-dir.nix calls populateCmd directly, not this installer.
 {
   config,
   lib,
@@ -24,6 +25,16 @@
 let
   # Baked per system: the arm closure installs into /arm, the riscv one into /riscv.
   core = if pkgs.stdenv.hostPlatform.isAarch64 then "arm" else "riscv";
+
+  # The deployed core's fip (vendor FSBL + monitor + U-Boot), the SAME derivation
+  # make-boot-dir.nix bakes into the SD image, built on the build host. Threading
+  # it here lets a deploy update the on-disk firmware -- FSBL/u-boot/fip changes
+  # (e.g. the 1050MHz overdrive) land without an SD reflash. Boot-critical, so the
+  # installer updates it atomically (see below).
+  fip = import ../../pkgs/firmware/fip.nix {
+    pkgs = pkgs.buildPackages;
+    inherit core;
+  };
 
   # config.boot.loader.generic-extlinux-compatible.populateCmd is built against
   # pkgs.buildPackages (the BUILD arch) because upstream means it to run at
@@ -67,12 +78,33 @@ in
       toplevel="$1"
       dir="/boot/${core}"
       # Populate the running core's subtree: adds this generation, prunes to the
-      # configurationLimit. Leaves fip.bin, fip-*.bin, and the other core alone.
+      # configurationLimit. (Firmware is handled separately below.)
       ${targetPopulateCmd} -c "$toplevel" -d "$dir"
       # U-Boot resolves LABEL paths from the FAT root, so rewrite the builder's
       # relative ../nixos/ to absolute /${core}/nixos/ (as make-boot-dir.nix does).
       ${pkgs.gnused}/bin/sed -i 's|\.\./nixos/|/${core}/nixos/|g' "$dir/extlinux/extlinux.conf"
-      echo "duos: installed the ${core} boot tree in $dir (fip.bin and the other core untouched)"
+      echo "duos: installed the ${core} boot tree in $dir"
+
+      # Install the deployed core's firmware so FSBL/u-boot/fip changes ship on a
+      # deploy (not only an SD reflash). Two files:
+      #   fip-${core}.bin  the staged per-core firmware swap-core copies from
+      #   fip.bin          the ACTIVE image the BootROM actually reads
+      # Refresh fip-${core}.bin always (not boot-critical on its own). Refresh the
+      # active fip.bin ONLY if it currently selects THIS core, so a pending
+      # core-swap (fip.bin already pointing at the other core) is not undone.
+      # Writes are atomic (tmp + sync + mv): a half-written fip.bin would brick
+      # the BootROM. Recovery if fip.bin is ever lost: cp fip-${core}.bin fip.bin.
+      newfip="${fip}"
+      active_is_this_core=0
+      if cmp -s /boot/fip.bin "/boot/fip-${core}.bin" 2>/dev/null; then active_is_this_core=1; fi
+      if ! cmp -s "$newfip" "/boot/fip-${core}.bin" 2>/dev/null; then
+        cp "$newfip" "/boot/fip-${core}.bin.new" && sync && mv "/boot/fip-${core}.bin.new" "/boot/fip-${core}.bin" && sync
+        echo "duos: updated /boot/fip-${core}.bin"
+      fi
+      if [ "$active_is_this_core" = 1 ] && ! cmp -s "$newfip" /boot/fip.bin 2>/dev/null; then
+        cp "$newfip" /boot/fip.bin.new && sync && mv /boot/fip.bin.new /boot/fip.bin && sync
+        echo "duos: refreshed active /boot/fip.bin (${core}) -- new firmware on next reboot"
+      fi
     ''
   );
 

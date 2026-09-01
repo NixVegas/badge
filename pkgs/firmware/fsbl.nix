@@ -150,6 +150,13 @@ pkgs.stdenv.mkDerivation {
     #   bl2.bin as the build_message[] C string (visible in the FSBL serial
     #   banner: "FSBL <ver>:<timestamp>").
     # - faketime wraps any remaining date(1) calls that ignore SOURCE_DATE_EPOCH.
+    #
+    # OD_CLK_SEL=y (#44): the overdrive clock plan in plat/cv180x/platform.c --
+    # sets mpll=1050MHz and points clk_a53/clk_c906 at it (div 1), so the big
+    # core runs 1050MHz instead of the default ~850MHz (~24% more). The FSBL sets
+    # the PLLs before handing off, so it applies to whichever core boots. Verify
+    # under a soak (no active cooling on the badge) after the first deploy of the
+    # new fip.
     export SOURCE_DATE_EPOCH=1
     faketime -f "1970-01-01 00:00:01" \
     make -j$NIX_BUILD_CORES \
@@ -157,6 +164,7 @@ pkgs.stdenv.mkDerivation {
       BOOT_CPU=${coreAttrs.bootCpu} \
       DDR_CFG=ddr3_1866_x16 \
       SWITCH_32K_XTAL=y \
+      OD_CLK_SEL=y \
       CROSS_COMPILE=${crossPrefix} \
       BUILD_STRING=nix \
       BUILD_MESSAGE_TIMESTAMP='"1970-01-01T00:00:01+00:00"' \
