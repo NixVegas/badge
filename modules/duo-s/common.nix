@@ -257,6 +257,17 @@ in
     "9.9.9.9"
   ];
 
+  # Dual-homed on ONE /24: eth0 and wlan0 both DHCP onto 10.8.3.0/24. With the
+  # default arp_ignore/arp_announce the badge answers ARP for eth0's IP out of
+  # wlan0 (and vice versa) and source-announces the wrong interface, so a peer's
+  # ARP cache flips to the wrong MAC and it loses its route to the badge after a
+  # reboot ("No route to host" -- the recurring dev-loop pain this session).
+  # arp_ignore=1: only answer ARP for the IP actually on the receiving iface.
+  # arp_announce=2: announce the best local source for the outgoing iface.
+  # (rp_filter stays default; this is purely the ARP-responder behavior.)
+  boot.kernel.sysctl."net.ipv4.conf.all.arp_ignore" = 1;
+  boot.kernel.sysctl."net.ipv4.conf.all.arp_announce" = 2;
+
   # Minimal headless userland. Flesh out with the badge services later.
   users.users.badge = {
     isNormalUser = true;
