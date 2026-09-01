@@ -47,7 +47,7 @@
         overrideStrategy = "asDropin";
         serviceConfig.ExecStart = [
           ""
-          "@${pkgs.util-linux}/sbin/agetty agetty --login-program ${pkgs.shadow}/bin/login --autologin root --noclear --keep-baud tty1 $TERM"
+          "@${pkgs.util-linux}/sbin/agetty agetty --login-program ${pkgs.shadow}/bin/login --autologin root --noclear --keep-baud tty1 linux"
         ];
       };
 
