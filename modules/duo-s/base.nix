@@ -38,10 +38,9 @@
 
       # Dress the fb console (#42) in Spleen -- the same family as the OLED
       # screens -- via setfont at boot (applies to all VTs incl. the panel's
-      # tty1). 8x16 = a readable 50x15 on the 400x240 panel; swap to spleen-5x8
-      # for a dense 80x30 that matches the OLED look. Kernel font until
-      # systemd-vconsole-setup runs, then Spleen.
-      console.font = "${pkgs.spleen}/share/consolefonts/spleen-8x16.psfu";
+      # tty1). 6x12 = 66x20 on the 400x240 panel; 8x16 (50x15) is bigger,
+      # 5x8 (80x30) denser. Kernel font until systemd-vconsole-setup runs.
+      console.font = "${pkgs.spleen}/share/consolefonts/spleen-6x12.psfu";
 
       # Boot via U-Boot's extlinux. The vendor FSBL still runs first and is
       # packaged per-core in core-*.nix (ATF for ARM, OpenSBI for RISC-V).
