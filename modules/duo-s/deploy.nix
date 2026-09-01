@@ -51,9 +51,12 @@ let
 in
 {
   # The 416 MB FAT is shared by both cores, and each generation is ~40 MB
-  # (kernel+initrd+dtb). Keep 3 per core so the other core's tree and the fips
-  # still fit. Also caps what the on-device installer prunes to.
-  boot.loader.generic-extlinux-compatible.configurationLimit = 3;
+  # (kernel+initrd+dtb). Keep 2 per core: 3 filled the partition once failed
+  # deploys left orphaned kernels the pruner fell behind on, and the bootloader
+  # install writes the new kernel BEFORE pruning, so a full /boot dead-ends the
+  # deploy ("No space left / Failed to install bootloader"). 2 leaves headroom
+  # for the other core's tree + the fips. Also caps on-device installer pruning.
+  boot.loader.generic-extlinux-compatible.configurationLimit = 2;
 
   # Dual-core-aware bootloader install. switch-to-configuration calls this with
   # the new system's toplevel as $1, exactly like the stock install-extlinux-conf.sh

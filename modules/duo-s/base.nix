@@ -38,22 +38,6 @@
 
       hardware.deviceTree.enable = true;
 
-      # The Sharp fbcon (#42): when a USB keyboard is plugged in, tty1 renders on
-      # the panel via fbcon and this getty gives an immediate root shell there
-      # (physical possession of the badge already implies trust; serial recovery
-      # is unaffected). Scoped to tty1 with a drop-in so the serial getty on
-      # ttyS0 keeps its normal login prompt -- autologin is the panel only.
-      systemd.services."getty@tty1" = {
-        overrideStrategy = "asDropin";
-        serviceConfig.ExecStart = [
-          ""
-          "@${pkgs.util-linux}/sbin/agetty agetty --login-program ${pkgs.shadow}/bin/login --autologin root --noclear --keep-baud tty1 linux"
-        ];
-      };
-
-      # The DT sharp node autoloads sharp_memory via modalias, but load it
-      # explicitly too so the panel fbcon comes up deterministically (#42).
-      boot.kernelModules = [ "sharp_memory" ];
 
       # SPI3 drives the WS2812 LED ring through spidev (see modules/duo-s/bling.nix).
       # nixpkgs leaves SPIDEV off and builds the DesignWare SPI glue as modules.
@@ -125,19 +109,19 @@
           patch = ../../pkgs/kernel/patches/sharp-memory-chunk-flush.patch;
         }
         {
-          # Enable the Sharp Memory LCD DRM driver (#42). =m (not =y): the DT
-          # sharp node autoloads it, fbcon's DEFERRED_TAKEOVER grabs the panel VT
-          # when it loads, and -- the point -- iterating on the sharp-memory-*
-          # patch then rebuilds only the module (seconds on citadel), not the
-          # whole kernel. DRM/FB/FRAMEBUFFER_CONSOLE/FONT_8x16/VT and USB HID are
-          # already in the base config, so a getty on the fb VT + a plugged-in
-          # keyboard give a 50x15 terminal. Panel is mounted upside down -> rotate
-          # the console 180 via fbcon=rotate:2 (boot.kernelParams).
+          # Enable the Sharp Memory LCD DRM driver (#42). =y (built-in): so it
+          # probes during kernel init and fbcon (DEFERRED_TAKEOVER) grabs the
+          # panel VT EARLY -- =m loaded so late that even the systemd boot
+          # messages were missed. (A source change to the sharp-memory-* patch
+          # rebuilds the whole kernel either way, so =m bought no iteration win.)
+          # DRM/FB/FRAMEBUFFER_CONSOLE/FONT_8x16/VT and USB HID are already in the
+          # base config, so the getty on tty1 + a keyboard give a text terminal.
+          # Panel is mounted upside down -> fbcon=rotate:2 (boot.kernelParams).
           name = "enable-sharp-memory-drm";
           patch = null;
           extraConfig = ''
             DRM y
-            TINYDRM_SHARP_MEMORY m
+            TINYDRM_SHARP_MEMORY y
           '';
         }
         # NOTE: a sophgo-cv1800b-adc clkdiv/sample_window module-param patch was

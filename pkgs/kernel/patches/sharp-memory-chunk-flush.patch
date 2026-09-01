@@ -1,6 +1,6 @@
 --- a/drivers/gpu/drm/tiny/sharp-memory.c	2026-08-31 17:38:11.576264906 -0700
-+++ b/drivers/gpu/drm/tiny/sharp-memory.c	2026-08-31 18:44:19.930119705 -0700
-@@ -25,11 +25,26 @@
++++ b/drivers/gpu/drm/tiny/sharp-memory.c	2026-08-31 22:07:28.020097226 -0700
+@@ -25,11 +25,25 @@
  #include <linux/mutex.h>
  #include <linux/pwm.h>
  #include <linux/spi/spi.h>
@@ -14,9 +14,8 @@
 +/*
 + * NixVegas badge: cap each SPI transfer so a flush stays on the reliable
 + * PIO path. On this SG2000 the dw-axi-dmac multi-block path "Tx hanged
-+ * up"s (a >FIFO transfer goes to DMA and never completes); transfers at
-+ * or below the dw-spi FIFO depth run PIO and are solid. Runtime-tunable
-+ * so the fastest reliable size can be found without a rebuild:
++ * up"s; transfers at or below the dw-spi FIFO depth run PIO and are
++ * solid. Runtime-tunable so the fastest reliable size can be found live:
 + *   echo N > /sys/module/sharp_memory/parameters/spi_chunk
 + * Default 8 is conservatively below any FIFO.
 + */
@@ -27,7 +26,7 @@
  #define SHARP_MEMORY_DISPLAY_MAINTAIN_MODE 0
  #define SHARP_MEMORY_DISPLAY_UPDATE_MODE 1
  #define SHARP_MEMORY_DISPLAY_CLEAR_MODE 4
-@@ -85,11 +100,44 @@
+@@ -85,11 +99,41 @@
  
  static inline int sharp_memory_spi_write(struct spi_device *spi, void *buf, size_t len)
  {
@@ -47,14 +46,11 @@
 +		chunk = len ? len : 1;
 +
 +	/*
-+	 * Send the whole flush as ONE spi_message of <=spi_chunk transfers.
-+	 * (1) Each transfer stays on the reliable PIO path (see spi_chunk).
-+	 * (2) One message holds the controller bus_lock_mutex for the entire
-+	 * write, so the userspace WS2812 painter (spidev, sharing SPI3 + the
-+	 * CS net, also spi_sync) blocks and cannot drive the shared CS high
-+	 * mid-flush and corrupt the panel. kvcalloc: the transfer array can be
-+	 * large at a small chunk (a full 400x240 frame is ~12.5 KB) and the
-+	 * badge is memory-tight, so allow a vmalloc fallback.
++	 * ONE spi_message of <=spi_chunk transfers: each stays on the PIO
++	 * path, and one message holds the controller bus_lock_mutex for the
++	 * whole write so the userspace WS2812 painter (spidev, sharing SPI3 +
++	 * the CS net) cannot drive the shared CS high mid-flush. kvcalloc: the
++	 * array is large at a small chunk and the badge is memory-tight.
 +	 */
 +	nxfers = DIV_ROUND_UP(len, chunk);
 +	xfers = kvcalloc(nxfers, sizeof(*xfers), GFP_KERNEL);
@@ -73,3 +69,26 @@
  }
  
  static inline struct sharp_memory_device *drm_to_sharp_memory_device(struct drm_device *drm)
+@@ -212,11 +256,19 @@
+ 	struct drm_rect clip;
+ 	struct sharp_memory_device *smd = drm_to_sharp_memory_device(fb->dev);
+ 
+-	/* Always update a full line regardless of what is dirty */
++	/*
++	 * Force a FULL-FRAME flush. drm_fb_xrgb8888_to_mono offsets the source
++	 * by clip.y1 but writes to the TOP of dst (no dst clip offset), while
++	 * set_tx_buffer_addresses addresses from line 0 -- so a partial-height
++	 * damage (y1 > 0, which fbcon emits when a single line changes) would
++	 * write that content to the wrong Sharp lines. Flushing the whole frame
++	 * keeps fb row 0 mapped to line 1. (rect is ignored.)
++	 */
++	(void)rect;
+ 	clip.x1 = 0;
+ 	clip.x2 = fb->width;
+-	clip.y1 = rect->y1;
+-	clip.y2 = rect->y2;
++	clip.y1 = 0;
++	clip.y2 = fb->height;
+ 
+ 	sharp_memory_update_display(smd, fb, vmap, clip, fmtconv_state);
+ }

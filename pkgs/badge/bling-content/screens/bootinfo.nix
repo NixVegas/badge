@@ -51,6 +51,12 @@ let
     in
     builtins.substring 0 d2 ver;
 
+  # The build tail after the "XX.YY." release prefix ("26.05.20260830.ab" ->
+  # "20260830.ab"). The full version is too wide for the 400px detail row and
+  # its leading XX.YY duplicates the hero, so the detail row shows only this.
+  # Empty when ver has no tail (ver == verShort, e.g. a bare "26.05").
+  verTail = builtins.substring (builtins.stringLength verShort + 1) (builtins.stringLength ver) ver;
+
   # Centre a string of a given face horizontally; clamp to the left edge on overflow.
   centreX = face: s: let x = (width - face.textWidth s) / 2; in if x < 0 then 0 else x;
 
@@ -71,10 +77,9 @@ let
       s0 = sp.drawText d.empty (centreX sp topCap) 0 topCap;
       # Short version big in Gallant, centred, in the upper-middle band.
       s1 = d.drawText s0 (centreX d.gallant verShort) 10 verShort;
-      # Dense detail rows: full version, kernel release, arch. Skip the full
-      # version when it adds nothing over the hero (a fallback that only found
-      # the bare release would otherwise print "26.05" twice).
-      s2 = if ver != verShort then sp.drawText s1 (centreX sp ver) 36 ver else s1;
+      # Dense detail rows: build tail (XX.YY stripped), kernel release, arch.
+      # Skip the tail row when there is none (a bare "26.05" fallback).
+      s2 = if verTail != "" then sp.drawText s1 (centreX sp verTail) 36 verTail else s1;
       s3 = sp.drawText s2 (centreX sp kern) 46 kern;
       s4 = sp.drawText s3 (centreX sp arch) 56 arch;
     in
