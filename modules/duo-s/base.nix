@@ -37,10 +37,29 @@
       ];
 
       # Dress the fb console (#42) in Spleen -- the same family as the OLED
-      # screens -- via setfont at boot (applies to all VTs incl. the panel's
-      # tty1). 6x12 = 66x20 on the 400x240 panel; 8x16 (50x15) is bigger,
-      # 5x8 (80x30) denser. Kernel font until systemd-vconsole-setup runs.
+      # screens -- via setfont (applies to all VTs incl. the panel's tty1).
+      # 6x12 = 66x20 on the 400x240 panel; 8x16 (50x15) is bigger, 5x8 (80x30)
+      # denser. earlySetup runs the setfont in the INITRD, so tty1 already
+      # carries Spleen before the Sharp fbcon binds it (~6.3s) -- otherwise the
+      # panel came up in the built-in kernel font and visibly swapped to Spleen
+      # only once systemd-vconsole-setup ran, seconds into userspace.
       console.font = "${pkgs.spleen}/share/consolefonts/spleen-6x12.psfu";
+      console.earlySetup = true;
+
+      # Mirror the boot log onto the Sharp panel (#42). systemd's pretty
+      # boot status goes only to /dev/console (= ttyS0, kept primary for serial
+      # recovery), so tty1 otherwise showed just kernel printk + the getty. Have
+      # journald forward the whole journal (kernel + systemd + service logs) to
+      # the panel's VT: additive, serial is unchanged, no recovery regression.
+      # This is log-format text, not the animated "[ OK ]" bars (those are PID1's
+      # /dev/console output, not journal entries). Hard floor: nothing renders
+      # before the Sharp DRM driver binds fbcon at ~6.3s -- the earlycon and
+      # early-kernel lines are serial-only by physics; the panel is a full
+      # console from ~6.3s onward.
+      services.journald.extraConfig = ''
+        ForwardToConsole=yes
+        TTYPath=/dev/tty1
+      '';
 
       # Boot via U-Boot's extlinux. The vendor FSBL still runs first and is
       # packaged per-core in core-*.nix (ATF for ARM, OpenSBI for RISC-V).
