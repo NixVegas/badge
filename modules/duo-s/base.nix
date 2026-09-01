@@ -106,18 +106,25 @@
           patch = ../../pkgs/kernel/patches/spi-dw-ser-bit0.patch;
         }
         {
-          # The Sharp Memory Display fbcon (#42). The mainline sharp-memory DRM
-          # driver flushes the whole frame (up to 12.5 KB) in ONE spi_write --
-          # a single transfer that (a) needs a multi-block dw-axi-dmac descriptor
-          # (ENOMEMs here) and (b) releases the controller bus_lock_mutex the
-          # moment it returns, so the userspace WS2812 painter (spidev, sharing
-          # SPI3 + the CS net) can slip a frame in and drive the shared CS high
-          # mid-flush, corrupting the panel. Rework the flush into ONE
-          # spi_message of <=512 B transfers: single-block DMA each, and the one
-          # message holds bus_lock_mutex for the whole write so the painter
-          # blocks until it completes. LEDs primary + a real fbcon, coexisting.
-          name = "sharp-memory-chunk-flush";
-          patch = ../../pkgs/kernel/patches/sharp-memory-chunk-flush.patch;
+          # The Sharp Memory Display fbcon (#42). Two reworks of the mainline
+          # sharp-memory DRM flush:
+          #  1. PARTIAL-BAND flush. Mainline always spi_write's the whole
+          #     tx_buffer (~12.5 KB) even for one dirty line, AND miscomputes the
+          #     per-line address for a y1>0 clip (it counts addresses from row 0
+          #     while the mono conversion compacts source rows y1..y2 to the top
+          #     of dst -- so partial damage renders to the wrong lines: the
+          #     corruption we saw). Fix the addressing to match the compacted
+          #     data and transmit only the dirty band (mode byte + (y2-y1)*pitch),
+          #     so a single-line scroll/cursor update sends ~pitch bytes, not 12 KB.
+          #  2. CHUNKED PIO write. That transmit is split into ONE spi_message of
+          #     <=spi_chunk-byte transfers (default 8): each stays on the reliable
+          #     dw-spi PIO path (the dw-axi-dmac multi-block path "Tx hanged up"s
+          #     here), and the single message holds the controller bus_lock_mutex
+          #     for the whole write so the userspace WS2812 painter (spidev,
+          #     sharing SPI3 + the CS net) can't drive the shared CS high
+          #     mid-flush. LEDs primary + a real fbcon, coexisting.
+          name = "sharp-memory-partial-flush";
+          patch = ../../pkgs/kernel/patches/sharp-memory-partial-flush.patch;
         }
         {
           # Enable the Sharp Memory LCD DRM driver (#42). =y (built-in) so it

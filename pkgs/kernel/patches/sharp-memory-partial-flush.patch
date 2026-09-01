@@ -1,0 +1,124 @@
+--- a/drivers/gpu/drm/tiny/sharp-memory.c
++++ b/drivers/gpu/drm/tiny/sharp-memory.c
+@@ -25,11 +25,28 @@
+ #include <linux/mutex.h>
+ #include <linux/pwm.h>
+ #include <linux/spi/spi.h>
++#include <linux/slab.h>
++#include <linux/moduleparam.h>
+ 
+ #define SHARP_MODE_PERIOD 8
+ #define SHARP_ADDR_PERIOD 8
+ #define SHARP_DUMMY_PERIOD 8
+ 
++/*
++ * NixVegas badge: cap each SPI transfer so a flush stays on the reliable
++ * PIO path. On this SG2000 the dw-axi-dmac multi-block path "Tx hanged
++ * up"s; transfers at or below the dw-spi FIFO depth run PIO and are
++ * solid. Runtime-tunable so the fastest reliable size can be found live:
++ *   echo N > /sys/module/sharp_memory/parameters/spi_chunk
++ * Default 8 is conservatively below any FIFO. This bounds the PER-TRANSFER
++ * size, not the flush size -- the flush cost is (bytes / chunk) transfers,
++ * so the partial-band flush below (only the dirty lines, not the whole
++ * frame) is what actually cuts scroll/redraw latency.
++ */
++static unsigned int spi_chunk = 8;
++module_param(spi_chunk, uint, 0644);
++MODULE_PARM_DESC(spi_chunk, "Max bytes per SPI transfer in a flush (PIO reliability)");
++
+ #define SHARP_MEMORY_DISPLAY_MAINTAIN_MODE 0
+ #define SHARP_MEMORY_DISPLAY_UPDATE_MODE 1
+ #define SHARP_MEMORY_DISPLAY_CLEAR_MODE 4
+@@ -85,11 +102,41 @@
+ 
+ static inline int sharp_memory_spi_write(struct spi_device *spi, void *buf, size_t len)
+ {
++	struct spi_transfer *xfers;
++	struct spi_message m;
++	unsigned int chunk = READ_ONCE(spi_chunk);
++	unsigned int n, nxfers;
++	size_t off;
++	int ret;
++
+ 	/* Reverse the bit order */
+ 	for (u8 *b = buf; b < ((u8 *)buf) + len; ++b)
+ 		*b = bitrev8(*b);
+ 
+-	return spi_write(spi, buf, len);
++	if (!chunk)
++		chunk = len ? len : 1;
++
++	/*
++	 * ONE spi_message of <=spi_chunk transfers: each stays on the PIO
++	 * path, and one message holds the controller bus_lock_mutex for the
++	 * whole write so the userspace WS2812 painter (spidev, sharing SPI3 +
++	 * the CS net) cannot drive the shared CS high mid-flush. kvcalloc: the
++	 * array is large at a small chunk and the badge is memory-tight.
++	 */
++	nxfers = DIV_ROUND_UP(len, chunk);
++	xfers = kvcalloc(nxfers, sizeof(*xfers), GFP_KERNEL);
++	if (!xfers)
++		return -ENOMEM;
++
++	spi_message_init(&m);
++	for (n = 0, off = 0; off < len; n++, off += chunk) {
++		xfers[n].tx_buf = (u8 *)buf + off;
++		xfers[n].len = min_t(size_t, len - off, chunk);
++		spi_message_add_tail(&xfers[n], &m);
++	}
++	ret = spi_sync(spi, &m);
++	kvfree(xfers);
++	return ret;
+ }
+ 
+ static inline struct sharp_memory_device *drm_to_sharp_memory_device(struct drm_device *drm)
+@@ -119,8 +166,20 @@
+ 							struct drm_rect clip,
+ 							u32 pitch)
+ {
+-	for (u32 line = 0; line < clip.y2; ++line)
+-		buffer[line * pitch] = line + 1;
++	/*
++	 * Compacted addressing. drm_fb_xrgb8888_to_mono() writes source rows
++	 * clip.y1..y2 to the TOP of dst (dst row 0 == source row clip.y1), so
++	 * the address for compacted row i is the physical line of source row
++	 * clip.y1 + i, i.e. (clip.y1 + i + 1). Mainline wrote line+1 counting
++	 * from row 0, which only lines up when clip.y1 == 0 -- for y1 > 0 it
++	 * tagged the compacted data with the wrong line numbers (the partial-
++	 * damage corruption). Emitting exactly (y2 - y1) addresses here also
++	 * lets sharp_memory_update_display() transmit only the dirty band.
++	 */
++	u32 nlines = clip.y2 - clip.y1;
++
++	for (u32 i = 0; i < nlines; ++i)
++		buffer[i * pitch] = clip.y1 + i + 1;
+ }
+ 
+ static void sharp_memory_set_tx_buffer_data(u8 *buffer,
+@@ -154,7 +213,16 @@
+ 	u32 pitch = smd->pitch;
+ 	u8 vcom = smd->vcom;
+ 	u8 *tx_buffer = smd->tx_buffer;
+-	u32 tx_buffer_size = smd->tx_buffer_size;
++	u32 nlines = clip.y2 - clip.y1;
++	/*
++	 * Transmit only the mode byte plus the dirty band: one leading mode
++	 * byte (SHARP_MODE_PERIOD bits) then nlines packed [addr|data|dummy]
++	 * lines of `pitch` bytes each. A single-line scroll/cursor update thus
++	 * sends ~pitch bytes instead of the whole smd->tx_buffer_size frame.
++	 * nlines <= vdisplay (damage is clamped to the fb), so tx_len never
++	 * exceeds the allocated tx_buffer_size.
++	 */
++	size_t tx_len = (SHARP_MODE_PERIOD / 8) + (size_t)nlines * pitch;
+ 
+ 	mutex_lock(&smd->tx_mutex);
+ 
+@@ -164,7 +232,7 @@
+ 	sharp_memory_set_tx_buffer_addresses(&tx_buffer[1], clip, pitch);
+ 	sharp_memory_set_tx_buffer_data(&tx_buffer[2], fb, vmap, clip, pitch, fmtcnv_state);
+ 
+-	ret = sharp_memory_spi_write(smd->spi, tx_buffer, tx_buffer_size);
++	ret = sharp_memory_spi_write(smd->spi, tx_buffer, tx_len);
+ 
+ 	mutex_unlock(&smd->tx_mutex);
+ 
