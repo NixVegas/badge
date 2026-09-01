@@ -172,8 +172,10 @@
         # one core is booted at a time). Deploy the node matching the CURRENTLY
         # booted core, e.g. `nix run github:serokell/deploy-rs -- .#nixbadge-duos-arm`
         # (or -riscv). Each node activates ONLY its own /boot/<core> subtree and
-        # never rewrites fip.bin, so a deploy cannot switch cores -- use
-        # `nix-badge core <arch>` + reboot for that. The cross (-x86_64) systems
+        # its own firmware (fip-<core>.bin, plus the active fip.bin when it
+        # already selects this core). It never points fip.bin at the OTHER core,
+        # so a deploy still cannot switch cores -- use `nix-badge core <arch>` +
+        # reboot for that. The cross (-x86_64) systems
         # build on an x86_64 dev host; see modules/duo-s/deploy.nix for the
         # dual-core installer and the passwordless-sudo requirement.
         deploy.nodes =

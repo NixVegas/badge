@@ -151,12 +151,15 @@ pkgs.stdenv.mkDerivation {
     #   banner: "FSBL <ver>:<timestamp>").
     # - faketime wraps any remaining date(1) calls that ignore SOURCE_DATE_EPOCH.
     #
-    # OD_CLK_SEL=y (#44): the overdrive clock plan in plat/cv180x/platform.c --
-    # sets mpll=1050MHz and points clk_a53/clk_c906 at it (div 1), so the big
-    # core runs 1050MHz instead of the default ~850MHz (~24% more). The FSBL sets
-    # the PLLs before handing off, so it applies to whichever core boots. Verify
-    # under a soak (no active cooling on the badge) after the first deploy of the
-    # new fip.
+    # OD_CLK_SEL=y (#44): selects CLK_OD in sys_pll_od() (plat/cv181x/platform.c).
+    # The overdrive plan is #ifdef __riscv-gated, so the value depends on which
+    # core the fip is built for (BOOT_CPU here):
+    #   arm  (A53):  mpll=1000MHz, clk_a53 div1  -> 1000MHz (default CLK_ND: 800MHz)
+    #   riscv(C906): mpll=1050MHz, clk_c906 div1 -> 1050MHz (default CLK_ND: 850MHz)
+    # So this arm fip overdrives the A53 to 1000MHz (+25%); the riscv fip takes
+    # the C906 to 1050MHz. VERIFIED on the arm badge: clk_a53=1000MHz in
+    # /sys/kernel/debug/clk/clk_summary after the first overdrive-fip deploy.
+    # Still soak-test for thermals (no active cooling on the badge).
     export SOURCE_DATE_EPOCH=1
     faketime -f "1970-01-01 00:00:01" \
     make -j$NIX_BUILD_CORES \
