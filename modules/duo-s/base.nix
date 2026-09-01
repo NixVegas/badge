@@ -25,6 +25,11 @@
       # rather than in the driver. console=ttyS0 stays the primary (kernel log +
       # serial recovery); the fb VT (tty1) gets its own getty below.
       boot.kernelParams = [
+        # console=tty1 FIRST so kernel + systemd boot messages also render on
+        # the Sharp fbcon panel (#42) -- otherwise fbcon has nothing to show and
+        # DEFERRED_TAKEOVER holds off until the getty writes ~2min in. ttyS0 is
+        # LAST so it stays /dev/console (serial recovery + single-user land there).
+        "console=tty1"
         "console=ttyS0,115200"
         "earlycon"
         "iomem=relaxed"
