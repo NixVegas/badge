@@ -1,29 +1,39 @@
 --- a/drivers/gpu/drm/tiny/sharp-memory.c	2026-08-31 17:38:11.576264906 -0700
-+++ b/drivers/gpu/drm/tiny/sharp-memory.c	2026-08-31 17:38:12.460702920 -0700
-@@ -25,11 +25,17 @@
++++ b/drivers/gpu/drm/tiny/sharp-memory.c	2026-08-31 18:44:19.930119705 -0700
+@@ -25,11 +25,26 @@
  #include <linux/mutex.h>
  #include <linux/pwm.h>
  #include <linux/spi/spi.h>
 +#include <linux/slab.h>
++#include <linux/moduleparam.h>
  
  #define SHARP_MODE_PERIOD 8
  #define SHARP_ADDR_PERIOD 8
  #define SHARP_DUMMY_PERIOD 8
  
-+/* NixVegas badge: cap each SPI transfer so no dw-axi-dmac descriptor
-+ * spans more than one 1024 B block (multi-block prep ENOMEMs on this
-+ * SG2000). 512 B is safely single-block. */
-+#define SHARP_SPI_CHUNK 512
++/*
++ * NixVegas badge: cap each SPI transfer so a flush stays on the reliable
++ * PIO path. On this SG2000 the dw-axi-dmac multi-block path "Tx hanged
++ * up"s (a >FIFO transfer goes to DMA and never completes); transfers at
++ * or below the dw-spi FIFO depth run PIO and are solid. Runtime-tunable
++ * so the fastest reliable size can be found without a rebuild:
++ *   echo N > /sys/module/sharp_memory/parameters/spi_chunk
++ * Default 8 is conservatively below any FIFO.
++ */
++static unsigned int spi_chunk = 8;
++module_param(spi_chunk, uint, 0644);
++MODULE_PARM_DESC(spi_chunk, "Max bytes per SPI transfer in a flush (PIO reliability)");
 +
  #define SHARP_MEMORY_DISPLAY_MAINTAIN_MODE 0
  #define SHARP_MEMORY_DISPLAY_UPDATE_MODE 1
  #define SHARP_MEMORY_DISPLAY_CLEAR_MODE 4
-@@ -85,11 +91,39 @@
+@@ -85,11 +100,44 @@
  
  static inline int sharp_memory_spi_write(struct spi_device *spi, void *buf, size_t len)
  {
 +	struct spi_transfer *xfers;
 +	struct spi_message m;
++	unsigned int chunk = READ_ONCE(spi_chunk);
 +	unsigned int n, nxfers;
 +	size_t off;
 +	int ret;
@@ -33,28 +43,32 @@
  		*b = bitrev8(*b);
  
 -	return spi_write(spi, buf, len);
++	if (!chunk)
++		chunk = len ? len : 1;
++
 +	/*
-+	 * NixVegas badge: the Sharp shares SPI3 and its chip-select net with
-+	 * the WS2812 ring (a userspace spidev painter). Send the whole flush as
-+	 * ONE spi_message of <=SHARP_SPI_CHUNK transfers: (1) each transfer is a
-+	 * single dw-axi-dmac block (a multi-block descriptor ENOMEMs on this
-+	 * SoC), and (2) one message holds the controller bus_lock_mutex for the
-+	 * entire write, so the painter (also spi_sync) cannot slip a frame in
-+	 * that would drive the shared CS high mid-flush and corrupt the panel.
++	 * Send the whole flush as ONE spi_message of <=spi_chunk transfers.
++	 * (1) Each transfer stays on the reliable PIO path (see spi_chunk).
++	 * (2) One message holds the controller bus_lock_mutex for the entire
++	 * write, so the userspace WS2812 painter (spidev, sharing SPI3 + the
++	 * CS net, also spi_sync) blocks and cannot drive the shared CS high
++	 * mid-flush and corrupt the panel. kvcalloc: the transfer array can be
++	 * large at a small chunk (a full 400x240 frame is ~12.5 KB) and the
++	 * badge is memory-tight, so allow a vmalloc fallback.
 +	 */
-+	nxfers = DIV_ROUND_UP(len, SHARP_SPI_CHUNK);
-+	xfers = kcalloc(nxfers, sizeof(*xfers), GFP_KERNEL);
++	nxfers = DIV_ROUND_UP(len, chunk);
++	xfers = kvcalloc(nxfers, sizeof(*xfers), GFP_KERNEL);
 +	if (!xfers)
 +		return -ENOMEM;
 +
 +	spi_message_init(&m);
-+	for (n = 0, off = 0; off < len; n++, off += SHARP_SPI_CHUNK) {
++	for (n = 0, off = 0; off < len; n++, off += chunk) {
 +		xfers[n].tx_buf = (u8 *)buf + off;
-+		xfers[n].len = min_t(size_t, len - off, SHARP_SPI_CHUNK);
++		xfers[n].len = min_t(size_t, len - off, chunk);
 +		spi_message_add_tail(&xfers[n], &m);
 +	}
 +	ret = spi_sync(spi, &m);
-+	kfree(xfers);
++	kvfree(xfers);
 +	return ret;
  }
  

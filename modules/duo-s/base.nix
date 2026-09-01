@@ -51,6 +51,10 @@
         ];
       };
 
+      # The DT sharp node autoloads sharp_memory via modalias, but load it
+      # explicitly too so the panel fbcon comes up deterministically (#42).
+      boot.kernelModules = [ "sharp_memory" ];
+
       # SPI3 drives the WS2812 LED ring through spidev (see modules/duo-s/bling.nix).
       # nixpkgs leaves SPIDEV off and builds the DesignWare SPI glue as modules.
       # The LED service starts in the initrd, so build all of it in (=y) to avoid
@@ -121,17 +125,19 @@
           patch = ../../pkgs/kernel/patches/sharp-memory-chunk-flush.patch;
         }
         {
-          # Enable the Sharp Memory LCD DRM driver (#42). =y so /dev/fb0 + fbcon
-          # exist without a module load; DRM/FB/FRAMEBUFFER_CONSOLE/FONT_8x16/VT
-          # and USB HID are already in the base config, so a getty on the fb VT +
-          # a plugged-in keyboard give a 50x15 terminal on the panel. The panel is
-          # mounted upside down -- rotate the console 180 via fbcon=rotate:2 (see
-          # boot.kernelParams below) rather than in the driver.
+          # Enable the Sharp Memory LCD DRM driver (#42). =m (not =y): the DT
+          # sharp node autoloads it, fbcon's DEFERRED_TAKEOVER grabs the panel VT
+          # when it loads, and -- the point -- iterating on the sharp-memory-*
+          # patch then rebuilds only the module (seconds on citadel), not the
+          # whole kernel. DRM/FB/FRAMEBUFFER_CONSOLE/FONT_8x16/VT and USB HID are
+          # already in the base config, so a getty on the fb VT + a plugged-in
+          # keyboard give a 50x15 terminal. Panel is mounted upside down -> rotate
+          # the console 180 via fbcon=rotate:2 (boot.kernelParams).
           name = "enable-sharp-memory-drm";
           patch = null;
           extraConfig = ''
             DRM y
-            TINYDRM_SHARP_MEMORY y
+            TINYDRM_SHARP_MEMORY m
           '';
         }
         # NOTE: a sophgo-cv1800b-adc clkdiv/sample_window module-param patch was
