@@ -10,11 +10,18 @@
  * the free scratch SRAM (0x40130000, top 64 KiB of TPU-SRAM, past the image),
  * jumps there, and only then copies the body down to BL2_BASE and enters it.
  *
+ * CACHE COHERENCY (the v1 bug, bench-observed as a hang after the ROM's `.J.`):
+ * both copies write code with plain stores, then JUMP to fetch it. The vendor
+ * ROM hands off to BL2 with the caches ON (it cleaned before jumping, so the
+ * ROM-loaded word0+stub are fetchable), so the stub's own re-copied code sits
+ * in the D-cache while the I-fetch reads stale memory -> executes garbage ->
+ * hangs with no fault. Fix: after EACH copy, clean the copied range D->PoU and
+ * invalidate the I-cache before jumping. (Harmless if the caches are off.)
+ *
  * Fully position-independent: every reference is PC-relative or via the pool,
  * so the merge tool can drop the raw bytes at any offset. The pool's last two
  * words (BODY_SRC, BODY_LEN) are patched by merge_bl2.py; SCRATCH and BODY_DST
- * are fixed here. The arm/riscv FSBL entrypoints consume no incoming registers
- * (arm sets its own state, riscv zeroes x1-x31), so clobbering regs is safe.
+ * are fixed here. The FSBL entrypoints consume no incoming registers.
  */
 	.arch armv8-a
 	.section .text
@@ -32,10 +39,31 @@ _start:
 	mov	x15, x9			/* src */
 	mov	x16, x10		/* dst = SCRATCH */
 	mov	x17, x14		/* len */
-1:	ldr	w0, [x15], #4
+.Lselfcopy:
+	ldr	w0, [x15], #4
 	str	w0, [x16], #4
 	subs	x17, x17, #4
-	b.gt	1b
+	b.gt	.Lselfcopy
+
+	/* flush the SCRATCH copy: clean D->PoU over [SCRATCH, SCRATCH+len),
+	 * invalidate I, so the branch below fetches the real copied code. */
+	mov	x0, x10			/* start = SCRATCH */
+	add	x1, x10, x14		/* end   = SCRATCH + stub length */
+	mrs	x2, ctr_el0
+	ubfx	x2, x2, #16, #4		/* CTR_EL0.DminLine = log2(words/line) */
+	mov	x3, #4
+	lsl	x2, x3, x2		/* x2 = D line size in bytes */
+	sub	x3, x2, #1
+	bic	x4, x0, x3		/* align start down to a line */
+.Lflush1:
+	dc	cvau, x4
+	add	x4, x4, x2
+	cmp	x4, x1
+	b.lo	.Lflush1
+	dsb	ish
+	ic	iallu
+	dsb	ish
+	isb
 
 	/* 2. jump to _stage2 inside the SCRATCH copy */
 	adr	x0, _stage2
@@ -48,15 +76,33 @@ _stage2:
 	mov	x15, x12		/* src = BODY_SRC */
 	mov	x16, x11		/* dst = BODY_DST */
 	mov	x17, x13		/* len = BODY_LEN */
-2:	ldr	w0, [x15], #4
+.Lbodycopy:
+	ldr	w0, [x15], #4
 	str	w0, [x16], #4
 	subs	x17, x17, #4
-	b.gt	2b
+	b.gt	.Lbodycopy
 
-	/* 3. barrier + enter the relocated FSBL body (its word 0 = `b _real`) */
-	dsb	sy
+	/* flush the relocated body: clean D->PoU over [BODY_DST, BODY_DST+len),
+	 * invalidate I, so entering it fetches the real FSBL code. */
+	mov	x0, x11			/* start = BODY_DST */
+	add	x1, x11, x13		/* end   = BODY_DST + BODY_LEN */
+	mrs	x2, ctr_el0
+	ubfx	x2, x2, #16, #4
+	mov	x3, #4
+	lsl	x2, x3, x2
+	sub	x3, x2, #1
+	bic	x4, x0, x3
+.Lflush2:
+	dc	cvau, x4
+	add	x4, x4, x2
+	cmp	x4, x1
+	b.lo	.Lflush2
+	dsb	ish
 	ic	iallu
+	dsb	ish
 	isb
+
+	/* 3. enter the relocated FSBL body (its word 0 = `b bl2_entrypoint_real`) */
 	br	x11
 
 	.align	4
