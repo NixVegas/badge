@@ -41,6 +41,17 @@
         "earlycon"
         "iomem=relaxed"
         "fbcon=rotate:2"
+        # Reserve a 16MB contiguous CMA pool for coherent DMA. The stmmac
+        # ethernet (4070000.ethernet) allocates its TX/RX descriptor rings with
+        # dma_alloc_coherent; without a reserved pool that alloc pulls from the
+        # general allocator and FAILS occasionally under memory-pressure
+        # fragmentation (late boot, once the fix Engines + wifi stack are up) ->
+        # "stmmac_setup_dma_desc: DMA descriptors initialization failed" and eth0
+        # dies (#15). CMA gives coherent DMA a reserved contiguous region so the
+        # rings always allocate. 16MB is reclaimable for movable/cache pages when
+        # not used for DMA, so it is not simply lost on the tight 351/512MB board.
+        # Needs CONFIG_CMA + CONFIG_DMA_CMA (pinned below).
+        "cma=16M"
       ];
 
       # Dress the fb console (#42) in Spleen -- the same family as the OLED
@@ -97,6 +108,20 @@
             SPI_DESIGNWARE y
             SPI_DW_MMIO y
             SPI_SPIDEV y
+          '';
+        }
+        {
+          # Reserve CMA for coherent DMA (paired with the cma=16M kernelParam
+          # above). CONFIG_CMA provides the contiguous allocator; CONFIG_DMA_CMA
+          # is what makes dma_alloc_coherent actually draw from the default CMA
+          # area. Without DMA_CMA the cma=16M pool is reserved but unused -- the
+          # stmmac ethernet ring alloc still hits the general allocator and fails
+          # under fragmentation (#15). Pin both =y so the bootarg hardens eth0.
+          name = "enable-cma-for-coherent-dma";
+          patch = null;
+          extraConfig = ''
+            CMA y
+            DMA_CMA y
           '';
         }
         {
