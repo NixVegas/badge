@@ -1,0 +1,88 @@
+--- a/plat/cv181x/fiptool.py
++++ b/plat/cv181x/fiptool.py
+@@ -561,8 +561,8 @@
+         for e in self.ldr_2nd_hdr.values():
+             e.content = image[e.addr : e.end]
+ 
+-    def _update_ldr_2nd_hdr(self):
+-        image = self.body2["LOADER_2ND"].content
++    def _update_ldr_2nd_hdr(self, slot="LOADER_2ND"):
++        image = self.body2[slot].content
+         hdr_size = self._param_size(self.ldr_2nd_hdr)
+         hdr, body = image[:hdr_size], image[hdr_size:]
+ 
+@@ -577,10 +577,10 @@
+         hdr_cksum.content = crc
+         hdr = bytearray(b"".join((e.content for e in self.ldr_2nd_hdr.values())))
+ 
+-        self.body2["LOADER_2ND"].content = hdr + body
++        self.body2[slot].content = hdr + body
+ 
+-    def _compress_ldr_2nd(self):
+-        image = self.body2["LOADER_2ND"].content
++    def _compress_ldr_2nd(self, slot="LOADER_2ND"):
++        image = self.body2[slot].content
+         hdr_size = self._param_size(self.ldr_2nd_hdr)
+         hdr, body = image[:hdr_size], image[hdr_size:]
+ 
+@@ -604,14 +604,22 @@
+         else:
+             raise ValueError("unknown loader_2nd magic (%r)", magic)
+ 
+-        self.body2["LOADER_2ND"].content = self.pad(hdr + body, IMAGE_ALIGN)
++        self.body2[slot].content = self.pad(hdr + body, IMAGE_ALIGN)
+ 
+     def add_loader_2nd_b(self, args):
++        # Polyglot fip (#48): LOADER_2ND_B carries the SECONDARY core's u-boot,
++        # packed SYMMETRICALLY with LOADER_2ND (loader_2nd_header + LZMA) so the
++        # secondary FSBL's load_loader_2nd can parse+decompress it identically.
+         if args.LOADER_2ND_B == "":
+             return
+         with open(args.LOADER_2ND_B, "rb") as fp:
+             loader_2nd_b = fp.read()
+ 
++        e = self.ldr_2nd_hdr["MAGIC"]
++        magic = loader_2nd_b[e.addr : e.end]
++        if magic != LOADER_2ND_MAGIC_ORIG:
++            raise ValueError("loader_2nd_b's magic should be %r, but %r" % (LOADER_2ND_MAGIC_ORIG, magic))
++
+         logging.debug("loader_2nd_b=%#x bytes", len(loader_2nd_b))
+         self.body2["LOADER_2ND_B"].content = loader_2nd_b
+ 
+@@ -631,21 +639,28 @@
+         return fip_bin + self.body2["LOADER_2ND"].content
+ 
+     def pack_loader_2nd_b(self, fip_bin):
++        # Polyglot fip (#48): pack LOADER_2ND_B the same way as LOADER_2ND --
++        # parse its loader_2nd_header, compress the body, refresh the header --
++        # so the secondary FSBL decodes it via the identical path. Runs AFTER
++        # pack_loader_2nd, which leaves compress_algo set; the shared
++        # ldr_2nd_hdr state is re-parsed here so no stale header leaks in.
+         logging.debug("pack_loader_2nd_b:")
+         if not len(self.body2["LOADER_2ND_B"].content):
+             return
+ 
+         fip_bin = self.pad(fip_bin, IMAGE_ALIGN)
+-
+-        # Append LOADER_2ND_B to body2
+-        loader_2nd_b = self.pad(self.body2["LOADER_2ND_B"].content, IMAGE_ALIGN)
+-
+-        logging.debug("pack_loader_2nd_b:LOADER_2ND_B_LOADADDR=%d, LOADER_2ND_B_SIZE=%d ", len(fip_bin), len(loader_2nd_b))
+-
+         self.param2["LOADER_2ND_B_LOADADDR"].content = len(fip_bin)
+-        self.param2["LOADER_2ND_B_SIZE"].content = len(loader_2nd_b)
+ 
+-        return fip_bin + loader_2nd_b
++        self._parse_ldr_2nd_hdr(self.body2["LOADER_2ND_B"].content)
++        self._compress_ldr_2nd("LOADER_2ND_B")
++        self._update_ldr_2nd_hdr("LOADER_2ND_B")
++
++        self.param2["LOADER_2ND_B_SIZE"].content = len(self.body2["LOADER_2ND_B"].content)
++        logging.debug("pack_loader_2nd_b:LOADER_2ND_B_LOADADDR=%d, LOADER_2ND_B_SIZE=%d",
++                      self.param2["LOADER_2ND_B_LOADADDR"].content, self.param2["LOADER_2ND_B_SIZE"].content)
++
++        # Append LOADER_2ND_B to body2
++        return fip_bin + self.body2["LOADER_2ND_B"].content
+ 
+     def insert_param1(self, fip_bin, name, value):
+         fip_bin = bytearray(fip_bin)

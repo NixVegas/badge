@@ -7,7 +7,7 @@
 # core = "arm"   (default): BOOT_CPU=aarch64, aarch64-embedded toolchain.
 # core = "riscv": BOOT_CPU=riscv, riscv64-embedded toolchain, TOC 0xC906B001.
 # import ./fsbl.nix { inherit pkgs; } uses the arm path.
-{ pkgs, core ? "arm", dumpRom ? false }:
+{ pkgs, core ? "arm", dumpRom ? false, slot ? "primary" }:
 let
   # Per-core toolchain and build parameters.
   coreAttrs =
@@ -130,6 +130,14 @@ pkgs.stdenv.mkDerivation {
     # before load_ddr(). The dump needs only the UART and the stack.
     cp ${dumpInc} plat/cv181x/bl2/romdump.inc.c
     sed -i '/FSBL %s:%s/a #include "romdump.inc.c"' plat/cv181x/bl2/bl2_main.c
+  '' else "") + (if slot == "secondary" then ''
+    # Polyglot fip (#48): the SECONDARY core's FSBL loads its MONITOR from the
+    # BLCP_2ND slot and its u-boot from LOADER_2ND_B (the arm/primary core uses
+    # the normal MONITOR/LOADER_2ND slots). The patch redirects load_monitor +
+    # load_loader_2nd, neuters load_blcp_2nd (which would otherwise treat the
+    # BLCP_2ND monitor as a C906L RTOS), and add_defines POLYGLOT_SECONDARY.
+    # See docs/superpowers/plans/2026-09-01-sg2000-polyglot-fip.md.
+    patch -p1 < ${./polyglot/fsbl-secondary-slots.patch}
   '' else "");
 
   buildPhase = ''

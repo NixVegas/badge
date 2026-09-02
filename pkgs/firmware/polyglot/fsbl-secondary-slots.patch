@@ -1,0 +1,63 @@
+--- a/Makefile
++++ b/Makefile
+@@ -179,6 +179,11 @@
+ $(eval $(call add_define,ENABLE_ASSERTIONS))
+ $(eval $(call add_define,LOG_LEVEL))
+ $(eval $(call add_define,__CVITEK__))
++# Polyglot fip (#48): applied ONLY to the secondary-core FSBL (fsbl.nix
++# slot="secondary"), so define unconditionally. Makes load_monitor /
++# load_loader_2nd read the spare BLCP_2ND / LOADER_2ND_B slots and neuters
++# load_blcp_2nd (see the bl2_opt.c hunks in this same patch).
++$(eval $(call add_define,POLYGLOT_SECONDARY))
+ $(eval $(call add_define,NANDBOOT_V2))
+ 
+ ifeq (${BOOT_CPU},riscv)
+--- a/plat/cv181x/bl2/bl2_opt.c
++++ b/plat/cv181x/bl2/bl2_opt.c
+@@ -194,6 +194,13 @@
+ 	// if no blcp_2nd, release_blcp_2nd should be ddr_init_end
+ 	time_records->release_blcp_2nd = time_records->ddr_init_end;
+ 
++#ifdef POLYGLOT_SECONDARY
++	/* Polyglot fip (#48): the BLCP_2ND slot carries the secondary core's
++	 * MONITOR, not a C906L RTOS. Skip the RTOS load here; load_monitor()
++	 * below aliases the BLCP_2ND fields and loads it as the monitor. */
++	return 0;
++#endif
++
+ 	NOTICE("C2S/0x%x/0x%x/0x%x.\n", fip_param2.blcp_2nd_loadaddr, fip_param2.blcp_2nd_runaddr,
+ 	       fip_param2.blcp_2nd_size);
+ 
+@@ -260,6 +267,17 @@
+ 	uint32_t crc;
+ 	int ret = -1;
+ 
++#ifdef POLYGLOT_SECONDARY
++	/* Polyglot fip (#48): the secondary core's MONITOR rides the BLCP_2ND
++	 * slot (its RUNADDR is set to a DRAM monitor address, e.g. 0x80000000).
++	 * Alias the BLCP_2ND fields into monitor_* so the rest of this function
++	 * loads + verifies + enters it unchanged. load_blcp_2nd() is neutered. */
++	fip_param2.monitor_loadaddr = fip_param2.blcp_2nd_loadaddr;
++	fip_param2.monitor_runaddr  = fip_param2.blcp_2nd_runaddr;
++	fip_param2.monitor_size     = fip_param2.blcp_2nd_size;
++	fip_param2.monitor_cksum    = fip_param2.blcp_2nd_cksum;
++#endif
++
+ 	NOTICE("MS/0x%x/0x%x/0x%x.\n", fip_param2.monitor_loadaddr, fip_param2.monitor_runaddr,
+ 	       fip_param2.monitor_size);
+ 
+@@ -368,6 +386,14 @@
+ 	int reading_size;
+ 	void *image_buf;
+ 
++#ifdef POLYGLOT_SECONDARY
++	/* Polyglot fip (#48): the secondary core's u-boot rides the LOADER_2ND_B
++	 * slot, packed symmetrically (loader_2nd_header + LZMA) by fiptool. Alias
++	 * its loadaddr into loader_2nd_loadaddr so the header parse + decompress +
++	 * entry calc below run unchanged against the secondary u-boot. */
++	fip_param2.loader_2nd_loadaddr = fip_param2.loader_2nd_b_loadaddr;
++#endif
++
+ 	NOTICE("L2/0x%x.\n", fip_param2.loader_2nd_loadaddr);
+ 
+ 	ret = load_data_from_storage(loader_2nd_header, fip_param2.loader_2nd_loadaddr, BLOCK_SIZE, retry);
