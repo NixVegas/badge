@@ -24,20 +24,20 @@
       # rotate the console 180 in fbcon (CONFIG_FRAMEBUFFER_CONSOLE_ROTATION)
       # rather than in the driver.
       boot.kernelParams = [
-        # /dev/console is the LAST console= entry. Put tty1 (the Sharp fbcon
-        # panel, #42) LAST so the panel IS /dev/console: systemd writes its
-        # "Starting/Started" boot status there and lands the getty + emergency
-        # shell on it, so the panel behaves exactly like a serial console --
-        # status during boot, then a quiet getty (PID1 stops emitting once the
-        # default target is reached; no continuous journal firehose). ttyS0
-        # stays a registered console too: it still gets ALL kernel printk, and
-        # serial-getty is kept explicitly below for remote ser2net login. What
-        # ttyS0 gives up is the systemd status + emergency/single-user shell,
-        # which now land on the panel. earlycon keeps the very early boot on
-        # serial (the panel's DRM driver isn't up until ~6.3s, so nothing can
-        # render there before then).
-        "console=ttyS0,115200"
+        # /dev/console is the LAST console= entry. Put ttyS0 (the Husky serial
+        # bridge -> ser2net) LAST so SERIAL is /dev/console: PID1's
+        # "Starting/Started" status, the emergency/single-user shell, and the
+        # console getty land on serial -- the practical default for a badge
+        # debugged remotely over ser2net (systemd boot status shows up on the
+        # tcp/3333 console). tty1 (the Sharp fbcon panel, #42) is still a
+        # registered console, so it gets ALL kernel printk during boot and keeps
+        # its own getty@tty1 login (enabled below); it just gives up the systemd
+        # "Starting X" marquee, which moved to serial. earlycon keeps the very
+        # early boot on serial too (the panel's DRM driver isn't up until ~6.3s).
+        # (Earlier this was reversed -- panel as /dev/console -- but serial is
+        # the more common debug path, so status belongs there.)
         "console=tty1"
+        "console=ttyS0,115200"
         "earlycon"
         "iomem=relaxed"
         "fbcon=rotate:2"
@@ -53,19 +53,21 @@
       console.font = "${pkgs.spleen}/share/consolefonts/spleen-6x12.psfu";
       console.earlySetup = true;
 
-      # Keep a serial login for remote ser2net recovery (#11). Now that tty1 is
-      # /dev/console (above), systemd's getty-generator spawns the console getty
-      # on the panel; enable serial-getty@ttyS0 explicitly so ttyS0 still offers
-      # a login over the Husky serial bridge. ttyS0 keeps all kernel printk, so
-      # a remote operator sees boot/oops output; only the systemd status and the
-      # emergency/single-user shell moved to the panel with /dev/console.
+      # Serial (ttyS0) is /dev/console (above), so systemd's getty-generator
+      # already spawns the console getty there (serial-getty@ttyS0) for remote
+      # ser2net login (#11); keep it enabled explicitly so it survives regardless
+      # of the generator. The PANEL (tty1) is no longer /dev/console, so it would
+      # otherwise lose its login -- enable getty@tty1 explicitly so the Sharp
+      # panel keeps an interactive shell (plus the kernel printk it gets as a
+      # registered console). PID1 status + the emergency/single-user shell now
+      # land on serial, not the panel.
       #
-      # NOTE: an earlier take wired journald ForwardToConsole=/dev/tty1 to mirror
-      # the log onto the panel. That streams the WHOLE journal forever and drowns
-      # the getty (every session/service line interrupts the prompt). Making the
-      # panel /dev/console is the right model: it shows systemd status DURING boot
-      # and goes quiet after, exactly like a serial console -- no forward needed.
+      # NOTE: do NOT wire journald ForwardToConsole to mirror the log onto the
+      # other tty -- it streams the WHOLE journal forever and drowns the getty
+      # (every session/service line interrupts the prompt). One /dev/console gets
+      # the systemd status; the other tty stays a quiet getty + kernel printk.
       systemd.services."serial-getty@ttyS0".enable = true;
+      systemd.services."getty@tty1".enable = true;
 
       # Boot via U-Boot's extlinux. The vendor FSBL still runs first and is
       # packaged per-core in core-*.nix (ATF for ARM, OpenSBI for RISC-V).
