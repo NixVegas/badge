@@ -127,6 +127,9 @@
             inherit pkgs;
             core = "riscv";
           };
+          # The polyglot fip (#48): the ACTIVE fip.bin, boots either core by the
+          # strap. The split fips above stay as recovery blobs.
+          fipPolyglotReal = import ./pkgs/firmware/fip-polyglot.nix { inherit pkgs; };
           mkCombinedRoot = import ./pkgs/sdcard/make-combined-root.nix { inherit pkgs; };
           mkBoot = import ./pkgs/sdcard/make-boot-dir.nix { inherit pkgs; };
           mkImg = import ./pkgs/sdcard/make-sd-image.nix { inherit pkgs; };
@@ -142,6 +145,7 @@
             inherit armSys riscvSys;
             fipArm = fipArmReal;
             fipRiscv = fipRiscvReal;
+            fipPolyglot = fipPolyglotReal;
             defaultCore = "arm";
           };
         in
