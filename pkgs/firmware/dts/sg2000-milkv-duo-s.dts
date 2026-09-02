@@ -94,107 +94,23 @@
 			#reset-cells = <1>;
 		};
 
-		/* SPI3 (DesignWare APB SSI). The mainline sg2000.dtsi omits the SPI
-		 * controllers, so this DTS defines the node. It is on the 40-pin
-		 * header:
-		 *   pin19 XGPIOB_13/SPI3_SDO(MOSI)  pin21 XGPIOB_14/SPI3_SDI(MISO)
-		 *   pin23 XGPIOB_15/SPI3_SCK        pin24 XGPIOB_16/SPI3_CS
-		 * The pads are VIVO_D5..D8, SPI3 = pinmux 5 (see &spi3_cfg). */
+		/* SPI3 (DesignWare APB SSI) drives the WS2812 ring + Sharp panel. The
+		 * controller (compatible/reg/clocks/resets) is inherited from the base
+		 * cv180x.dtsi; the shared device config (num-cs, cs-gpios, pinctrl,
+		 * spidev@0, display@1, status) lives in the common dtsi. This node carries
+		 * only the arm-specific bits:
+		 *   - interrupts: the GIC 3-cell form (the base's 2-cell PLIC form is wrong
+		 *     under the arm64 GIC), so override it here.
+		 *   - dmas: cv1800b dmamux slave DMA so the CPU no longer hand-refills the
+		 *     TX FIFO (PIO underruns when a hardirq preempts the refill and the
+		 *     WS2812 chain glitches under load). Cells: TX req 23, RX req 22; 2nd
+		 *     cell = CPU (0 = CA53). &dmac must be sophgo,cv1800b-axi-dma
+		 *     (ARG0_AS_CHAN). RST_SPI3 (base `resets`) needs RESET_SIMPLE, enabled
+		 *     in the shared base.nix. */
 		spi3: spi@41b0000 {
-			compatible = "snps,dw-apb-ssi";
-			reg = <0x041b0000 0x10000>;
-			#address-cells = <1>;
-			#size-cells = <0>;
 			interrupts = <SOC_PERIPHERAL_IRQ(41) IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clk CLK_SPI>, <&clk CLK_APB_SPI3>;
-			clock-names = "ssi_clk", "pclk";
-			/* No reset. SPI3 is already out of reset from u-boot/FSBL, and
-			 * the vendor arm64 DTS drives it with no reset. Mainline has no
-			 * cv18xx reset header to verify an RST_SPI3 index against, so
-			 * this DTS does not touch an unverified reset bit. */
-			/* Two logical selects on ONE physical line: cs0 = the gpio
-			 * (HIGH = LEDs via the U10 AND gate), cs1 = nothing at all
-			 * (the cs-gpios array has one entry, so index 1 is NULL and
-			 * the core toggles no pad) -- which through the front
-			 * connector's inverter means "display selected at the LOW
-			 * idle". See spidev@1. */
-			num-cs = <2>;
-			/* Slave DMA via the cv1800b dmamux, so the CPU no longer hand-refills
-			 * the SPI TX FIFO. In PIO the FIFO underruns when a hardirq preempts the
-			 * refill mid-frame, the SPI clock stalls, and the WS2812 chain glitches
-			 * under load; DMA feeds the FIFO from memory instead. Cells: SPI3_TX =
-			 * req 23, SPI3_RX = req 22; the 2nd dmamux cell is the CPU (0 = CA53).
-			 * &dmac must use sophgo,cv1800b-axi-dma (ARG0_AS_CHAN) so of_xlate takes
-			 * the mux-allocated channel, not the apb_regs handshake path this SoC
-			 * lacks -- that mismatch is why direct dmas = <&dmac ...> failed. */
 			dmas = <&dmamux 23 0>, <&dmamux 22 0>;
 			dma-names = "tx", "rx";
-			/* GPIO chip select, active high. The board wires
-			 * LED_DIN = CS AND SDO through U10, and the AND gate only
-			 * passes data while CS is high.
-			 *
-			 * The native DW CS cannot do this. dw_spi_set_cs only
-			 * chooses whether to set the Slave Enable bit. SER is set
-			 * regardless of active-high or active-low CS level, so the
-			 * pad stays active-low in hardware and SPI_CS_HIGH has no
-			 * effect on it.
-			 *
-			 * A gpiod CS honours polarity: spi_toggle_csgpiod() calls
-			 * gpiod_set_value(desc, activate) and the GPIO library
-			 * applies GPIO_ACTIVE_HIGH. dw_spi sets
-			 * SPI_CONTROLLER_GPIO_SS, so the core still calls set_cs to
-			 * raise SER and the transfer proceeds.
-			 *
-			 * VIVO_D5 is XGPIOB_16 at mux 3, so the pad is muxed as
-			 * GPIO rather than SPI3_CS (see &spi3_cfg). */
-			cs-gpios = <&portb 16 GPIO_ACTIVE_HIGH>;
-			pinctrl-0 = <&spi3_cfg>;
-			pinctrl-names = "default";
-			status = "okay";
-
-			/* spidev at /dev/spidev3.0. spidev only binds known
-			 * compatibles; rohm,dh2228fv is in spidev_dt_ids. */
-			spidev@0 {
-				compatible = "rohm,dh2228fv";
-				reg = <0>;
-				spi-max-frequency = <10000000>;
-				/* Required for the U10 AND gate. The
-				 * GPIO_ACTIVE_HIGH flag on cs-gpios does not
-				 * decide polarity. gpiolib-of.c forces every
-				 * SPI cs-gpio active low unless the child node
-				 * carries "spi-cs-high" (SPI children have
-				 * active-low chip selects by default). Without
-				 * this the line is active low, so CS goes low
-				 * during transfers, the AND gate emits zero, and
-				 * the LEDs receive no data. */
-				spi-cs-high;
-			};
-
-			/* The Sharp Memory Display (LS027B7DH01, 400x240) as a DRM
-			 * fbcon (#42). The front connector routes the SAME CS net
-			 * through an INVERTER to the display's SCS: line HIGH = LEDs
-			 * listen (AND gate open, display deselected), line LOW =
-			 * display selected. This child has NO cs-gpios of its own
-			 * (the controller's cs-gpios array has one entry; index 1 is
-			 * NULL), so the SPI core toggles nothing here and the line
-			 * sits at whatever the LED cs-gpio (spidev3.0) left it: LOW
-			 * when the painter is idle = display selected. The patched
-			 * sharp-memory driver flushes as ONE spi_message, which holds
-			 * the controller bus_lock_mutex for the whole write, so the
-			 * userspace painter blocks (can't drive the line high) and
-			 * the display stays selected for the flush -- kernel and
-			 * userspace competing on the SPI core's own mutex. The DW
-			 * native SER bit for slave 1 drives no pad (SER-bit0 patch).
-			 *
-			 * vcom-mode = software: EXTMODE is strapped low, so a kthread
-			 * toggles the in-band VCOM bit (no EXTCOMIN pin/pwm needed).
-			 * DISP is tied high on the board, so no enable-gpios. */
-			display@1 {
-				compatible = "sharp,ls027b7dh01";
-				reg = <1>;
-				spi-max-frequency = <2000000>;
-				sharp,vcom-mode = "software";
-			};
 		};
 	};
 };

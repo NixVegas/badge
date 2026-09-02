@@ -187,14 +187,19 @@
       ];
     }
 
-    # --- In-module arch fork for ISA-only differences with no separate file.
-    # hostPlatform is the single source of truth. ---
-    (lib.mkIf pkgs.stdenv.hostPlatform.isRiscV64 {
-      # RISC-V-specific config goes here.
-    })
-    (lib.mkIf pkgs.stdenv.hostPlatform.isAarch64 {
-      # ARM core: mainline kernel plus two targeted patches to the mainline
-      # cv18xx SDIO glue so the onboard AIC8800D80 wifi comes up:
+    # --- SoC-level enablement shared by BOTH cores. ---
+    # The SG2000 is ONE die: the SDIO wifi host, the cv1800b reset controller,
+    # the DesignWare watchdog and the out-of-tree cvitek SDHCI host are the same
+    # hardware blocks whichever core boots, so this is NOT arch-specific. It used
+    # to be gated on isAarch64, which silently left the RISC-V build without wifi,
+    # with a half-reset SPI3 (garbled LEDs + a dead Sharp panel), and only a lucky
+    # DW_WATCHDOG=m from the riscv defconfig. Both cores run the same
+    # linuxPackages_latest, so every patch below applies verbatim to each kernel.
+    # Genuinely ISA-specific config, if any ever arises, goes in a
+    # `lib.mkIf pkgs.stdenv.hostPlatform.isRiscV64 { ... }` block.
+    {
+      # Two targeted patches to the mainline cv18xx SDIO glue so the onboard
+      # AIC8800D80 wifi comes up:
       #
       #   cv18xx-vsw.patch      hooks the mainline .init/.postinit/.voltage_switch
       #                         slots (already called for rk35xx/th1520) for the
@@ -219,15 +224,17 @@
           patch = ../../pkgs/firmware/mmc-no-async-irq.patch;
         }
         # Enable the DesignWare watchdog so userspace `reboot` resets the SoC.
-        # Mainline registers no working restart handler for the SG2000: the
-        # /psci SYSTEM_RESET path hits a BL31 blob that does not implement it,
-        # so machine_restart() spins after "reboot: Restarting system".
-        # dw_wdt registers a restart handler at priority 128. With the &soc
-        # watchdog@3010000 node in sg2000-milkv-duo-s.dts and the FSBL's
+        # Mainline registers no working restart handler for the SG2000 on either
+        # core: ARM's /psci SYSTEM_RESET hits a BL31 blob that does not implement
+        # it, and RISC-V's SBI SRST has no cv18xx platform reset in OpenSBI -- so
+        # machine_restart() spins after "reboot: Restarting system" (bench-proven
+        # on both). dw_wdt registers a restart handler at priority 128. With the
+        # watchdog@3010000 node (in each core's DTS) and the FSBL's
         # RTC_EN_WDT_RST_REQ gate at 0x050260E0, a watchdog timeout resets the
         # whole chip. Built in (=y) so the handler is present without a module
-        # load. The Kconfig symbol is DW_WATCHDOG (the driver file is dw_wdt.c).
-        # It selects WATCHDOG_CORE; keep WATCHDOG on explicitly.
+        # load (riscv otherwise only gets a lucky =m from its defconfig). The
+        # Kconfig symbol is DW_WATCHDOG (the driver file is dw_wdt.c). It selects
+        # WATCHDOG_CORE; keep WATCHDOG on explicitly.
         {
           name = "enable-dw-wdt-reboot";
           patch = null;
@@ -237,10 +244,14 @@
             DW_WATCHDOG y
           '';
         }
-        # reset-simple drives sophgo,cv1800b-reset (the SG2000 reset controller).
-        # The nixpkgs arm64 config leaves it off. Without it SPI3 and any
-        # resettable peripheral stay held in reset. See the DTS
-        # reset-controller@3003000.
+        # reset-simple drives sophgo,cv1800b-reset (the SG2000 reset controller,
+        # &rst). Both cores' spi3 (from the base cv180x.dtsi) carry
+        # `resets = <&rst RST_SPI3>`; dw-apb-ssi takes it as OPTIONAL, so without
+        # a bound reset controller SPI3 probes anyway but comes up half-reset --
+        # garbled WS2812 output + a dead Sharp panel on the shared bus. The
+        # nixpkgs arm64/riscv64 configs leave RESET_SIMPLE off, so enable it here
+        # for both. (ARM also declares reset-controller@3003000 in its DTS; RISC-V
+        # gets &rst from the base cv180x.dtsi.)
         {
           name = "enable-reset-simple";
           patch = null;
@@ -253,8 +264,11 @@
 
       # The reset fires through systemd's reboot-safety watchdog. Its request is
       # clamped to the hardware max (~42s), so `reboot` takes ~40s by default.
-      # Arm it short so the reset fires in ~2s. The dw_wdt in-kernel restart
-      # path does not reset promptly on this SoC; the systemd watchdog does.
+      # Arm it short so the reset fires in ~2s. On ARM the dw_wdt in-kernel
+      # restart path does not reset promptly, so this systemd path is what makes
+      # `reboot` work; on RISC-V the in-kernel restart already resets promptly
+      # (bench-proven), so this is belt-and-suspenders there -- harmless, and it
+      # still buys the hang-recovery below.
       systemd.watchdog.rebootTime = "2s";
 
       # Auto-recover from a hard hang (for example an aic8800 driver IRQ storm
@@ -277,6 +291,6 @@
         })
       ];
       boot.kernelModules = [ "sdhci-cv181x" ];
-    })
+    }
   ];
 }

@@ -118,8 +118,8 @@
 	 * after "reboot: Restarting system" (bench-proven on the polyglot fip
 	 * bring-up, 2026-09-02 -- the riscv reboot hung until a button press).
 	 *
-	 * Fix, as on ARM: expose the DesignWare watchdog. dw_wdt (DW_WATCHDOG y,
-	 * set arch-independently in modules/duo-s/base.nix) registers a restart
+	 * Fix, as on ARM: expose the DesignWare watchdog. dw_wdt (DW_WATCHDOG=y,
+	 * set for both cores in the shared modules/duo-s/base.nix) registers a restart
 	 * handler at priority 128 that programs the shortest timeout in RESET
 	 * response mode. The vendor FSBL (both slots of the polyglot BL2) writes
 	 * RTC_EN_WDT_RST_REQ (0x050260E0) = 1 in early platform init, so the
@@ -239,31 +239,33 @@
 	 * power-source: the mainline sophgo pinctrl rejects a pinmux subnode
 	 * without it and fails pinctrl_bind_pins before dw_spi_mmio_probe runs. */
 	spi3_cfg: spi3-cfg {
+		/* Match the arm spi3_cfg exactly: no drive-strength (leave SCK/SDO at
+		 * default, suits push-pull), bias-pull-up on SDI and the GPIO-mode CS so
+		 * the CS pad does not float between transfers (a floating CS gates
+		 * garbage into the WS2812 chain through the U10 AND gate). */
 		spi3-sck-pins {
 			pinmux = <PINMUX(DUOS_VIVO_D6, 5)>;
-			drive-strength-microamp = <10800>;
 			power-source = <3300>;
 		};
 
 		spi3-sdo-pins {
 			pinmux = <PINMUX(DUOS_VIVO_D8, 5)>;
-			drive-strength-microamp = <10800>;
 			power-source = <3300>;
 		};
 
 		spi3-sdi-pins {
 			pinmux = <PINMUX(DUOS_VIVO_D7, 5)>;
-			drive-strength-microamp = <10800>;
+			bias-pull-up;
 			power-source = <3300>;
 		};
 
-		/* CS is a GPIO here, not SPI3_CS. Mux 3 is XGPIOB_16; mux 5
-		 * would be SPI3_CS. U10 gates LED_DIN with CS through an AND
-		 * gate and needs CS active-high, which the native DW CS cannot
-		 * do. See the cs-gpios comment on &spi3. */
+		/* CS is a GPIO here, not SPI3_CS. Mux 3 is XGPIOB_16; mux 5 would be
+		 * SPI3_CS. U10 gates LED_DIN with CS through an AND gate and needs CS
+		 * active-high, which the native DW CS cannot do. See the cs-gpios comment
+		 * on &spi3 (common dtsi). */
 		spi3-cs-pins {
 			pinmux = <PINMUX(DUOS_VIVO_D5, 3)>;
-			drive-strength-microamp = <10800>;
+			bias-pull-up;
 			power-source = <3300>;
 		};
 	};
@@ -273,47 +275,16 @@
  * the controller (spi@41b0000) with its clocks, interrupt and RST_SPI3 reset;
  * it is only disabled. Enable it below. */
 &spi3 {
-	num-cs = <1>;
-	/* Slave DMA via the cv1800b dmamux, so the CPU no longer hand-refills the
-	 * SPI TX FIFO. In PIO the FIFO underruns when a hardirq preempts the refill
-	 * mid-frame, the SPI clock stalls, and the WS2812 chain glitches under load;
-	 * DMA feeds the FIFO from memory instead. Cells: SPI3_TX = req 23, SPI3_RX =
-	 * req 22; the 2nd dmamux cell is the CPU (1 = C906 on this riscv core, vs
-	 * 0 = CA53 on arm). &dmac must use sophgo,cv1800b-axi-dma (ARG0_AS_CHAN) so
-	 * of_xlate takes the mux-allocated channel, not the apb_regs handshake path
-	 * this SoC lacks. */
+	/* Slave DMA via the cv1800b dmamux so the CPU no longer hand-refills the SPI
+	 * TX FIFO (PIO underruns when a hardirq preempts the refill mid-frame and the
+	 * WS2812 chain glitches under load). Cells: TX req 23, RX req 22; the 2nd
+	 * dmamux cell is the CPU (1 = C906 on this riscv core, vs 0 = CA53 on arm).
+	 * &dmac must use sophgo,cv1800b-axi-dma (ARG0_AS_CHAN) so of_xlate takes the
+	 * mux-allocated channel, not the apb_regs handshake path this SoC lacks.
+	 * Everything else (num-cs, cs-gpios, pinctrl, spidev@0, the Sharp display@1,
+	 * status) is shared in sg2000-milkv-duo-s-common.dtsi. */
 	dmas = <&dmamux 23 1>, <&dmamux 22 1>;
 	dma-names = "tx", "rx";
-	/* GPIO chip select, active-high. U10 wires LED_DIN = CS AND SDO, so the
-	 * AND gate passes data only while CS is high.
-	 *
-	 * The native DW CS cannot do this. dw_spi_set_cs only decides whether to
-	 * set the Slave Enable bit; SER is set regardless of active-high or
-	 * active-low CS level, so the pad stays active-low and SPI_CS_HIGH has
-	 * no effect. A gpiod CS honours polarity, and dw_spi sets
-	 * SPI_CONTROLLER_GPIO_SS so SER is still raised and data still flows.
-	 *
-	 * VIVO_D5 is XGPIOB_16 at mux 3, hence the GPIO mux in &spi3_cfg. */
-	cs-gpios = <&portb 16 GPIO_ACTIVE_HIGH>;
-	pinctrl-0 = <&spi3_cfg>;
-	pinctrl-names = "default";
-	status = "okay";
-
-	/* spidev binds known compatibles only. rohm,dh2228fv is in
-	 * spidev_dt_ids and gives /dev/spidev3.0. */
-	spidev@0 {
-		compatible = "rohm,dh2228fv";
-		reg = <0>;
-		spi-max-frequency = <10000000>;
-		/* Required for the U10 AND gate. The GPIO_ACTIVE_HIGH flag on
-		 * cs-gpios does not decide polarity: gpiolib-of.c forces every
-		 * SPI cs-gpio active-low unless the child node carries
-		 * "spi-cs-high" (SPI children default to active-low chip
-		 * selects). Without this the line comes up active-low, so CS
-		 * goes low during transfers, the AND gate emits zero, and the
-		 * LEDs receive nothing. */
-		spi-cs-high;
-	};
 };
 
 /*

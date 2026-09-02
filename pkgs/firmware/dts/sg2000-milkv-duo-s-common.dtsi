@@ -112,6 +112,61 @@
 };
 
 /*
+ * SPI3 (DesignWare APB SSI) on the 40-pin header drives BOTH the WS2812 LED
+ * ring (/dev/spidev3.0) and the Sharp Memory Display (display@1) over ONE bus
+ * with the CS-AND-gate wiring: U10 gates LED_DIN = CS AND SDO, and the front
+ * connector routes the SAME CS net through an inverter to the display's SCS.
+ * The controller node itself (compatible/reg/#cells/clocks/interrupts/resets)
+ * comes from the base cv180x.dtsi (status="disabled"); this enables it and adds
+ * the two board devices. Identical on both cores, so it lives here.
+ *
+ * Per-core bits stay in each DTS: `dmas` (the cv1800b dmamux request's CPU
+ * cell, 0 = CA53 on ARM / 1 = C906 on RISC-V) and, on ARM only, the GIC-form
+ * `interrupts` override (the base's 2-cell PLIC form is wrong under the arm64
+ * GIC); plus the `spi3_cfg` pinctrl, whose pin-macro names differ (arm PIN_*
+ * vs riscv DUOS_*), referenced here by label. Requires RESET_SIMPLE in the
+ * kernel (shared, base.nix) so &rst binds and RST_SPI3 is deasserted -- without
+ * it the optional reset never releases and the bus comes up half-reset.
+ */
+&spi3 {
+	num-cs = <2>;
+	/* GPIO chip select, active-high. U10 passes LED data only while CS is
+	 * high; the native DW CS cannot do active-high (dw_spi_set_cs just sets
+	 * SER regardless of level), so use a gpiod CS -- dw_spi sets
+	 * SPI_CONTROLLER_GPIO_SS so SER is still raised and data flows. VIVO_D5 is
+	 * XGPIOB_16 at mux 3 (see each core's spi3_cfg). */
+	cs-gpios = <&portb 16 GPIO_ACTIVE_HIGH>;
+	pinctrl-0 = <&spi3_cfg>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	/* WS2812 ring at /dev/spidev3.0. spidev binds known compatibles only;
+	 * rohm,dh2228fv is in spidev_dt_ids. spi-cs-high is required for the U10
+	 * AND gate: gpiolib-of forces every SPI cs-gpio active-low unless the child
+	 * carries spi-cs-high (SPI children default to active-low chip selects). */
+	spidev@0 {
+		compatible = "rohm,dh2228fv";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
+		spi-cs-high;
+	};
+
+	/* Sharp Memory Display (LS027B7DH01, 400x240) as a DRM fbcon (#42). The
+	 * SAME CS net reaches SCS through an inverter, so this child has NO cs-gpios
+	 * (the controller's cs-gpios array has one entry; index 1 is NULL) and the
+	 * SPI core toggles nothing here -- the line sits where the LED cs-gpio
+	 * (spidev3.0) left it: LOW = display selected when the painter is idle.
+	 * EXTMODE strapped low => software VCOM (kthread toggles the in-band VCOM
+	 * bit, no EXTCOMIN pin); DISP tied high => no enable-gpios. */
+	display@1 {
+		compatible = "sharp,ls027b7dh01";
+		reg = <1>;
+		spi-max-frequency = <2000000>;
+		sharp,vcom-mode = "software";
+	};
+};
+
+/*
  * SAO connector power hog. Lives in its own &portb block; dtc merges it with
  * each core's &portb (which carries the core-specific gpio-line-names).
  */
