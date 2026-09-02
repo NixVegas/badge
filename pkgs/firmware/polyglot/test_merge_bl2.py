@@ -5,7 +5,7 @@ import unittest
 
 from merge_bl2 import (
     merge_bl2, encode_jal_x0,
-    ENTRY_WORD, ARM_BASE, RISCV_BASE, ARM_STUB_OFF, RISCV_TRAMP_OFF,
+    ENTRY_WORD, ENTRY_OFF, ARM_BASE, RISCV_BASE, ARM_STUB_OFF, RISCV_TRAMP_OFF,
     BODY_PAGE, BL2_SIZE, POOL_TAIL, _align,
 )
 
@@ -23,10 +23,12 @@ def decode_jal(word):
     return rd, imm
 
 
-# stubs sized like the real assembled ones; last 8 bytes are the (SRC,LEN) pool.
-def make_stub(size, marker):
-    body = bytes([marker]) * (size - POOL_TAIL)
-    return body + struct.pack("<II", 0, 0)
+# stubs sized like the real assembled ones; last 16 bytes are the 4-word pool
+# [scratch, body_dst, body_src, body_len]. merge_bl2 validates the riscv scratch
+# (word 0) and patches (body_src, body_len) -- the trailing POOL_TAIL bytes.
+def make_stub(size, marker, scratch=0):
+    body = bytes([marker]) * (size - 16)
+    return body + struct.pack("<IIII", scratch, 0, 0, 0)
 
 
 class TestMerge(unittest.TestCase):
@@ -34,14 +36,23 @@ class TestMerge(unittest.TestCase):
         self.arm = b"\xAA" * 0x1234        # arm FSBL body (not page-aligned len)
         self.rv  = b"\xBB" * 0x2010        # riscv FSBL body
         self.arm_stub = make_stub(144, 0x11)
-        self.rv_stub  = make_stub(164, 0x22)
+        # riscv SCRATCH must land in the dead gap [RISCV_BASE + align(len(rv),4),
+        # RISCV_BASE + riscv_body_off). Here riscv_body_off = 0x1000 +
+        # align(0x1234, 0x1000) = 0x3000 and body-dst end = 0x2010, so the gap is
+        # [0x0C002010, 0x0C003000); 0x0C002800 sits safely inside it.
+        self.rv_scratch = RISCV_BASE + 0x2800
+        self.rv_stub  = make_stub(164, 0x22, scratch=self.rv_scratch)
         self.out = merge_bl2(self.arm, self.rv, self.arm_stub, self.rv_stub)
 
     def test_entry_word(self):
-        self.assertEqual(struct.unpack_from("<I", self.out, 0)[0], ENTRY_WORD)
+        # The ROM jumps to offset 32 (bl2_entrypoint_real slot), so the entry
+        # word lives there -- NOT at offset 0 (proven by C906 JTAG: mepc=0x20).
+        self.assertEqual(ENTRY_OFF, 0x20)
+        self.assertEqual(struct.unpack_from("<I", self.out, ENTRY_OFF)[0], ENTRY_WORD)
 
     def test_head_zero(self):
-        self.assertEqual(self.out[4:32], b"\x00" * 28)
+        # the 8-word bl2_head the ROM steps over, up to the entry word
+        self.assertEqual(self.out[0:ENTRY_OFF], b"\x00" * ENTRY_OFF)
 
     def test_riscv_trampoline(self):
         word = struct.unpack_from("<I", self.out, RISCV_TRAMP_OFF)[0]
@@ -52,7 +63,7 @@ class TestMerge(unittest.TestCase):
 
     def test_arm_stub_placed_and_patched(self):
         s = self.out[ARM_STUB_OFF:ARM_STUB_OFF + len(self.arm_stub)]
-        self.assertEqual(s[:-POOL_TAIL], b"\x11" * (144 - POOL_TAIL))
+        self.assertEqual(s[:-16], b"\x11" * (144 - 16))    # body (minus 4-word pool)
         src, ln = struct.unpack("<II", s[-POOL_TAIL:])
         self.assertEqual(src, ARM_BASE + BODY_PAGE)
         self.assertEqual(ln, _align(len(self.arm), 4))
@@ -60,7 +71,9 @@ class TestMerge(unittest.TestCase):
     def test_riscv_reloc_placed_and_patched(self):
         off = _align(ARM_STUB_OFF + len(self.arm_stub), 4)
         s = self.out[off:off + len(self.rv_stub)]
-        self.assertEqual(s[:-POOL_TAIL], b"\x22" * (164 - POOL_TAIL))
+        self.assertEqual(s[:-16], b"\x22" * (164 - 16))    # body (minus 4-word pool)
+        scratch = struct.unpack_from("<I", s, len(s) - 16)[0]
+        self.assertEqual(scratch, self.rv_scratch)         # scratch (pool word 0) preserved
         src, ln = struct.unpack("<II", s[-POOL_TAIL:])
         riscv_body_off = BODY_PAGE + _align(len(self.arm), BODY_PAGE)
         self.assertEqual(src, RISCV_BASE + riscv_body_off)

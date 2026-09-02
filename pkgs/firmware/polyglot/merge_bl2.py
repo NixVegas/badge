@@ -23,10 +23,18 @@ fixed inside the .S files (per-core address views).
 import struct
 
 ENTRY_WORD      = 0x1400006F
+# The ROM jumps to the BL2 IMAGE at OFFSET 0x20 (32), NOT offset 0 -- that is
+# where the vendor FSBL's bl2_entrypoint_real lives, past the 8-word bl2_head
+# (see plat/cv181x/bl2/*/bl2_entrypoint.S). PROVEN by JTAG on the C906: with the
+# entry at offset 0, mepc=0x0C000020 / mcause=2 (illegal instruction) and the
+# reloc never ran -- the ROM landed on the zero head at offset 32. So the entry
+# word MUST sit at offset 32; the `b #444`/`j 320` displacements then land the
+# stubs at 32+444 / 32+320. (The earlier verdict's "ROM jumps to word 0" was wrong.)
+ENTRY_OFF       = 0x20         # 32 -- the ROM's BL2 entry point
 ARM_BASE        = 0x40100000   # arm BL2_BASE (mirror view) -- must match stub-arm.S
 RISCV_BASE      = 0x0C000000   # riscv BL2_BASE (origin view) -- must match stub-riscv.S
-RISCV_TRAMP_OFF = 320          # riscv `j` landing (from the entry word)
-ARM_STUB_OFF    = 444          # arm `b` landing (from the entry word)
+RISCV_TRAMP_OFF = ENTRY_OFF + 320   # riscv `j 320` landing (from the entry word @32) = 352
+ARM_STUB_OFF    = ENTRY_OFF + 444   # arm `b #444` landing (from the entry word @32) = 476
 BODY_PAGE       = 0x1000       # first FSBL body starts here (page-aligned)
 BL2_SIZE        = 0x37000      # ROM BL2 slot budget
 POOL_TAIL       = 8            # bytes of (SRC, LEN) at the end of each stub
@@ -72,9 +80,27 @@ def merge_bl2(arm_bl2, riscv_bl2, arm_stub, riscv_stub):
     assert RISCV_TRAMP_OFF + 4 <= ARM_STUB_OFF, "riscv trampoline overruns the arm stub"
     assert total <= BL2_SIZE, f"polyglot BL2 {total:#x} exceeds BL2_SIZE {BL2_SIZE:#x}"
 
+    # The riscv reloc self-copies to a SCRATCH it hardcodes in its pool (word 0,
+    # at len-16). SRAM above the ROM-loaded image is NOT reachable via the C906
+    # origin window this early (a too-high SCRATCH E:RESETs -- proven on the
+    # bench), so SCRATCH must sit in the DEAD GAP between where the riscv body
+    # lands (RISCV_BASE + its aligned length) and where it is sourced from
+    # (RISCV_BASE + riscv_body_off) -- inside the loaded (writable) image,
+    # clobbering only the arm body's tail (dead on a riscv boot). Enforce it, so
+    # a body-size change that closes the gap fails the build instead of the board.
+    rv_scratch      = struct.unpack_from("<I", riscv_stub, len(riscv_stub) - 16)[0]
+    rv_body_dst_end = RISCV_BASE + _align(len(riscv_bl2), 4)
+    rv_body_src     = RISCV_BASE + riscv_body_off
+    assert rv_body_dst_end <= rv_scratch, (
+        f"riscv SCRATCH {rv_scratch:#x} below body-dst end {rv_body_dst_end:#x}: "
+        f"the body copy would clobber the relocated stub")
+    assert rv_scratch + len(riscv_stub) <= rv_body_src, (
+        f"riscv SCRATCH {rv_scratch:#x}+{len(riscv_stub):#x} overruns body-src "
+        f"{rv_body_src:#x}: the self-copy would corrupt the riscv body")
+
     buf = bytearray(total)
-    struct.pack_into("<I", buf, 0, ENTRY_WORD)                       # entry word
-    # words 1..7 stay zero (head)
+    struct.pack_into("<I", buf, ENTRY_OFF, ENTRY_WORD)              # entry word @ offset 32 (ROM's jump target)
+    # offsets 0..31 stay zero -- the 8-word bl2_head the ROM steps over
     jal = encode_jal_x0(riscv_reloc_off - RISCV_TRAMP_OFF)           # riscv trampoline
     struct.pack_into("<I", buf, RISCV_TRAMP_OFF, jal)
 
