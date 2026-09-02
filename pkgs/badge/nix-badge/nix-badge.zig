@@ -816,12 +816,11 @@ fn cmdCore(out: *Out, args: []const []const u8) CmdError!void {
     try reportStrap(w);
     w.print(
         \\
-        \\The latch only chooses which boot chain runs. Also swap the
-        \\firmware so U-Boot loads the matching kernel:
-        \\    swap-core {s}
-        \\Then reboot, with the board switch in AUTO.
+        \\/boot/fip.bin is the polyglot fip (#48): it boots either core by the
+        \\strap, so the latch alone selects the boot chain -- no fip copy. Reboot
+        \\with the board switch in AUTO to boot the latched core.
         \\
-    , .{@tagName(core)}) catch return error.Failed;
+    , .{}) catch return error.Failed;
 }
 
 fn reportStrap(w: *std.Io.Writer) CmdError!void {
@@ -2000,37 +1999,16 @@ fn otherCore(core: sysfs.Core) sysfs.Core {
     };
 }
 
-/// Perform the swap: read the current boot core off the strap, latch the other,
-/// and reboot. If the strap can be re-read and did NOT flip after latching, the
-/// board switch is not on AUTO (it overrides the latch), so revert and do nothing
-/// rather than pointlessly rebooting into the same core.
-/// Copy /boot/fip-<core>.bin over /boot/fip.bin -- the ONE file the BootROM
-/// reads, and the single thing that selects a boot chain (each core's U-Boot
-/// already reads its own /<core>/extlinux tree; see pkgs/sdcard/swap-core.nix,
-/// which this mirrors). Validates the target core has a kernel to boot first,
-/// else a "successful" swap would strand the board at the U-Boot prompt.
-fn swapFip(target: sysfs.Core) linux.Error!void {
+/// Verify the target core has a kernel to boot before latching to it, else a
+/// "successful" swap would strand the board at the U-Boot prompt. Each core's
+/// U-Boot reads its own /<core>/extlinux tree.
+fn targetHasKernel(target: sysfs.Core) bool {
     var conf_buf: [64]u8 = undefined;
-    var src_buf: [64]u8 = undefined;
     const name = @tagName(target);
-    const conf = std.fmt.bufPrintZ(&conf_buf, "/boot/{s}/extlinux/extlinux.conf", .{name}) catch return error.Io;
-    {
-        const fd = try linux.open(conf, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-        linux.close(fd);
-    }
-    const src_path = std.fmt.bufPrintZ(&src_buf, "/boot/fip-{s}.bin", .{name}) catch return error.Io;
-    const src = try linux.open(src_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-    defer linux.close(src);
-    const dst = try linux.open("/boot/fip.bin", .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
-    defer linux.close(dst);
-    var buf: [65536]u8 = undefined;
-    while (true) {
-        const n = try linux.read(src, &buf);
-        if (n == 0) break;
-        var off: usize = 0;
-        while (off < n) off += try linux.write(dst, buf[off..n]);
-    }
-    linux.sync();
+    const conf = std.fmt.bufPrintZ(&conf_buf, "/boot/{s}/extlinux/extlinux.conf", .{name}) catch return false;
+    const fd = linux.open(conf, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return false;
+    linux.close(fd);
+    return true;
 }
 
 fn doBootswap(io: std.Io) void {
@@ -2040,32 +2018,25 @@ fn doBootswap(io: std.Io) void {
     };
     const target = otherCore(current);
 
-    // Swap the FIRMWARE first, latch second: the BootROM loads whatever
-    // /boot/fip.bin holds regardless of the strap, so a latch pointing at a
-    // core whose fip is not in place reset-loops the FSBL
-    // (E:RESET plat/mars/platform.c -- bench-observed on ARM->RISCV before
-    // this existed: the old code latched and rebooted WITHOUT touching the
-    // fip at all). Failing here leaves both fip and strap on the current
-    // core -- a clean no-op.
-    swapFip(target) catch |err| {
-        std.log.err("bootswap: fip swap for {s} failed ({s}); not swapping", .{
-            @tagName(target), @errorName(err),
+    // Polyglot fip (#48): /boot/fip.bin is ONE image that boots EITHER core by
+    // the strap, so a core-switch is a pure latch flip -- no fip copy. This
+    // deletes the old swapFip + the wrong-fip/E:RESET guard (fip.bin always
+    // matches whatever the strap selects). Verify the target has a kernel first.
+    if (!targetHasKernel(target)) {
+        std.log.err("bootswap: {s} has no /boot/{s}/extlinux tree; not swapping", .{
+            @tagName(target), @tagName(target),
         });
         return;
-    };
+    }
 
     sysfs.latchCore(target) catch |err| {
         std.log.err("bootswap: latch {s} failed: {s}", .{ @tagName(target), @errorName(err) });
-        swapFip(current) catch |err2| std.log.err(
-            "bootswap: fip revert ALSO failed ({s}): /boot/fip.bin is {s} but the strap stays {s}",
-            .{ @errorName(err2), @tagName(target), @tagName(current) },
-        );
         return;
     };
 
     // Confirm the latch took (switch on AUTO). The strap reflects the latched
-    // selection; if it did not change to the target, AUTO is off — revert
-    // BOTH the latch and the fip, and bail.
+    // selection; if it did not change to the target, AUTO is off -- revert the
+    // latch and bail rather than pointlessly rebooting into the same core.
     if (sysfs.readStrap()) |after| {
         if (after != target) {
             std.log.warn("bootswap: strap still {s} after latching {s}; not in AUTO, ignoring", .{
@@ -2074,14 +2045,11 @@ fn doBootswap(io: std.Io) void {
             sysfs.latchCore(current) catch |err| {
                 std.log.warn("bootswap: revert latch failed: {s}", .{@errorName(err)});
             };
-            swapFip(current) catch |err| {
-                std.log.warn("bootswap: revert fip failed: {s}", .{@errorName(err)});
-            };
             return;
         }
     }
 
-    std.log.info("bootswap: {s} -> {s} (fip + strap), rebooting", .{ @tagName(current), @tagName(target) });
+    std.log.info("bootswap: {s} -> {s} (strap), rebooting", .{ @tagName(current), @tagName(target) });
     rebootNow(io);
 }
 

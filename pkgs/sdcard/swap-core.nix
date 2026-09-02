@@ -1,10 +1,10 @@
-# Activate a core (arm|riscv) on a mounted Duo S FAT boot partition.
+# Guide a core switch on a Duo S FAT boot partition (#48).
 #
-# Only fip.bin moves. The SG2000 BootROM reads exactly one fip.bin, so that is
-# the single thing that selects a boot chain, and it is the one file that
-# cannot be made per-core. Everything downstream is already per-core: each
-# core's U-Boot is built to read its own /<core>/extlinux/extlinux.conf, so no
-# shared config has to be kept in sync.
+# fip.bin is now the POLYGLOT fip: ONE image the BootROM reads that boots EITHER
+# core depending on the GPIO_RTX strap. So a core-switch no longer copies a fip
+# -- it is a pure LATCH flip (`nix-badge core <arch>` + reboot in AUTO). This
+# command just validates the boot partition and points you at the latch; the
+# per-core fip-arm.bin / fip-riscv.bin are kept only as recovery blobs.
 { pkgs }:
 pkgs.writeShellApplication {
   name = "swap-core";
@@ -16,22 +16,20 @@ pkgs.writeShellApplication {
     # needs no path.
     bootdir="''${2:-/boot}"
     case "$core" in arm|riscv) ;; *) usage ;; esac
-    if [ ! -d "$bootdir" ] || [ ! -f "$bootdir/fip-arm.bin" ] || [ ! -f "$bootdir/fip-riscv.bin" ]; then
-      echo "swap-core: '$bootdir' is not a Duo S boot partition (missing fip-arm.bin/fip-riscv.bin)" >&2
+    if [ ! -d "$bootdir" ] || [ ! -f "$bootdir/fip.bin" ]; then
+      echo "swap-core: '$bootdir' is not a Duo S boot partition (missing fip.bin)" >&2
       exit 1
     fi
-    # Check the target core actually has a kernel to boot before we point the
-    # BootROM at it. Without this a swap would succeed and then strand the
-    # board at the U-Boot prompt.
+    # Check the target core actually has a kernel to boot before switching to
+    # it. Without this a swap would succeed and then strand the board at the
+    # U-Boot prompt.
     src_conf="$bootdir/$core/extlinux/extlinux.conf"
     if [ ! -f "$src_conf" ]; then
       echo "swap-core: missing $src_conf, so the $core U-Boot would have nothing to boot" >&2
       exit 1
     fi
-    cp -f "$bootdir/fip-$core.bin" "$bootdir/fip.bin"
-    sync
-    echo "swap-core: firmware for $core is active."
-    echo "swap-core: also set the core-select latch, then reboot with the switch in AUTO:"
-    echo "    nix-badge core $core"
+    echo "swap-core: fip.bin is the polyglot fip -- it already boots $core, no copy needed."
+    echo "swap-core: set the core-select latch and reboot (board switch in AUTO):"
+    echo "    nix-badge core $core   # then reboot"
   '';
 }
