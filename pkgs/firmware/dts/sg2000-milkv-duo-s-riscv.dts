@@ -30,6 +30,7 @@
 /dts-v1/;
 #include "sg2002.dtsi"
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/clock/sophgo,cv1800.h>
 #include "sg2000-milkv-duo-s-common.dtsi"
 
 /*
@@ -104,6 +105,35 @@
 	memory@80000000 {
 		device_type = "memory";
 		reg = <0x80000000 0x20000000>;
+	};
+
+	/*
+	 * SoC reset for userspace `reboot` (the riscv twin of the ARM DTS's
+	 * watchdog node -- same disease, different firmware path).
+	 *
+	 * The mainline cv18xx dtsi has no watchdog node, so mainline Linux
+	 * registers no restart handler for this SoC beyond SBI SRST. OpenSBI's
+	 * generic SRST needs a platform reset driver it does not have for
+	 * cv18xx/sg2000, so the ecall returns and machine_restart() spins forever
+	 * after "reboot: Restarting system" (bench-proven on the polyglot fip
+	 * bring-up, 2026-09-02 -- the riscv reboot hung until a button press).
+	 *
+	 * Fix, as on ARM: expose the DesignWare watchdog. dw_wdt (DW_WATCHDOG y,
+	 * set arch-independently in modules/duo-s/base.nix) registers a restart
+	 * handler at priority 128 that programs the shortest timeout in RESET
+	 * response mode. The vendor FSBL (both slots of the polyglot BL2) writes
+	 * RTC_EN_WDT_RST_REQ (0x050260E0) = 1 in early platform init, so the
+	 * timeout propagates to a full SoC reset. Node facts (base, size, clock)
+	 * as in the ARM DTS: base 0x03010000 from the vendor cv181x_base.dtsi,
+	 * CLK_APB_WDT gates the 25 MHz timer clock, `resets` omitted (optional,
+	 * already out of reset).
+	 */
+	soc {
+		watchdog@3010000 {
+			compatible = "snps,dw-wdt";
+			reg = <0x03010000 0x1000>;
+			clocks = <&clk CLK_APB_WDT>;
+		};
 	};
 
 	/*

@@ -1,11 +1,6 @@
 /*
  * pkgs/firmware/polyglot/stub-arm.S -- aarch64 relocating stub (#48).
  *
- * *** DEBUG BUILD: UART trace markers (A..F) at each stage. The arm boot HANGS
- *     after the ROM's `.J.`; the last marker on serial pinpoints the failing
- *     stage. REMOVE the PUTC macro + calls once diagnosed. UART0 = 0x04140000,
- *     THR @+0x00, LSR @+0x14 (THRE = bit 5). ***
- *
  * Reached by the polyglot entry 0x1400006F (`b #444`). Copies itself to scratch
  * SRAM (0x40130000), jumps there, copies the arm FSBL body down to BL2_BASE
  * (0x40100000), enters it. Cache-maintains each copy (dc cvau + ic iallu).
@@ -13,19 +8,8 @@
 	.arch armv8-a
 	.section .text
 
-	/* emit byte \ch on UART0, polling THRE. clobbers x20-x22 (unused by stub). */
-	.macro	PUTC ch
-	movz	x20, #0x414, lsl #16	/* x20 = 0x04140000 (UART0) */
-.Lw\@:
-	ldr	w21, [x20, #0x14]	/* LSR */
-	tbz	w21, #5, .Lw\@		/* wait THRE (bit 5) */
-	mov	w22, #\ch
-	str	w22, [x20]		/* THR */
-	.endm
-
 	.globl _start
 _start:
-	PUTC	0x41			/* 'A' -- stub entered */
 	adr	x9, _start
 	ldr	w10, pool_scratch	/* SCRATCH  */
 	ldr	w11, pool_body_dst	/* BODY_DST */
@@ -43,7 +27,6 @@ _start:
 	str	w0, [x16], #4
 	subs	x17, x17, #4
 	b.gt	.Lselfcopy
-	PUTC	0x42			/* 'B' -- self-copy done */
 
 	/* flush [SCRATCH, SCRATCH+len): clean D->PoU + invalidate I */
 	mov	x0, x10
@@ -63,7 +46,6 @@ _start:
 	ic	iallu
 	dsb	ish
 	isb
-	PUTC	0x43			/* 'C' -- flush1 done, about to jump to scratch */
 
 	/* 2. jump to _stage2 inside the SCRATCH copy */
 	adr	x0, _stage2
@@ -72,7 +54,6 @@ _start:
 	br	x0
 
 _stage2:
-	PUTC	0x44			/* 'D' -- running from SCRATCH */
 	mov	x15, x12
 	mov	x16, x11
 	mov	x17, x13
@@ -81,7 +62,6 @@ _stage2:
 	str	w0, [x16], #4
 	subs	x17, x17, #4
 	b.gt	.Lbodycopy
-	PUTC	0x45			/* 'E' -- body copy done */
 
 	/* flush [BODY_DST, BODY_DST+len) */
 	mov	x0, x11
@@ -101,7 +81,6 @@ _stage2:
 	ic	iallu
 	dsb	ish
 	isb
-	PUTC	0x46			/* 'F' -- about to enter the FSBL body */
 
 	br	x11
 

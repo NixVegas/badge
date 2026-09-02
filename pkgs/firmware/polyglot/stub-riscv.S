@@ -1,34 +1,18 @@
 /*
  * pkgs/firmware/polyglot/stub-riscv.S -- riscv64 (T-Head C906) relocating stub (#48).
  *
- * *** DEBUG BUILD: UART trace markers (A..F) at each stage. The riscv boot
- *     E:RESETs (traps) after the ROM's `.J.`; the last marker on serial
- *     pinpoints the failing stage. REMOVE the PUTC macro + calls once
- *     diagnosed. UART0 = 0x04140000, THR @+0x00, LSR @+0x14 (THRE = bit 5). ***
- *
  * Reached by the polyglot entry 0x1400006F (`j 320`) via a jal trampoline.
- * Copies itself to scratch SRAM (0x0C030000), jumps there, copies the riscv
- * FSBL body down to BL2_BASE (0x0C000000), enters it. Cache-maintains each copy
- * (dcache.cpa + sync.s + icache.iall + fence.i, T-Head raw encodings).
+ * Copies itself to scratch (0x0C00B000, inside the ROM-loaded image -- see the
+ * pool comment), jumps there, copies the riscv FSBL body down to BL2_BASE
+ * (0x0C000000), enters it. Cache-maintains each copy (dcache.cpa + sync.s +
+ * icache.iall + fence.i, T-Head raw encodings).
  */
 	.option norvc
 	.section .text
 
-	/* emit byte \ch on UART0, polling THRE. clobbers s1-s3 (s0=&_start kept). */
-	.macro	PUTC ch
-	li	s1, 0x04140000
-.Lw\@:
-	lw	s2, 0x14(s1)
-	andi	s2, s2, 0x20
-	beqz	s2, .Lw\@
-	li	s3, \ch
-	sw	s3, 0(s1)
-	.endm
-
 	.globl _start
 _start:
 	lla	s0, _start		/* s0 = runtime &_start */
-	PUTC	0x41			/* 'A' -- stub entered */
 	lla	t0, pool_scratch
 	lw	t1, 0(t0)		/* SCRATCH  */
 	lw	t2, 4(t0)		/* BODY_DST */
@@ -48,7 +32,6 @@ _start:
 	addi	a1, a1, 4
 	addi	a2, a2, -4
 	bgtz	a2, .Lselfcopy
-	PUTC	0x42			/* 'B' -- self-copy done */
 
 	/* flush [SCRATCH, SCRATCH+len): clean D per line + sync + invalidate I */
 	mv	a5, t1
@@ -63,7 +46,6 @@ _start:
 	.word	0x0100000b		/* icache.iall */
 	fence
 	fence.i
-	PUTC	0x43			/* 'C' -- flush1 done, about to jump to scratch */
 
 	/* 2. jump to _stage2 inside the SCRATCH copy */
 	lla	a4, _stage2
@@ -72,7 +54,6 @@ _start:
 	jr	a4
 
 _stage2:
-	PUTC	0x44			/* 'D' -- running from SCRATCH */
 	mv	a0, t3
 	mv	a1, t2
 	mv	a2, t4
@@ -83,7 +64,6 @@ _stage2:
 	addi	a1, a1, 4
 	addi	a2, a2, -4
 	bgtz	a2, .Lbodycopy
-	PUTC	0x45			/* 'E' -- body copy done */
 
 	/* flush [BODY_DST, BODY_DST+len) */
 	mv	a5, t2
@@ -98,7 +78,6 @@ _stage2:
 	.word	0x0100000b		/* icache.iall */
 	fence
 	fence.i
-	PUTC	0x46			/* 'F' -- about to enter the FSBL body */
 
 	jr	t2
 
