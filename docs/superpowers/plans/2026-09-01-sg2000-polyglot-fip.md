@@ -633,19 +633,69 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Prereq load (ask the human up front):** SD reader available for recovery; serial console
 (ser2net tcp/3333) up; board switch reachable to set AUTO.
 
-- [ ] **Step 1: Deploy the polyglot as fip.bin** (over eth0 per the deploy path) OR flash a
+- [x] **Step 1: Deploy the polyglot as fip.bin** (over eth0 per the deploy path) OR flash a
   fresh SD. Keep `fip-arm.bin`/`fip-riscv.bin` present.
-- [ ] **Step 2: ARM strap.** `nix-badge core arm`, switch AUTO, reboot. Serial expected: the
+- [x] **Step 2: ARM strap.** `nix-badge core arm`, switch AUTO, reboot. Serial expected: the
   arm FSBL banner (`FSBL <ver>...`, no `E:RESET`), boot to Linux, `readlink /run/booted-system`
   = the arm generation. **Validates:** entry word + arm trampoline + relocation + primary slots.
-- [ ] **Step 3: RISC-V strap.** `nix-badge core riscv`, reboot. Serial expected: the riscv
+- [x] **Step 3: RISC-V strap.** `nix-badge core riscv`, reboot. Serial expected: the riscv
   FSBL banner, boot to Linux. **Validates:** riscv trampoline + the `bl2_opt.c` secondary-slot
   patch + BLCP_2ND/LOADER_2ND_B packing.
-- [ ] **Step 4: Confirm no `E:RESET:plat/mars/platform.c` on either strap.** If either fails,
+- [x] **Step 4: Confirm no `E:RESET:plat/mars/platform.c` on either strap.** If either fails,
   ROLL BACK: `cp fip-arm.bin fip.bin` (still-booting core or SD reader), then bisect from the
   serial trace (which stage's NOTICE was last printed).
-- [ ] **Step 5: Record** the split in the target's RESULTS.md (both cores boot from one
+- [x] **Step 5: Record** the split in the target's RESULTS.md (both cores boot from one
   static fip; core-switch = latch-only, no SD touch). Mark #48 done.
+
+### Bench findings (2026-09-02) — two bugs, both fatal, found by JTAG + UART markers
+
+The first polyglot fip failed on BOTH cores (arm: silent hang; riscv:
+`E:RESET:plat/mars/platform.c:114` loop). A–F UART trace markers were added to
+the stubs, and the CH347 JTAG (C906 TAP, IDCODE 0x10000b6f) supplied the trap
+CSRs. Sequence of discovery:
+
+1. **The ROM jumps to BL2 image offset 0x20, not word 0.** JTAG halt in the
+   E:RESET loop: `mepc=0x0C000020, mcause=2` (illegal instruction), entry word
+   intact at 0x0C000000, reloc never ran. 0x20 is `bl2_entrypoint_real` past the
+   vendor's 8-word `bl2_head`. Fix: entry word + both stub landings move to
+   +0x20 (`merge_bl2.py ENTRY_OFF`). After this fix ARM booted A→F→Linux;
+   riscv printed `A` then E:RESET.
+2. **The riscv stub's `lla`s were never resolved.** riscv GAS always emits
+   `R_RISCV_PCREL_HI20/LO12` for `lla` — even to local labels (relaxation
+   design) — and the build objcopy'd the *unlinked* .o, leaving each `lla` as
+   `auipc rd,0; addi rd,rd,0` (= its own address). JTAG:
+   `mepc=stub+0x54` (the self-copy's first `sw`), `mcause=6` (misaligned
+   store), `mtval=0x297` — the `auipc t0,0` *encoding* loaded as the scratch
+   pointer. Fix: `ld --no-relax -Ttext=0` before objcopy (still PIC; --no-relax
+   keeps the pool at the stub tail). The arm stub had the same latent bug on
+   its single `.globl` symbol (`adr x9,_start` → `adr x9,#0`) but booted by
+   accidental cancellation (x9 was both copy-source and jump-delta base); it is
+   linked now too.
+
+Also hardened: riscv SCRATCH moved into the dead gap between the riscv body's
+landing zone and its packed source (provably-writable, inside the ROM-loaded
+image), with merge-tool asserts that a body-size change closing the gap fails
+the build. Mask ROM dumped over JTAG for reference
+(`c906-maskrom.bin`, 98304 B, sha256 e4fed508…).
+
+Result: ONE static fip.bin boots either core; switch = `nix-badge core <arch>`
++ reboot (board switch in AUTO), no SD contact. Verified over the network:
+deploy → latch riscv → reboot → `uname -m` = riscv64.
+
+### Core-switch proven both directions (2026-09-02)
+
+- **arm→riscv**: from ARM, `nix-badge core riscv` + reboot → boots riscv64 (clean).
+- **riscv→arm**: from RISC-V, `nix-badge core arm` (strap readback flips to `0 (arm)`)
+  + reboot → lands on aarch64 (`strap readback: 0 (arm)`, `uname -m` = aarch64).
+  The riscv-side test was messy only because the riscv fix Engine was OOM-thrashing
+  the 432 MB board (a NON-`0x20`/polyglot issue -- tracked separately: cap/merge the
+  fix Engine so two ~72 MB Engines fit alongside the new wifi stack). The latch write
+  + watchdog reboot themselves are solid; a premature serial read mid-OOM-churn made
+  it *look* like it booted riscv before it settled on arm.
+
+**#48 done**: one static `fip.bin` boots either core; core-select is a GPIO latch
+flip (`nix-badge core <arch>`) + reboot with the board switch in AUTO -- decoupled
+from the SD card. The reboot itself works on both cores via the shared dw_wdt.
 
 ---
 
