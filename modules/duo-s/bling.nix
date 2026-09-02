@@ -70,9 +70,19 @@ let
       ExecStart = "${pkg}/bin/nix-badge bling run --config ${configFile} --backend ${cfg.backend}";
       # on-failure, not always. The service exits 0 when the spidev node never
       # appears, which is what a core without an SPI3 pinmux does, and we must
-      # not spin on that.
+      # not spin on that. RestartSec is deliberately long: a fix-Engine OOM-kill
+      # is a *failure* (SIGKILL), and a 1s respin tight-loops the OOM. 20s lets
+      # the system breathe between attempts.
       Restart = "on-failure";
-      RestartSec = 1;
+      RestartSec = 20;
+      # Cap the fix Engine to its OWN cgroup so a runaway eval is OOM-killed as a
+      # SERVICE, not by starving PID1. This matters on riscv: there the Engine's
+      # resident set blows the 512MB board and, with systemd.watchdog armed, a
+      # PID1 stall resets the SoC -> boot loop. ARM's LED Engine is ~5MB RSS, so
+      # this never triggers there; it only bounds a riscv blowup. (Root-causing
+      # the riscv-vs-arm RSS gap is #27/#51; this is the safety floor.)
+      MemoryMax = "96M";
+      MemorySwapMax = "128M";
       # No real-time priority. The WS2812 flicker under load came from PIO SPI
       # underrunning the TX FIFO; the DTS now feeds the FIFO by DMA (see the spi3
       # dmas / &dmac), so the CPU no longer clocks out frames and the painter's

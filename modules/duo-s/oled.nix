@@ -223,9 +223,19 @@ in
         # the oled daemon exits 0 when the panel is absent (a core that does not mux the SAO
         # i2c, so /dev/i2c-1 has nothing at 0x3c): a clean no-op, not a failure,
         # so Restart=on-failure will not spin on such a core. A real fault
-        # (mid-run i2c error) exits nonzero and we retry.
+        # (mid-run i2c error) exits nonzero and we retry. RestartSec is long so a
+        # fix-Engine OOM-kill (SIGKILL = failure) does not tight-respin the OOM.
         Restart = "on-failure";
-        RestartSec = 2;
+        RestartSec = 20;
+        # Cap the fix Engine to its OWN cgroup so a runaway Bad Apple eval is
+        # OOM-killed as a SERVICE, not by starving PID1 (which on riscv, with
+        # systemd.watchdog armed, resets the SoC -> boot loop). ARM's OLED Engine
+        # plateaus ~57-81MB RSS and lives inside zram, so 220M RAM + 512M swap
+        # never triggers there; it only bounds a riscv blowup. The cgroup OOM
+        # also LOGS the RSS at kill time -- the controlled riscv measurement that
+        # the boot loop otherwise prevents. See #27/#51.
+        MemoryMax = "220M";
+        MemorySwapMax = "512M";
         # Mutable state (leds.conf, oled.state, oled.backend) lives in /etc/nixbadge,
         # created declaratively (systemd.tmpfiles + nixbadge-content.service, which is
         # ordered Before= this unit) and by nix-badge's own mkdir at startup. The
