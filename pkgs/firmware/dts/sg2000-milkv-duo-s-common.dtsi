@@ -112,6 +112,34 @@
 };
 
 /*
+ * pstore/ramoops: a small DRAM region the kernel dumps oops/panic logs into, so
+ * a crash survives a reboot and shows up in /sys/fs/pstore (#50). It MUST sit at
+ * a fixed address that (a) is NOT the kernel image/data and (b) u-boot does not
+ * load into, so a warm reset preserves it. From the live iomem the kernel is at
+ * 0x81000000..~0x84e00000 and u-boot loads the DTB/initrd up at ~0x920d9000; the
+ * gap around 0x88000000 (128MB into DRAM) is free System RAM on BOTH cores (arm
+ * DRAM 0x80000000..0x9A600000, riscv 0x80000000..0xA0000000) and untouched at
+ * boot -- so ramoops data at 0x88000000 rides through a warm reboot. no-map (the
+ * ramoops binding reserves it) removes 1MB from general RAM. PSTORE=y is in the
+ * kernel; the =m PSTORE_RAM (ramoops) module is loaded from the initrd (base.nix).
+ * Both cores use 1/1 address/size cells, so this shared node's reg is portable.
+ */
+/ {
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		ramoops@88000000 {
+			compatible = "ramoops";
+			reg = <0x88000000 0x100000>;      /* 1 MB */
+			record-size = <0x00020000>;       /* 128 KB per oops/panic dump */
+			console-size = <0x00020000>;      /* 128 KB kernel-console ring */
+		};
+	};
+};
+
+/*
  * SPI3 (DesignWare APB SSI) on the 40-pin header drives BOTH the WS2812 LED
  * ring (/dev/spidev3.0) and the Sharp Memory Display (display@1) over ONE bus
  * with the CS-AND-gate wiring: U10 gates LED_DIN = CS AND SDO, and the front

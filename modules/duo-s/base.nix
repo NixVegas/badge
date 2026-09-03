@@ -80,6 +80,14 @@
       systemd.services."serial-getty@ttyS0".enable = true;
       systemd.services."getty@tty1".enable = true;
 
+      # pstore/ramoops (#50): dump kernel oops/panic to the reserved DRAM region
+      # (ramoops@88000000 in the shared dtsi) so a crash survives a reboot and
+      # reads back from /sys/fs/pstore. PSTORE=y is already in the kernel and
+      # PSTORE_RAM is =m; load the ramoops module from the INITRD so it registers
+      # the kmsg dumper early enough to catch most panics (not just post-boot
+      # ones). No kernel rebuild -- just the module + the DT node.
+      boot.initrd.kernelModules = [ "ramoops" ];
+
       # Boot via U-Boot's extlinux. The vendor FSBL still runs first and is
       # packaged per-core in core-*.nix (ATF for ARM, OpenSBI for RISC-V).
       boot.loader.grub.enable = false;
