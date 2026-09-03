@@ -77,6 +77,7 @@
             }
             ./modules/duo-s/common.nix
             ./modules/duo-s/base.nix
+            ./modules/duo-s/soc-features.nix
             ./modules/duo-s/wifi.nix
             ./modules/duo-s/bling.nix
             ./modules/duo-s/oled.nix

@@ -112,17 +112,28 @@
 };
 
 /*
- * pstore/ramoops: a small DRAM region the kernel dumps oops/panic logs into, so
- * a crash survives a reboot and shows up in /sys/fs/pstore (#50). It MUST sit at
- * a fixed address that (a) is NOT the kernel image/data and (b) u-boot does not
- * load into, so a warm reset preserves it. From the live iomem the kernel is at
- * 0x81000000..~0x84e00000 and u-boot loads the DTB/initrd up at ~0x920d9000; the
- * gap around 0x88000000 (128MB into DRAM) is free System RAM on BOTH cores (arm
- * DRAM 0x80000000..0x9A600000, riscv 0x80000000..0xA0000000) and untouched at
- * boot -- so ramoops data at 0x88000000 rides through a warm reboot. no-map (the
- * ramoops binding reserves it) removes 1MB from general RAM. PSTORE=y is in the
- * kernel; the =m PSTORE_RAM (ramoops) module is loaded from the initrd (base.nix).
- * Both cores use 1/1 address/size cells, so this shared node's reg is portable.
+ * pstore/ramoops: a small DRAM region the kernel dumps oops/panic logs (and the
+ * console ring) into, so a crash survives a reboot and shows up in /sys/fs/pstore
+ * (#50). DRAM contents are NOT cleared by a warm reset on this SoC, so the region
+ * still holds the dying log when the kernel comes back up.
+ *
+ * Address 0x90000000 matches Armbian's validated placement (armbian/build#10326,
+ * patches 0056/0057) rather than a guessed gap. Both ends of DRAM are already
+ * spoken for: u-boot loads the kernel/dtb/initrd LOW (0x80200000..0x84000000) and
+ * relocates the dtb/initrd HIGH, just under the top of RAM; the C906L coprocessor
+ * region sits at 0x9fe00000 when that overlay is enabled. 0x90000000 is the clear
+ * middle -- nothing else claims it, and it is far enough below 0x9fe00000 that the
+ * C906L overlay cannot collide. (Our earlier 0x88000000 was never proven: the
+ * console region was never captured because PSTORE_CONSOLE was off -- now enabled
+ * in soc-features.nix -- so that address choice was untested rather than wrong.)
+ *
+ * no-map is deliberately ABSENT, as on most in-tree ramoops nodes: the region only
+ * has to be kept out of the page allocator. Left mapped, pfn_valid() holds and
+ * persistent_ram_buffer_map() takes the vmap path meant for ordinary DRAM instead
+ * of falling back to ioremap. Both cores use 1/1 address/size cells, so this
+ * shared node's reg is portable. PSTORE=y is in the kernel; PSTORE_RAM (=m) is
+ * loaded from the initrd (base.nix); PSTORE_CONSOLE/PSTORE_PMSG are enabled in
+ * soc-features.nix; panic=10 (soc-features.nix) reboots via the normal path.
  */
 / {
 	reserved-memory {
@@ -130,10 +141,10 @@
 		#size-cells = <1>;
 		ranges;
 
-		ramoops@88000000 {
+		ramoops@90000000 {
 			compatible = "ramoops";
-			reg = <0x88000000 0x100000>;      /* 1 MB */
-			record-size = <0x00020000>;       /* 128 KB per oops/panic dump */
+			reg = <0x90000000 0x100000>;      /* 1 MB */
+			record-size = <0x00008000>;       /* 32 KB per oops/panic dump */
 			console-size = <0x00020000>;      /* 128 KB kernel-console ring */
 		};
 	};

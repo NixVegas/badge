@@ -19,12 +19,25 @@
 let
   dtsDir = ./dts;
   dts = "${dtsDir}/sg2000-milkv-duo-s.dts";
+  # Build the DTB from a POST-PATCHED kernel tree. kernel.src is the raw upstream
+  # tarball, but the mainline 7.2 sophgo dtsi our board DTS #includes (sg2000-
+  # milkv-duo-module-01.dtsi -> sg2000.dtsi) lacks the SoC peripheral nodes
+  # (thermal, pwm, efuse, mailbox, i2s, ...). Armbian's DTS patches add them with
+  # the correct arm64 GIC interrupt specifiers; apply them here so our #include
+  # chain picks the nodes up. The matching DRIVER patches ride the kernel build
+  # itself (see modules/duo-s/soc-features.nix); board-level hunks target the
+  # mainline board .dts we do not #include, so they are inert for this DTB.
+  patchedSrc = pkgs.applyPatches {
+    name = "linux-${kernel.version}-sophgo-dts-patched";
+    src = kernel.src;
+    patches = import ../kernel/patches/armbian/dts-patches.nix;
+  };
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "duos-arm-dtb";
   version = kernel.version;
 
-  src = kernel.src;
+  src = patchedSrc;
 
   nativeBuildInputs = [ pkgs.buildPackages.buildPackages.gcc pkgs.buildPackages.buildPackages.dtc ];
 
