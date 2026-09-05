@@ -22,7 +22,6 @@
   config,
   lib,
   pkgs,
-  badgeFixSrc,
   badgeContentTree,
   ...
 }:
@@ -33,7 +32,6 @@ let
   # the initrd instance stays static and C-API-free.
   pkg = import ../../pkgs/badge/nix-badge.nix {
     inherit pkgs;
-    fixSrc = badgeFixSrc;
     nixEval = false;
   };
 

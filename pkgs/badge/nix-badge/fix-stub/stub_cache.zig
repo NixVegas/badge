@@ -1,5 +1,5 @@
 //! THROWAWAY fetch-less FetchService: same public type surface + method
-//! signatures as fetch_cache.FetchCache, but no libcurl/libgit2 — every network
+//! signatures as fetch_cache.FetchCache, but no libcurl/libgit2. Every network
 //! fetch returns error.FetchUnsupported. Proves expr compiles+links without the
 //! curl/git C closure (badge has no network fetch needs).
 const std = @import("std");

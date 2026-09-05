@@ -23,7 +23,6 @@
   config,
   lib,
   pkgs,
-  badgeFixSrc,
   ...
 }:
 let
@@ -31,7 +30,6 @@ let
 
   pkg = import ../../pkgs/badge/nix-badge.nix {
     inherit pkgs;
-    fixSrc = badgeFixSrc;
     # No Nix C API here: the LED path only ever evals through fix, and this binary
     # must stay STATIC (it lives in the initrd and survives switch_root). Dropping
     # the C API also skips the ~15-minute static archive link -- this instance
