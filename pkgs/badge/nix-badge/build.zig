@@ -4,25 +4,37 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // When packaging feeds us a pinned+stubbed fix source tree (see
-    // nix-badge.nix), `-Dfix-src` points at it and we link psyclyx/fix's
-    // fetch-less `expr` evaluator in. When absent the tool builds exactly as
-    // before, minus eval: `fix-selftest` reports eval is unavailable. This is
-    // the FOUNDATION for per-frame Nix eval of LED patterns; it is not yet
-    // wired into any runtime loop.
-    const fix_src = b.option([]const u8, "fix-src", "Path to a pinned, fetch-less fix source tree; enables the embedded expr evaluator");
+    // The embedded evaluator comes from the pinned `fix` dependency, patched by
+    // `patchedFix` below. `-Dfix=false` builds without it, and `fix-selftest` then
+    // reports it as unavailable.
+    //
+    // fix's evaluator runs on aarch64, riscv64, and x86_64. Any other target
+    // builds without it rather than fail, because the fiber support it needs is
+    // written per architecture.
+    const fix_supported = switch (target.result.cpu.arch) {
+        .aarch64, .riscv64, .x86_64 => true,
+        else => false,
+    };
+    const want_fix = b.option(bool, "fix", "embed the fix evaluator") orelse fix_supported;
+    if (want_fix and !fix_supported) {
+        std.debug.panic("nix-badge: fix has no fiber support for {t}", .{target.result.cpu.arch});
+    }
+    const fix_src: ?std.Build.LazyPath = if (want_fix) patchedFix(b) else null;
     const have_fix = fix_src != null;
 
-    // Nix C API backend (upstream libnixexpr via nix_api_*): a SECOND per-frame evaluator
-    // alongside fix, for an A/B comparison. Linked when `-Dnix-include` is provided (aarch64
-    // only; see nix-badge.nix). The libs are C++/libstdc++, so we link libstdc++.a + libgcc.a
-    // by full path (`-Dnix-objs`) and linkLibC (musl) -- NOT linkLibCpp (LLVM libc++ is
-    // ABI-incompatible with gcc libstdc++). Proven end-to-end by the spike.
-    const nix_include = b.option([]const u8, "nix-include", "colon-list of Nix C API include dirs");
-    const nix_libdirs = b.option([]const u8, "nix-libdirs", "colon-list of -L dirs for the nix static libs");
-    const nix_libs = b.option([]const u8, "nix-libs", "comma-list of -l names for the nix static libs");
-    const nix_objs = b.option([]const u8, "nix-objs", "colon-list of full-path .a objects (libstdc++.a, libgcc.a)");
-    const have_nix = nix_include != null;
+    // The upstream Nix C API backend: a SECOND per-frame evaluator beside fix, so
+    // the two can be compared on the same content. It is available on aarch64 only.
+    //
+    // pkg-config resolves the whole link. `linkSystemLibrary` runs it and takes the
+    // include directories, library directories, and library names from its answer,
+    // so this build needs no flags describing any of them. The packaging only has
+    // to put the right .pc files on PKG_CONFIG_PATH.
+    //
+    // The components are C++ built against gcc's libstdc++, so this links libc
+    // rather than libc++: LLVM's libc++ is not ABI-compatible with gcc's libstdc++.
+    const nix_eval = b.option(bool, "nix-eval", "link the upstream Nix C API backend") orelse
+        false;
+    const have_nix = nix_eval;
 
     // When eval is linked, force the LLVM backend: fix's threaded VM dispatcher
     // relies on `@call(.always_tail)`, which only LLVM implements. When eval is
@@ -67,7 +79,8 @@ pub fn build(b: *std.Build) void {
         // separately witnessed with the detector ON (ReleaseSafe host suite, zero
         // panics) after the Engine-move aliasing fix, so production drops the
         // detector. nix-badge's own code keeps `optimize` (ReleaseSafe safety).
-        const fix_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .Debug else .ReleaseFast;
+        const fix_optimize: std.builtin.OptimizeMode =
+            if (optimize == .Debug) .Debug else .ReleaseFast;
         const graph = fixExprGraph(b, src, target, fix_optimize);
         root.addImport("expr", graph.expr);
         root.addImport("runtime", graph.runtime);
@@ -80,33 +93,19 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
-    // Link the upstream Nix C API per the proven recipe (see the module doc). Only on the
-    // target exe (never the host test build); gated on `-Dnix-include`.
+    // Link the Nix C API through pkg-config. This applies only to the target
+    // executable, never to the host test build.
     if (have_nix) {
-        // @cImport in nixeval.zig needs the headers on the module; the exe needs the libs.
-        var incs = std.mem.tokenizeScalar(u8, nix_include.?, ':');
-        while (incs.next()) |dir| root.addIncludePath(.{ .cwd_relative = dir });
-        // NB: library paths / system libs / object files are Build.Module methods (on
-        // `root`), not Build.Step.Compile methods (on `exe`), in Zig 0.16.
-        if (nix_libdirs) |dirs| {
-            var it = std.mem.tokenizeScalar(u8, dirs, ':');
-            while (it.next()) |dir| root.addLibraryPath(.{ .cwd_relative = dir });
-        }
-        // Link the nix static libs TWICE (poor-man's --start-group) to resolve the circular
-        // nix-expr <-> nix-store <-> nix-util references without a raw linker group flag.
-        if (nix_libs) |libs| {
-            var pass: u8 = 0;
-            while (pass < 2) : (pass += 1) {
-                var it = std.mem.tokenizeScalar(u8, libs, ',');
-                while (it.next()) |name| root.linkSystemLibrary(name, .{});
-            }
-        }
-        // libstdc++.a + libgcc.a (the C++ runtime + _Unwind_*) by full path.
-        if (nix_objs) |objs| {
-            var it = std.mem.tokenizeScalar(u8, objs, ':');
-            while (it.next()) |p| root.addObjectFile(.{ .cwd_relative = p });
-        }
-        root.link_libc = true; // musl -- NOT libc++ (LLVM libc++ is ABI-incompatible with gcc libstdc++)
+        // One entry is enough: nix-expr-c.pc names the other components in its
+        // `Requires`, so pkg-config returns their include directories and
+        // libraries too.
+        //
+        // `use_pkg_config = .force` makes a missing or broken .pc file fail the
+        // build. The default would fall back to a bare `-lnix-expr-c`, which drops
+        // every include directory, and the @cImport in nixeval.zig would then fail
+        // with a much less obvious error.
+        root.linkSystemLibrary("nix-expr-c", .{ .use_pkg_config = .force });
+        root.link_libc = true;
     }
 
     const run_cmd = b.addRunArtifact(exe);
@@ -137,6 +136,93 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
 }
 
+/// Every change made to the fetched fix source, applied in this order.
+///
+/// The two stub files replace fix's network fetchers with versions that return
+/// `error.FetchUnsupported`. They use relative imports, so they have to sit inside
+/// fix's own `src/fetchers/` directory rather than be added as a module.
+const fix_edits = struct {
+    /// Files copied over the fetched tree, as destination and source pairs.
+    const overlays = [_][2][]const u8{
+        .{ "src/fetchers/stub_root.zig", "fix-stub/stub_root.zig" },
+        .{ "src/fetchers/stub_cache.zig", "fix-stub/stub_cache.zig" },
+    };
+
+    /// Patches applied with `patch -p1`, each with the reason it exists.
+    const patches = [_]struct { file: []const u8, why: []const u8 }{
+        .{
+            .file = "fix-stub/native-apply.patch",
+            .why = "Engine.applyValue and Engine.makeAttrs, so a compiled lambda can be " ++
+                "applied to a fresh scope with no source recompile. A chunk is a " ++
+                "permanent root, so compiling once per frame would leak one per frame.",
+        },
+        .{
+            .file = "fix-stub/gc-seed-pinned-minor.patch",
+            .why = "Seed the pinned region in a minor mark. Without it a live young " ++
+                "child reachable only from a pinned parent was swept, which the " ++
+                "collector then reported as a missed edge.",
+        },
+        .{
+            .file = "fix-stub/gc-always-major.patch",
+            .why = "Allow major-only collection per Engine, as a fallback for the same " ++
+                "fault reached through a tenured parent.",
+        },
+        .{
+            .file = "fix-stub/gc-sizeof-diet-x86only.patch",
+            .why = "Limit the object-size asserts to x86_64. They fail on aarch64 in " ++
+                "ReleaseFast, which is the mode the badge builds fix in.",
+        },
+        .{
+            .file = "fix-stub/riscv64-fiber.patch",
+            .why = "riscv64 fiber support, so the RISC-V core gets the evaluator too. " ++
+                "The hunks are gated at comptime, so they are inert elsewhere.",
+        },
+    };
+};
+
+/// The shell that applies the patches.
+///
+/// It copies the tree it is given into a fresh output directory and patches that,
+/// so the `WriteFile` output it reads from is never modified. The build cache
+/// treats a step's output as final, and patching it where it lies would apply the
+/// patches a second time on the next build, which fails.
+///
+/// `$1` is the output directory, `$2` is the tree to copy, and the arguments after
+/// them are the patch files in the order they must be applied.
+const fix_patch_script =
+    \\set -eu
+    \\out=$1; src=$2; shift 2
+    \\cp -R "$src/." "$out"
+    \\chmod -R u+w "$out"
+    \\for p in "$@"; do patch -p1 --batch -d "$out" -i "$p"; done
+;
+
+/// Fetch fix, overlay the stub fetchers, apply the patches, and return the
+/// patched tree.
+///
+/// This is two build steps rather than work done while the build graph is built.
+/// A `WriteFile` step copies the fetched tree, which is read-only, and lays the
+/// stub files over it. A `Run` step then produces the patched tree as its own
+/// output. Both are cached on their inputs, so the patches are applied again only
+/// when the pin, a stub, or a patch actually changes.
+fn patchedFix(b: *std.Build) std.Build.LazyPath {
+    const dep = b.dependency("fix", .{});
+
+    const overlaid = b.addWriteFiles();
+    const tree = overlaid.addCopyDirectory(dep.path(""), "", .{});
+    for (fix_edits.overlays) |overlay| {
+        _ = overlaid.addCopyFile(b.path(overlay[1]), overlay[0]);
+    }
+
+    const run = std.Build.Step.Run.create(b, "patch fix");
+    // The trailing "fix-patch" becomes $0, so the arguments below start at $1.
+    run.addArgs(&.{ "sh", "-c", fix_patch_script, "fix-patch" });
+    const out = run.addOutputDirectoryArg("fix");
+    run.addDirectoryArg(tree);
+    for (fix_edits.patches) |p| run.addFileArg(b.path(p.file));
+    return out;
+}
+
 /// The two modules nix-badge.zig imports from fix. `runtime` is exposed too so
 /// callers can name its types if needed; today fixeval.zig only needs `expr`.
 const FixGraph = struct {
@@ -144,25 +230,17 @@ const FixGraph = struct {
     runtime: *std.Build.Module,
 };
 
-/// Recreate psyclyx/fix's module graph for the `expr` evaluator, fetch-less:
-/// `fetchers` is pointed at the vendored stub root (already overlaid into
-/// `${fix_src}/src/fetchers/` by nix-badge.nix), so there is NO libcurl/libgit2
-/// and `expr` cross-links as a static musl binary with zero network symbols.
-/// Mirrors fix's build.zig up to the `expr` module (build_stub.zig proved it).
+/// Rebuild psyclyx/fix's module graph up to the `expr` evaluator.
+///
+/// This mirrors fix's own build.zig, with one change: `fetchers` points at the
+/// stub root that `patchedFix` overlaid, so there is no libcurl and no libgit2 and
+/// `expr` links with no network symbols at all.
 fn fixExprGraph(
     b: *std.Build,
-    fix_src: []const u8,
+    fix_src: std.Build.LazyPath,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) FixGraph {
-    // Source files live under ${fix_src}/src/...; reference them via a
-    // cwd-relative LazyPath (the store path is outside this build's root).
-    const srcPath = struct {
-        fn f(bb: *std.Build, root: []const u8, rel: []const u8) std.Build.LazyPath {
-            return .{ .cwd_relative = bb.fmt("{s}/{s}", .{ root, rel }) };
-        }
-    }.f;
-
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", "nix-badge-embed");
     build_options.addOption(bool, "debug_checks", optimize == .Debug);
@@ -184,7 +262,7 @@ fn fixExprGraph(
     const base_options_mod = base_options.createModule();
 
     const syntax_mod = b.addModule("syntax", .{
-        .root_source_file = srcPath(b, fix_src, "src/syntax/root.zig"),
+        .root_source_file = fix_src.path(b, "src/syntax/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -195,7 +273,7 @@ fn fixExprGraph(
     const gen_tables_exe = b.addExecutable(.{
         .name = "gen-parser-tables",
         .root_module = b.createModule(.{
-            .root_source_file = srcPath(b, fix_src, "src/syntax/gen_parser_tables.zig"),
+            .root_source_file = fix_src.path(b, "src/syntax/gen_parser_tables.zig"),
             .target = b.graph.host,
             .optimize = .Debug,
         }),
@@ -206,7 +284,7 @@ fn fixExprGraph(
     syntax_mod.addAnonymousImport("parser_tables", .{ .root_source_file = parser_tables_path });
 
     const base_mod = b.addModule("base", .{
-        .root_source_file = srcPath(b, fix_src, "src/base/root.zig"),
+        .root_source_file = fix_src.path(b, "src/base/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -222,7 +300,7 @@ fn fixExprGraph(
         const sha256_hw_obj = b.addObject(.{
             .name = "sha256_hw",
             .root_module = b.createModule(.{
-                .root_source_file = srcPath(b, fix_src, "src/base/sha256_hw.zig"),
+                .root_source_file = fix_src.path(b, "src/base/sha256_hw.zig"),
                 .target = b.resolveTargetQuery(hw_query),
                 .optimize = optimize,
             }),
@@ -234,7 +312,7 @@ fn fixExprGraph(
     syntax_mod.addImport("base", base_mod);
 
     const runtime_mod = b.addModule("runtime", .{
-        .root_source_file = srcPath(b, fix_src, "src/runtime/root.zig"),
+        .root_source_file = fix_src.path(b, "src/runtime/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -242,7 +320,7 @@ fn fixExprGraph(
     runtime_mod.addImport("base", base_mod);
 
     const store_mod = b.addModule("store", .{
-        .root_source_file = srcPath(b, fix_src, "src/store/root.zig"),
+        .root_source_file = fix_src.path(b, "src/store/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -253,7 +331,7 @@ fn fixExprGraph(
     // stub root (overlaid into src/fetchers/), links NO system libraries. libc
     // is fine (musl is always present); only curl/libgit2 are the cross pain.
     const fetchers_mod = b.addModule("fetchers", .{
-        .root_source_file = srcPath(b, fix_src, "src/fetchers/stub_root.zig"),
+        .root_source_file = fix_src.path(b, "src/fetchers/stub_root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -263,7 +341,7 @@ fn fixExprGraph(
     fetchers_mod.link_libc = true;
 
     const expr_mod = b.addModule("expr", .{
-        .root_source_file = srcPath(b, fix_src, "src/expr/root.zig"),
+        .root_source_file = fix_src.path(b, "src/expr/root.zig"),
         .target = target,
         .optimize = optimize,
     });

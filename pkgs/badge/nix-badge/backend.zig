@@ -1,17 +1,19 @@
-//! backend: the runtime-selectable evaluator seam.
+//! backend: the evaluator seam the runtime selects between.
 //!
-//! `Backend` is a union over the two per-frame evaluators -- `fixeval.FixBackend` (psyclyx
-//! fix's `expr`) and `nixeval.NixBackend` (the upstream Nix C API) -- so a single `--backend
-//! fix|nix` flag picks which one drives the OLED screens and LED patterns for an A/B on fps,
-//! per-frame eval time, and RSS. Both expose the SAME surface (`open`/`applyFrame`/`collect`/
-//! `deinit`/`count`/`name`), and both hand back a plain `eval.Frame`, so everything downstream
-//! (the decode in eval.zig, the playback pacing here) is evaluator-independent.
+//! `Backend` is a union over the two per-frame evaluators, `fixeval.FixBackend`
+//! and `nixeval.NixBackend`, so one `--backend fix|nix` flag picks which drives
+//! the OLED screens and the LED patterns. That makes the two comparable on frame
+//! rate, per-frame evaluation time, and memory. Both expose the same surface and
+//! both return a plain `eval.Frame`, so everything downstream of them, the decode
+//! in eval.zig and the playback pacing here, is evaluator-independent.
 //!
-//! The per-screen PLAYBACK state -- delta frame_index pacing, the young-GC collect cadence,
-//! the fault-drop -- lives HERE in the shared `ScreenSet` (OLED, N lambdas) / `Pattern` (LED,
-//! one lambda) holders rather than in either backend, so it is written once and shared. This
-//! file is NOT imported by eval.zig, so eval.zig stays dependency-free and host-testable via
-//! `zig test eval.zig`; backend.zig compiles only in the full build (and `zig build test`).
+//! The per-screen playback state lives HERE, in the shared `ScreenSet` for the
+//! OLED and `Pattern` for the LED ring, rather than in either backend: the
+//! frame-index pacing for delta screens, the collection cadence, and dropping a
+//! screen that faults. That way it is written once.
+//!
+//! eval.zig does not import this file, so eval.zig stays free of dependencies and
+//! can be tested on its own.
 
 const std = @import("std");
 const eval = @import("eval.zig");
@@ -21,7 +23,12 @@ const ws2812 = @import("ws2812.zig");
 
 const Rgb = ws2812.Rgb;
 
-/// Which evaluator to open. Same values as `eval.BackendKind`.
+/// Which evaluator to open. The same values as `eval.BackendKind`.
+///
+/// The render methods below keep an inferred error set on purpose. They are a
+/// dispatch shim over two evaluators whose own error sets differ, and fix's set
+/// comes from its Engine rather than from this codebase. Every caller recovers the
+/// same way, by dropping the screen, so none of them selects on the error value.
 pub const Kind = eval.BackendKind;
 
 /// A per-frame evaluator: either fix or the upstream Nix C API. `open` picks by `Kind`,
@@ -30,14 +37,19 @@ pub const Backend = union(enum) {
     fix: fixeval.FixBackend,
     nix: nixeval.NixBackend,
 
-    pub fn open(gpa: std.mem.Allocator, opts: eval.Opts, which: Kind, paths: []const []const u8) ?Backend {
+    pub fn open(
+        gpa: std.mem.Allocator,
+        opts: eval.Opts,
+        which: Kind,
+        paths: []const []const u8,
+    ) ?Backend {
         switch (which) {
             .nix => {
                 if (nixeval.have_nix) {
                     if (nixeval.NixBackend.open(gpa, opts, paths)) |b| return .{ .nix = b };
-                    std.log.warn("backend: nix requested but open failed; falling back to fix", .{});
+                    std.log.warn("backend: nix could not be opened; using fix", .{});
                 } else {
-                    std.log.info("backend: nix requested but not built on this arch; using fix", .{});
+                    std.log.info("backend: nix is not built on this arch; using fix", .{});
                 }
                 if (fixeval.FixBackend.open(gpa, opts, paths)) |b| return .{ .fix = b };
                 return null;
@@ -85,13 +97,25 @@ pub const Backend = union(enum) {
             .nix => .nix,
         };
     }
+
+    /// Read and clear the time spent collecting since the last call. Only fix
+    /// collects, so the nix arm always reports zero.
+    pub fn takeCollectNs(self: *Backend) i128 {
+        return switch (self.*) {
+            .fix => |*b| b.takeCollectNs(),
+            .nix => 0,
+        };
+    }
 };
 
-/// The OLED screen set over a chosen backend: N compiled lambdas plus the shared playback
-/// pacing. `play_idx` feeds `scope.frameIndex` so cumulative deltas are never skipped; it
-/// resets to 0 when the active screen changes so re-entry starts on a keyframe (see
-/// badapple-delta.md). Young Value garbage is swept every `eval.collect_every` frames
-/// (a no-op on the Boehm-GC nix backend).
+/// The OLED screen set over a chosen backend: N compiled lambdas plus the shared
+/// playback state.
+///
+/// `play_idx` feeds `scope.frameIndex`, so a screen that emits cumulative deltas
+/// never has one skipped. It resets to 0 when the active screen changes, so
+/// returning to a screen starts on a keyframe rather than applying a delta onto
+/// another screen's stale framebuffer. Young garbage is swept every
+/// `eval.collect_every` frames, which the nix backend ignores.
 pub const ScreenSet = struct {
     be: Backend,
     frame: u64 = 0,
@@ -99,7 +123,12 @@ pub const ScreenSet = struct {
     active_ix: ?usize = null,
     logged_error: bool = false,
 
-    pub fn open(gpa: std.mem.Allocator, opts: eval.Opts, which: Kind, paths: []const []const u8) ?ScreenSet {
+    pub fn open(
+        gpa: std.mem.Allocator,
+        opts: eval.Opts,
+        which: Kind,
+        paths: []const []const u8,
+    ) ?ScreenSet {
         const be = Backend.open(gpa, opts, which, paths) orelse return null;
         return .{ .be = be };
     }
@@ -120,22 +149,41 @@ pub const ScreenSet = struct {
         return self.be.kind();
     }
 
-    /// Apply screen `idx`, decode into the PERSISTENT framebuffer `out`, stamp any overlay
-    /// on top, sweep on the collect cadence, and return the clamped nextMs + Dirty region.
-    /// Logs ONCE on fault (the caller drops the screen).
-    pub fn renderOled(self: *ScreenSet, idx: usize, fields: eval.Fields, out: []u8) !eval.OledFrame {
+    /// Read and clear the time spent collecting since the last call.
+    pub fn takeCollectNs(self: *ScreenSet) i128 {
+        return self.be.takeCollectNs();
+    }
+
+    /// Apply screen `idx`, decode into the framebuffer `out`, which persists across
+    /// frames, stamp any overlay on top, sweep on the collection cadence, and
+    /// return the clamped frame period and the dirty region.
+    ///
+    /// A fault is logged ONCE, because the caller then drops the screen and a
+    /// per-frame log line would fill the journal.
+    pub fn renderOled(
+        self: *ScreenSet,
+        idx: usize,
+        fields: eval.Fields,
+        out: []u8,
+    ) !eval.OledFrame {
         return self.renderOledInner(idx, fields, out) catch |err| {
             if (!self.logged_error) {
-                std.log.err("oled: eval screen '{s}' render failed: {s}; dropping it", .{ self.name(idx), @errorName(err) });
+                std.log.err("oled: eval screen '{s}' failed to render ({t}); dropping it", .{
+                    self.name(idx), err,
+                });
                 self.logged_error = true;
             }
             return err;
         };
     }
 
-    fn renderOledInner(self: *ScreenSet, idx: usize, fields: eval.Fields, out: []u8) !eval.OledFrame {
-        // Screen switch -> restart playback at frame 0 (always a keyframe), so a delta
-        // screen never applies a delta onto another screen's stale framebuffer.
+    fn renderOledInner(
+        self: *ScreenSet,
+        idx: usize,
+        fields: eval.Fields,
+        out: []u8,
+    ) !eval.OledFrame {
+        // A screen change restarts playback at frame 0, which is always a keyframe.
         if (self.active_ix == null or self.active_ix.? != idx) {
             self.play_idx = 0;
             self.active_ix = idx;
@@ -144,12 +192,11 @@ pub const ScreenSet = struct {
         fr.frame_index = self.play_idx;
         const f = try self.be.applyFrame(idx, fr);
         var dirty = eval.decodeOledFrame(f, out, fr.width);
-        // Overlay: Nix stamped arbitrary bytes (e.g. an fps HUD) on top of the frame.
         if (f.overlay_n > 0) eval.applyOverlay(f.overlay, f.overlay_n, out, fr.width, &dirty);
         self.frame +%= 1;
         if (self.frame % eval.collect_every == 0) self.be.collect();
-        // Contract v2 `pause`: freeze the playback counter (the screen keeps
-        // rendering with a moving `t`, but frameIndex stands still).
+        // `pause` freezes the playback counter. The screen keeps rendering with a
+        // moving `t`, but frameIndex stands still.
         if (!f.pause) self.play_idx +%= 1;
         return .{
             .next_ms = eval.clampNextMs(f.next_ms),
@@ -158,10 +205,10 @@ pub const ScreenSet = struct {
         };
     }
 
-    /// Probe a screen's contract-v2 `hidden` flag: apply it ONCE with frameIndex 0
-    /// (also warms its first frame) and read the optional. Used at registry build so
-    /// the long-press cycle can skip hidden screens before ever visiting them. A
-    /// probe fault reports NOT hidden (the render path handles/drops faults itself).
+    /// Read a screen's `hidden` flag by applying it ONCE at frame 0, which also
+    /// warms its first frame. The registry uses this so the button cycle can skip
+    /// a hidden screen before it ever shows one. A fault here reports NOT hidden,
+    /// because the render path handles and drops a faulting screen itself.
     pub fn probeHidden(self: *ScreenSet, idx: usize, fields: eval.Fields) bool {
         var fr = fields;
         fr.frame_index = 0;
@@ -170,8 +217,9 @@ pub const ScreenSet = struct {
     }
 };
 
-/// The LED ring painter over a chosen backend: one compiled lambda applied per frame and
-/// decoded to brightness-scaled RGB. Same collect cadence + fault-drop as ScreenSet.
+/// The LED ring painter over a chosen backend: one compiled lambda applied every
+/// frame and decoded to RGB scaled by brightness. It uses the same collection
+/// cadence and the same drop-on-fault behaviour as `ScreenSet`.
 pub const Pattern = struct {
     be: Backend,
     frame: u64 = 0,
@@ -190,12 +238,13 @@ pub const Pattern = struct {
         return self.be.kind();
     }
 
-    /// Evaluate one LED frame: apply the lambda, decode `{ bitmap; nextMs }` into `out`
-    /// (brightness-scaled), return the clamped nextMs. Logs ONCE on fault.
+    /// Evaluate one LED frame: apply the lambda, decode its bitmap into `out`
+    /// scaled by brightness, and return the clamped frame period. A fault is
+    /// logged ONCE, because the caller then falls back to another pixel source.
     pub fn render(self: *Pattern, fields: eval.Fields, out: []Rgb) !u32 {
         return self.renderInner(fields, out) catch |err| {
             if (!self.logged_error) {
-                std.log.err("bling: eval render failed: {s}; falling back to computed", .{@errorName(err)});
+                std.log.err("bling: the eval pattern failed to render ({t}); falling back", .{err});
                 self.logged_error = true;
             }
             return err;
@@ -216,21 +265,28 @@ pub const Pattern = struct {
 // build (fix, since have_nix is false there). They prove the playback pacing + fault-drop
 // live in the holder, independent of the backend.
 
-const linux = @import("linux.zig");
+// A throwaway directory of screen files, removed when the test ends. The holders
+// load screens by path, so the tests need real files on disk.
+const TmpScreens = struct {
+    tmp: std.testing.TmpDir,
+    root_buf: [std.fs.max_path_bytes]u8 = @splat(0),
+    root_len: usize = 0,
 
-fn tmpDir(buf: []u8) ![:0]const u8 {
-    const dir = try std.fmt.bufPrintZ(buf, "/tmp/nbbe-{d}", .{linux.monotonicMsec()});
-    switch (linux.mkdir(dir.ptr, 0o755)) {
-        .created, .exists, .failed => {},
+    fn init() !TmpScreens {
+        var self: TmpScreens = .{ .tmp = std.testing.tmpDir(.{}) };
+        self.root_len = try self.tmp.dir.realPath(std.testing.io, &self.root_buf);
+        return self;
     }
-    return dir;
-}
 
-fn writeScreen(buf: []u8, dir: []const u8, name: []const u8, data: []const u8) ![]const u8 {
-    const path = try std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, name });
-    try linux.writeFile(path.ptr, data);
-    return path;
-}
+    fn deinit(self: *TmpScreens) void {
+        self.tmp.cleanup();
+    }
+
+    fn write(self: *TmpScreens, buf: []u8, name: []const u8, data: []const u8) ![]const u8 {
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = data });
+        return std.fmt.bufPrint(buf, "{s}/{s}", .{ self.root_buf[0..self.root_len], name });
+    }
+};
 
 test "ScreenSet.renderOled paces delta playback via frameIndex and resets on screen switch" {
     if (comptime !fixeval.have_fix) return;
@@ -238,15 +294,17 @@ test "ScreenSet.renderOled paces delta playback via frameIndex and resets on scr
     defer arena.deinit();
     const gpa = arena.allocator();
 
-    var dbuf: [256]u8 = undefined;
-    const dir = try tmpDir(&dbuf);
+    var screens_dir = try TmpScreens.init();
+    defer screens_dir.deinit();
     var abuf: [512]u8 = undefined;
     var bbuf: [512]u8 = undefined;
     // Screen A echoes its own frameIndex through bitmap[0]; screen B is constant.
-    const a = try writeScreen(&abuf, dir, "a.nix", "scope: { bitmap = [ scope.frameIndex ]; nextMs = 10; }");
-    const b = try writeScreen(&bbuf, dir, "b.nix", "scope: { bitmap = [ 9 ]; nextMs = 20; }");
+    const a_src = "scope: { bitmap = [ scope.frameIndex ]; nextMs = 10; }";
+    const a = try screens_dir.write(&abuf, "a.nix", a_src);
+    const b = try screens_dir.write(&bbuf, "b.nix", "scope: { bitmap = [ 9 ]; nextMs = 20; }");
 
-    var set = ScreenSet.open(gpa, .{ .io = std.testing.io }, .fix, &.{ a, b }) orelse return error.OpenFailed;
+    var set = ScreenSet.open(gpa, .{ .io = std.testing.io }, .fix, &.{ a, b }) orelse
+        return error.OpenFailed;
     defer set.deinit();
     try std.testing.expectEqual(@as(usize, 2), set.count());
     try std.testing.expectEqual(Kind.fix, set.kind());
@@ -270,15 +328,17 @@ test "ScreenSet applies an overlay on top of the decoded frame" {
     defer arena.deinit();
     const gpa = arena.allocator();
 
-    var dbuf: [256]u8 = undefined;
-    const dir = try tmpDir(&dbuf);
+    var screens_dir = try TmpScreens.init();
+    defer screens_dir.deinit();
     var abuf: [512]u8 = undefined;
     // Full frame writes byte 1,2,3,4 to fb[0..4]; overlay overwrites fb[1] with 0xEE.
     // overlay entry E = offset*256 + byte = 1*256 + 0xEE = 494, packed alone in the high half.
-    const src = "scope: { bitmap = [ 67305985 ]; nextMs = 33; overlay = [ 129499136 ]; overlayN = 1; }";
-    const s = try writeScreen(&abuf, dir, "ov.nix", src);
+    const src =
+        "scope: { bitmap = [ 67305985 ]; nextMs = 33; overlay = [ 129499136 ]; overlayN = 1; }";
+    const s = try screens_dir.write(&abuf, "ov.nix", src);
 
-    var set = ScreenSet.open(gpa, .{ .io = std.testing.io }, .fix, &.{s}) orelse return error.OpenFailed;
+    var set = ScreenSet.open(gpa, .{ .io = std.testing.io }, .fix, &.{s}) orelse
+        return error.OpenFailed;
     defer set.deinit();
     var fb: [512]u8 = @splat(0);
     _ = try set.renderOled(0, .{ .width = 128, .height = 32 }, &fb);
@@ -293,10 +353,11 @@ test "Pattern.render decodes an LED frame and reports nextMs" {
     defer arena.deinit();
     const gpa = arena.allocator();
 
-    var dbuf: [256]u8 = undefined;
-    const dir = try tmpDir(&dbuf);
+    var screens_dir = try TmpScreens.init();
+    defer screens_dir.deinit();
     var abuf: [512]u8 = undefined;
-    const p = try writeScreen(&abuf, dir, "led.nix", "scope: { bitmap = [ 16711680 65280 ]; nextMs = 40; }");
+    const led_src = "scope: { bitmap = [ 16711680 65280 ]; nextMs = 40; }";
+    const p = try screens_dir.write(&abuf, "led.nix", led_src);
 
     var pat = Pattern.open(gpa, .{ .io = std.testing.io }, .fix, p) orelse return error.OpenFailed;
     defer pat.deinit();

@@ -97,10 +97,13 @@ pub fn encodeFrame(enc: Encoding, pixels: []const Rgb, latch_bytes: usize, out: 
     @memset(out[pixels.len * bpl ..][0..latch_bytes], 0);
 }
 
-/// Scale a channel by num/255 (num 0..255), the software brightness step
-/// (a WS2812 chain has no per-pixel brightness byte).
-pub fn scaleChannel(v: u8, num: u32) u8 {
-    return @intCast(@as(u32, v) * num / 255);
+/// Scale a channel by `num`/255, the software brightness step. A WS2812 chain has
+/// no per-pixel brightness byte, so brightness must be applied to the colour.
+///
+/// `num` is a u8, so the full range is in range by construction and the result
+/// cannot exceed `v`.
+pub fn scaleChannel(v: u8, num: u8) u8 {
+    return @intCast(@as(u16, v) * num / 255);
 }
 
 // -------------------------------------------------------------------- tests ---

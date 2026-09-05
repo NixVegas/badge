@@ -7,37 +7,27 @@
 #   nix-badge mmio ...    32-bit /dev/mem peek/poke for register bring-up
 #   nix-badge bling ...   the OLED bling engine (Bad Apple + screens)
 #
-# Built with Zig, cross-compiled to a STATIC musl binary. Static is deliberate:
-# a NixOS host has no /lib/ld-linux-*.so.1 interpreter, so a dynamically linked
-# cross binary would not run; a static musl binary has no interpreter and runs
-# as-is (and keeps the closure to nothing). Zig cross-compiles both cores
-# natively on the build host -- no QEMU, no target toolchain -- so we build with
-# buildPackages.zig against pkgs.stdenv.hostPlatform's target triple. The LED
-# service must keep running across switch_root; a static binary at its real
-# /nix/store path resolves identically before and after, with no libc to find.
-# When `fixSrc` is a psyclyx/fix source tree (threaded through from the flake's
-# `inputs.fix` via mkDuoS's specialArgs), nix-badge links fix's `expr` evaluator
-# in fetch-less: we overlay the vendored fetch-less fetchers stub onto the pinned
-# fix source and pass it as `-Dfix-src`. This is the build FOUNDATION for later
-# per-frame Nix eval of LED patterns; it is not yet wired into any runtime loop
-# (only the hidden `nix-badge fix-selftest` smoke test uses it). With fixSrc null
-# the tool builds exactly as before, minus eval, so callers that do not pass it
-# keep working. Either way the build stays fully offline: the patched fix source
-# is a local store path, and fix's fetchers are stubbed to error.FetchUnsupported
-# so there is NO curl/libgit2/network in the closure.
+# Built with Zig and cross-compiled to a STATIC musl binary.
 #
-# fix's evaluator runs natively on aarch64/x86_64; riscv64 is added by a vendored
-# patch (fix-stub/riscv64-fiber.patch: a riscv64 fiber contextSwitch asm + Context,
-# MAP_NORESERVE, a seq_cst fence, and hugetlb NORESERVE), qemu-proven via
-# fix-selftest. So BOTH badge cores get the full evaluator; only other host arches
-# (for which we do not ship) fall back to eval-less.
+# Static is deliberate. A NixOS host has no /lib/ld-linux-*.so.1 interpreter, so a
+# dynamically linked cross binary would not run, while a static musl binary needs
+# no interpreter and keeps the closure empty. The LED service also has to keep
+# running across switch_root, and a static binary at its store path resolves the
+# same before and after, with no libc to find. Zig cross-compiles both cores on
+# the build host, so there is no QEMU and no target toolchain.
+#
+# The fix evaluator is NOT passed in from here. build.zig.zon pins psyclyx/fix as
+# an ordinary Zig dependency, and build.zig patches the fetched tree itself: it
+# overlays the fetch-less fetcher stubs and applies fix-stub/*.patch. `zig.fetchDeps`
+# below fetches that dependency in a separate fixed-output derivation, so this
+# build still runs with no network. The stubs are what keep curl and libgit2 out of
+# the closure: every network fetch in the embedded evaluator returns
+# error.FetchUnsupported.
 {
   pkgs,
-  fixSrc ? null,
-  # Link the upstream Nix C API (libnixexpr) as a SECOND per-frame evaluator backend
-  # alongside fix, for an A/B comparison. aarch64 only (the evaluator runs on the arm core;
-  # riscv stays fix-only). The static-link recipe is proven -- see
-  # docs/superpowers/plans/2026-08-29-nix-c-api-backend.md.
+  # Link the upstream Nix C API as a SECOND per-frame evaluator beside fix, so the
+  # two can be compared on the same content. aarch64 only: that evaluator runs on
+  # the arm core and the riscv core stays on fix.
   nixEval ? true,
   # Link the Nix C API DYNAMICALLY (shared nixComponents .so's + a patchelf'd NixOS glibc
   # interpreter/rpath) instead of the static-musl archive link. The static LLD crunch of
@@ -63,59 +53,6 @@ let
       "riscv64-linux-musl"
     else
       throw "nix-badge: unsupported target ${hp.system}";
-
-  # aarch64 + riscv64 both link fix (riscv via the vendored fiber patch, see the
-  # arch note above); ignore fixSrc on any other host arch.
-  effectiveFixSrc = if (hp.isAarch64 || hp.isRiscV64) then fixSrc else null;
-
-  # Overlay the vendored fetch-less fetchers stub onto the pinned fix source.
-  # The stub files use relative imports (@import("fetch/types.zig")), so they
-  # must live inside fix's own src/fetchers/ at build time. runCommand produces
-  # a fresh, writable store path; buildPackages so it evaluates on the build
-  # host. Only built when fixSrc is provided (and the arch supports it).
-  patchedFixSrc =
-    if effectiveFixSrc == null then
-      null
-    else
-      pkgs.buildPackages.runCommand "fix-src-fetchless" { } ''
-        cp -r ${effectiveFixSrc} $out
-        chmod -R +w $out
-        cp ${./nix-badge/fix-stub/stub_root.zig} $out/src/fetchers/stub_root.zig
-        cp ${./nix-badge/fix-stub/stub_cache.zig} $out/src/fetchers/stub_cache.zig
-        # Add Engine.applyValue + Engine.makeAttrs (native apply + native attrs
-        # construction): apply a compile-once pattern lambda to a fresh per-frame
-        # scope with NO source recompile, so fix mints no new chunk per frame
-        # (chunks are permanent GC roots, never collected -- compile-per-frame
-        # would leak). The flake pin (2b23db57) matches the patch's base exactly.
-        patch -p1 -d $out < ${./nix-badge/fix-stub/native-apply.patch}
-        # GC missed-edge fix (#34), DEFINITIVE: the minor mark never seeded the pinned
-        # pre-arming region, so a live young child reachable only from a pinned parent (the
-        # compiled screen lambda + its captured lib, which acquire new young referents every
-        # frame and are NOT captured by the write barrier) was swept -> "minor mark not closed
-        # -- missed edge" panic on draw-heavy screens. seedPinnedRegionMinor walks the pinned
-        # region young-gated in both minor branches (O(pinned edges) ~ 8192 on the badge; the
-        # major already did the equivalent). Root-caused via fix-gc-repro; supersedes the
-        # earlier young-source-barrier attempt (which couldn't help -- the barrier never fires
-        # for these edges -- and bloated the remset into multi-second collects).
-        patch -p1 -d $out < ${./nix-badge/fix-stub/gc-seed-pinned-minor.patch}
-        # ...and the airtight belt (#34): force MAJOR-only collection. seedPinnedRegionMinor
-        # covers PINNED parents but the panic recurs with POST-arming tenured parents; a major
-        # rebuilds old/young from the true reachable set so it cannot sweep a live child at all.
-        # Enabled per-Engine via ev.setAlwaysMajor(true) in fixeval.zig.
-        patch -p1 -d $out < ${./nix-badge/fix-stub/gc-always-major.patch}
-        # Scope the Object-diet sizeOf asserts to x86_64: they fail on aarch64
-        # ReleaseFast (alignment differs), and the badge's production fix graph is
-        # ReleaseFast (gc_debug=ReleaseSafe would disable object-slot reuse ->
-        # ~160 leaked Object headers/frame; see build.zig fix_optimize).
-        patch -p1 -d $out < ${./nix-badge/fix-stub/gc-sizeof-diet-x86only.patch}
-        # riscv64 support: a riscv64 fiber contextSwitch + MAP_NORESERVE + seq_cst
-        # fence + hugetlb NORESERVE, so the RISC-V core gets the full evaluator too.
-        # Source-only + arch-gated at comptime, so the hunks are inert on aarch64 /
-        # x86_64; applies on every build. (qemu-proven via fix-selftest.)
-        patch -p1 -d $out < ${./nix-badge/fix-stub/riscv64-fiber.patch}
-      '';
-
-  fixArg = pkgs.lib.optionalString (patchedFixSrc != null) "-Dfix-src=${patchedFixSrc}";
 
   # ---- Nix C API backend (aarch64 only) --------------------------------------------------
   wantNix = nixEval && hp.isAarch64;
@@ -158,93 +95,175 @@ let
     chmod -R +w $out/include
     sed -i 's/\[\[deprecated([^]]*)\]\]//g' $out/include/*.h
   '';
+
+  # One flattened nix-expr-c.pc for Zig's pkg-config query to answer from.
+  #
+  # Zig calls `pkg-config nix-expr-c --cflags --libs`, with no --static, and keeps
+  # only the -I, -L, -l and -D arguments from the answer. The component .pc files
+  # as shipped do not survive that: the C++ libraries this needs sit in
+  # `Requires.private`, which a query without --static never expands, and the
+  # expansion emits some dependencies as absolute .a paths, which Zig's parser
+  # drops. Filtering the rest is wanted, because these files also carry
+  # `-Wl,--wrap`, which zig cc rejects.
+  #
+  # So resolve the whole graph ONCE here, at packaging time, and write the result
+  # into a single file's `Cflags` and `Libs`. Zig's plain query then gets the
+  # complete answer. Placing this directory first on PKG_CONFIG_PATH means it
+  # answers for nix-expr-c ahead of the real component.
+  #
+  # The patched headers come first in `Cflags`, so the copies with the C23
+  # attributes removed win over the originals.
+  nixEvalPkgConfig = pkgs.buildPackages.runCommand "nix-badge-nix-expr-c-pc" { } ''
+    export PKG_CONFIG_PATH=""
+    for p in $(cat ${nixClosure}/store-paths); do
+      for d in "$p/lib/pkgconfig" "$p/share/pkgconfig"; do
+        [ -d "$d" ] && PKG_CONFIG_PATH="$PKG_CONFIG_PATH:$d"
+      done
+    done
+    export PKG_CONFIG_PATH="''${PKG_CONFIG_PATH#:}"
+    pkgconfig=${pkgs.pkgsBuildBuild.pkg-config}/bin/pkg-config
+
+    cflags="-I${nixExprCHeaders}/include $("$pkgconfig" ${staticFlag} --cflags nix-expr-c)"
+
+    # Rewrite each absolute archive into a -L and -l pair naming the same file, so
+    # it survives Zig's argument filter. Order and repeats are preserved, because
+    # the aws components reference each other in a cycle.
+    #
+    # The pair drops the "lib" prefix and the ".a" suffix rather than using the
+    # linker's -l:<file> form, which Zig does not parse: it reads the whole
+    # ":libfoo.a" as a library name and then looks for a lib:libfoo.a to link.
+    # Only the archive exists in these directories, so a plain -l finds it.
+    libs="-L$out/lib"
+    for arg in ${extraLibDirFlags} $("$pkgconfig" ${staticFlag} --libs nix-expr-c) ${cxxRuntimeFlags}; do
+      case "$arg" in
+        /*.a)
+          base=''${arg##*/}
+          base=''${base#lib}
+          libs="$libs -L''${arg%/*} -l''${base%.a}"
+          ;;
+        *) libs="$libs $arg" ;;
+      esac
+    done
+
+    mkdir -p $out/lib/pkgconfig
+    ${lib.optionalString (!wantDynamic) ''
+      cp "$(find ${nixCcLib} -name libstdc++.a | head -1)" $out/lib/libnixbadge_cxx.a
+      cp "$(find ${nixCcMain} -name libgcc.a | head -1)" $out/lib/libnixbadge_gcc.a
+      chmod +w $out/lib/libnixbadge_cxx.a $out/lib/libnixbadge_gcc.a
+    ''}
+    cat > $out/lib/pkgconfig/nix-expr-c.pc <<EOF
+    Name: nix-expr-c
+    Description: The Nix C API, resolved for nix-badge
+    Version: ${nixExprC.version}
+    Cflags: $cflags
+    Libs: $libs
+    EOF
+  '';
+
+  # `--static` pulls in Requires.private, which is where the C++ libraries live.
+  # The dynamic link needs none of it: each .so finds its own dependencies through
+  # the rpath baked into it.
+  staticFlag = lib.optionalString (!wantDynamic) "--static";
+
+  # The library directories pkg-config omits, for four dependencies whose default
+  # output holds no lib directory, and the C++ runtime archives, which no .pc file
+  # names at all. libstdc++ is the C++ runtime and libgcc carries the unwinder.
+  extraLibDirFlags = lib.optionalString (!wantDynamic) (
+    lib.concatMapStringsSep " " (d: "-L${d}") nixExtraLibDirs
+  );
+  # The C++ runtime is linked under private names.
+  #
+  # Zig's command line treats `stdc++` as one of its libc++ spellings and turns
+  # `-lstdc++` into "link LLVM's libc++" instead of "find libstdc++.a". These
+  # components are built against gcc's libstdc++, and the two are not
+  # ABI-compatible, so that substitution ends in undefined `std::__cxx11` symbols.
+  # Copying the archives under names Zig has no opinion about links the real ones.
+  cxxRuntimeFlags = lib.optionalString (!wantDynamic) "-lnixbadge_cxx -lnixbadge_gcc";
+
+  nixArg = lib.optionalString wantNix "-Dnix-eval=true";
 in
-pkgs.buildPackages.stdenv.mkDerivation {
+pkgs.buildPackages.stdenv.mkDerivation (finalAttrs: {
   pname = "nix-badge";
   version = "0.2";
 
+  # Zig's build artifacts are kept out of this by .gitignore, which is what the
+  # flake's source copy honours. That matters beyond size: `.zig-cache` holds
+  # already-resolved dependencies, and a source copy carrying it makes
+  # `zig build --fetch` believe there is nothing left to fetch, which leaves the
+  # dependency derivation below empty.
   src = ./nix-badge;
 
-  # pkg-config is invoked by full store path in the buildPhase (below), not via
-  # nativeBuildInputs -- its cross setup hook prefixes the binary name and rewrites
-  # PKG_CONFIG_PATH, both of which fight the manual, absolute-path invocation we need
-  # to read the aarch64 nix .pc files.
+  # The Zig dependencies build.zig.zon pins, fetched in their own fixed-output
+  # derivation. That is the only step allowed to reach the network, and the build
+  # phase links it in as Zig's package directory before it builds anything.
+  #
+  # This hash covers every pinned dependency, so it changes whenever build.zig.zon
+  # does. `nix build` reports the expected value when it no longer matches.
+  zigDeps = pkgs.buildPackages.zig.fetchDeps {
+    inherit (finalAttrs) pname version src;
+    hash = "sha256-TRytzmJv2GkyRn7+sQBUhKtaNJ2NxX/0tnKBCufdtLU=";
+  };
+
+  # pkg-config is not in nativeBuildInputs on purpose. Its cross setup hook
+  # prefixes the binary name and rewrites PKG_CONFIG_PATH, and the buildPhase
+  # points Zig at a specific pkg-config and a specific search path instead.
+  #
+  # `patch` comes from stdenv, and build.zig uses it to apply the fix patches.
   nativeBuildInputs = [ pkgs.buildPackages.zig ];
 
-  dontConfigure = true;
+  # zig's setup hook owns the configure phase: it creates ZIG_GLOBAL_CACHE_DIR and
+  # then runs this, which is where the fetched dependencies become Zig's package
+  # directory. `dontConfigure` must stay off, or that phase never runs.
+  postConfigure = ''
+    ln -s "${finalAttrs.zigDeps}" "$ZIG_GLOBAL_CACHE_DIR/p"
+  '';
 
-  # Zig wants a writable HOME + global cache. The build is zero-dependency
-  # (IronStyle: `zig build` is the only tool), so it runs fully offline in the
-  # sandbox. `zig build` cross-compiles to the target and installArtifact + the
-  # --prefix put the static binary at $out/bin/nix-badge.
+  # `zig build` cross-compiles to the target, and installArtifact plus --prefix
+  # put the binary at $out/bin.
   buildPhase = ''
     runHook preBuild
-    export HOME="$TMPDIR"
-    export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
 
-    nixArgs=""
-    ${lib.optionalString (wantNix && wantDynamic) ''
-      # DYNAMIC Nix C API link: -l the shared components; their transitive deps
-      # (boost, curl, boehm-gc, ...) resolve through each .so's own baked rpath, so
-      # no archive/objs dance and the link takes seconds instead of ~15 minutes.
-      PC_DIRS=""
-      for p in $(cat ${nixClosure}/store-paths); do
-        for d in "$p/lib/pkgconfig" "$p/share/pkgconfig"; do [ -d "$d" ] && PC_DIRS="$PC_DIRS:$d"; done
-      done
-      export PKG_CONFIG_PATH="''${PC_DIRS#:}"
-      NIX_INC="${nixExprCHeaders}/include:${nixStoreC.dev}/include:${nixUtilC.dev}/include"
-      PKGCONFIG="${pkgs.pkgsBuildBuild.pkg-config}/bin/pkg-config"
-      NIX_LIBS=$("$PKGCONFIG" --libs-only-l nix-expr-c | tr ' ' '\n' | sed -n 's/^-l//p' | grep . | paste -sd,)
-      NIX_LIBDIRS=$("$PKGCONFIG" --libs-only-L nix-expr-c | tr ' ' '\n' | sed -n 's/^-L//p' | grep . | sort -u | paste -sd:)
-      nixArgs="-Dnix-include=$NIX_INC -Dnix-libdirs=$NIX_LIBDIRS -Dnix-libs=$NIX_LIBS"
-      echo "nix-badge: linking Nix C API backend DYNAMICALLY ($NIX_LIBS)"
-    ''}
-    ${lib.optionalString (wantNix && !wantDynamic) ''
-      # Nix C API link flags from pkg-config + the closure (the proven static-link recipe).
-      PC_DIRS=""
-      for p in $(cat ${nixClosure}/store-paths); do
-        for d in "$p/lib/pkgconfig" "$p/share/pkgconfig"; do [ -d "$d" ] && PC_DIRS="$PC_DIRS:$d"; done
-      done
-      export PKG_CONFIG_PATH="''${PC_DIRS#:}"
-
-      NIX_INC="${nixExprCHeaders}/include:${nixStoreC.dev}/include:${nixUtilC.dev}/include"
-      # -l names only (the full --libs also carries -Wl,--wrap, which zig cc rejects).
-      # A plain NATIVE pkg-config (pkgsBuildBuild -> unprefixed bin/pkg-config); the .pc
-      # files carry absolute store paths so no cross/target awareness is needed. The cross
-      # buildPackages.pkg-config only ships a target-prefixed binary.
-      PKGCONFIG="${pkgs.pkgsBuildBuild.pkg-config}/bin/pkg-config"
-      NIX_LIBS=$("$PKGCONFIG" --libs-only-l --static nix-expr-c | tr ' ' '\n' | sed -n 's/^-l//p' | grep . | paste -sd,)
-      # -L dirs from pkg-config + the 4 it omits (acl/bz2/unistring/llhttp).
-      NIX_LIBDIRS=$( {
-        "$PKGCONFIG" --libs-only-L --static nix-expr-c | tr ' ' '\n' | sed -n 's/^-L//p'
-        for d in ${builtins.concatStringsSep " " nixExtraLibDirs}; do echo "$d"; done
-      } | grep . | sort -u | paste -sd:)
-      # Some deps (boost_url, the aws-c-* / aws-crt-cpp S3 stack) appear in the .pc as
-      # FULL-PATH .a files, not -l/-L flags, so they must be linked as objects. Preserve
-      # pkg-config's order + repeats (circular aws deps). Then the C++ runtime archives:
-      # libstdc++.a + libgcc.a (has _Unwind_*).
-      NIX_ARCHIVES=$("$PKGCONFIG" --libs --static nix-expr-c | tr ' ' '\n' | grep -E '^/.*\.a$' | paste -sd:)
-      STDCPP=$(find ${nixCcLib} -name libstdc++.a 2>/dev/null | head -1)
-      LIBGCC=$(find ${nixCcMain} -name libgcc.a 2>/dev/null | head -1)
-      NIX_OBJS="$NIX_ARCHIVES:$STDCPP:$LIBGCC"
-
-      nixArgs="-Dnix-include=$NIX_INC -Dnix-libdirs=$NIX_LIBDIRS -Dnix-libs=$NIX_LIBS -Dnix-objs=$NIX_OBJS"
-      echo "nix-badge: linking Nix C API backend ($NIX_LIBS)"
+    ${lib.optionalString wantNix ''
+      # build.zig links the Nix C API with linkSystemLibrary, so Zig runs
+      # pkg-config itself and takes the include and library flags from its answer.
+      # `nixEvalPkgConfig` has already reduced the component graph to one
+      # nix-expr-c.pc, so all this build has to do is point Zig at it.
+      #
+      # Zig looks the tool up through $PKG_CONFIG, which is set here rather than
+      # by putting pkg-config in nativeBuildInputs: its cross setup hook prefixes
+      # the binary name and rewrites PKG_CONFIG_PATH, and both fight the single
+      # generated .pc file this build wants answered.
+      export PKG_CONFIG="${pkgs.pkgsBuildBuild.pkg-config}/bin/pkg-config"
+      export PKG_CONFIG_PATH="${nixEvalPkgConfig}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+      echo "nix-badge: linking the Nix C API backend through pkg-config"
     ''}
 
-    zig build -Dtarget=${zigTarget} -Doptimize=ReleaseSafe ${fixArg} $nixArgs --prefix "$out"
+    zig build -Dtarget=${zigTarget} -Doptimize=ReleaseSafe ${nixArg} --prefix "$out"
 
     ${lib.optionalString wantDynamic ''
-      # NixOS has no /lib/ld-linux-*.so.1: point the binary at nixpkgs' aarch64 glibc
-      # loader and bake an rpath for the DIRECT DT_NEEDEDs (the libnix*-c components,
-      # libstdc++, glibc); each nix .so resolves its own deps through its own rpath.
-      # The store paths written into the ELF are what make nix retain the shared libs
-      # in this package's closure.
-      RPATH="$NIX_LIBDIRS:${lib.getLib pkgs.stdenv.cc.cc}/lib:${pkgs.glibc}/lib"
+      # NixOS has no /lib/ld-linux-*.so.1, so point the binary at nixpkgs' aarch64
+      # loader and bake an rpath covering the libraries it names directly: the nix
+      # C API components, libstdc++, and glibc. Each nix shared library then finds
+      # its own dependencies through the rpath baked into it.
+      #
+      # The store paths written into the ELF are what keep nix from garbage
+      # collecting those shared libraries out from under this package.
+      RPATH="${
+        lib.concatStringsSep ":" (
+          map (p: "${lib.getLib p}/lib") [
+            nixExprC
+            nixStoreC
+            nixUtilC
+            nixFetchersC
+            pkgs.stdenv.cc.cc
+            pkgs.glibc
+          ]
+        )
+      }"
       ${pkgs.buildPackages.patchelf}/bin/patchelf \
         --set-interpreter ${pkgs.glibc}/lib/ld-linux-aarch64.so.1 \
         --set-rpath "$RPATH" "$out/bin/nix-badge"
-      echo "nix-badge: dynamic interpreter + rpath set"
+      echo "nix-badge: set the dynamic interpreter and rpath"
     ''}
 
     # ReleaseSafe embeds zig's bundled musl/std SOURCE PATHS in panic/debug
@@ -265,4 +284,4 @@ pkgs.buildPackages.stdenv.mkDerivation {
     description = "Badge control tool for the Milk-V Duo S NixOS badge (Zig)";
     platforms = pkgs.lib.platforms.linux;
   };
-}
+})

@@ -15,12 +15,11 @@
 # Apple blob in the closure; the ring still animates from leds.nix), and
 # width/height are passed to the runtime so a differently-sized 1-bit panel (a
 # Sharp Memory display, a 128x64 OLED) works without a code change.
-{ pkgs, lib, config, badgeFixSrc, ... }:
+{ pkgs, lib, config, ... }:
 let
   cfg = config.nixbadge.oled;
   nixBadge = import ../../pkgs/badge/nix-badge.nix {
     inherit pkgs;
-    fixSrc = badgeFixSrc;
     # The oled service is stage-2 only (never in the initrd), so it can link the
     # Nix C API dynamically: the shared-.so link takes seconds where the static
     # archive link took ~15 minutes, which is the whole edit-build-deploy loop

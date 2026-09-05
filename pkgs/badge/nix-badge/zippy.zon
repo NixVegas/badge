@@ -1,0 +1,11 @@
+// Zippy configuration for nix-badge.
+.{
+    .lints = .{
+        // The two fix-stub files are not part of THIS compilation on purpose. The
+        // packaging copies them into fix's own src/fetchers/ directory, where they
+        // replace the fetchers that would otherwise pull in libcurl and libgit2,
+        // and they are compiled there as part of fix. Zippy is right that nothing
+        // here references them, but that is the intended arrangement.
+        .dead_file = .{ .severity = .off },
+    },
+}
